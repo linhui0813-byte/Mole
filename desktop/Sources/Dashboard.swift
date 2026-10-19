@@ -169,7 +169,8 @@ struct DashboardView: View {
     private var header: some View {
         HStack {
             HStack(spacing: 10) {
-                Image(systemName: "waveform.path.ecg.rectangle").font(.system(size: 25, weight: .light)).foregroundStyle(Theme.gold)
+                Image(nsImage: DashboardBrand.logo).resizable().scaledToFit()
+                    .frame(width: 36, height: 36).accessibilityLabel("Mole logo")
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Mole Dashboard").font(.system(size: 16, weight: .semibold))
                     Text("Your Mac, at a glance").font(.system(size: 11)).foregroundStyle(Theme.secondary)
@@ -456,9 +457,12 @@ struct DashboardView: View {
 
     private var aboutSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("Mole Dashboard", systemImage: "waveform.path.ecg.rectangle").font(.system(size: 24, weight: .semibold))
+            HStack(spacing: 12) {
+                Image(nsImage: DashboardBrand.logo).resizable().scaledToFit().frame(width: 44, height: 44)
+                Text("Mole Dashboard").font(.system(size: 24, weight: .semibold))
+            }
             Text("A local, read-only Mac dashboard built from Mole’s open-source status collectors.")
-            Text("CPU, memory, disk, network and process data update while the window is open. Hardware details refresh every 30 seconds. A dash means the collector cannot provide that reading.")
+            Text("Readings continue while the app runs, including when its window is closed. Use the Mole menu bar icon to reopen the dashboard, pause readings, or quit. Hardware details refresh every 30 seconds. A dash means the collector cannot provide that reading.")
             Text("Process CPU can exceed 100% when it uses multiple cores. Each table row is one process; memory is resident memory, not an app-wide total.")
             Text("This is an independent local build, not the commercial Mole Mac app. No cleanup, fan control, login item or background service is installed.")
             Link("Mole source and GPL-3.0 license", destination: URL(string: "https://github.com/tw93/Mole")!)

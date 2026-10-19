@@ -36,6 +36,12 @@ Reviewed on 2026-10-19.
   fallback cleans up watchdog sleep`. The watchdog case passed when rerun alone
   after an earlier sandbox-restricted test run finished. Go tests, module loading,
   integration, and installation passed again; the full rerun remains a failed run.
+- Logo and menu bar update: native build, icon resource checks, signature,
+  dashboard isolation, and repository checks passed. Native testing verified
+  window-close persistence, reopening without resuming a deliberate pause,
+  menu Pause/Resume, exactly one collector after Reconnect, and complete cleanup
+  on menu Quit. The latest full suite exited 1 only on the known audit case
+  below; Go, module loading, integration, and installation stages passed.
 
 ## Known upstream audit failure
 

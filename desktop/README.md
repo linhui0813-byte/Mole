@@ -28,11 +28,23 @@ processes, including app helpers. They are not aggregated app totals. Process
 CPU may exceed 100% because 100% represents one CPU core. `ps` CPU is the
 operating system's process accounting value, not a new two-second delta.
 
-Pause stops collection. Resume and Reconnect start a fresh collector. Closing
-the window quits the app and stops its helper; the helper also exits if its
-parent disappears. There is no login item, background service, network server,
-telemetry, cleanup, process termination, or fan control. Subprocesses are launched
-directly with fixed arguments and no authorization prompts.
+The Mole icon stays in the menu bar while the app runs. Closing the dashboard
+window keeps readings running; choose **Show Dashboard** from that icon to reopen
+it. The menu also shows collection status and CPU/memory readings, with
+**Pause readings**, **Resume readings**, **Reconnect collector**, and
+**Quit Mole Dashboard**. Reopening a paused dashboard preserves the pause.
+Pause stops collection; Resume and Reconnect start a fresh collector. Quit
+stops the app and its helper; the helper also exits if its parent disappears.
+There is no login item, launch agent, network server, telemetry, cleanup,
+process termination, or fan control. Subprocesses use fixed arguments and
+no authorization prompts.
+
+The app icon, header, and About panel reuse the original Mole mascot from
+`docs/img/mole-banner.png`; the menu bar uses its monochrome silhouette so macOS
+can tint it for the current menu bar appearance. `desktop/Tools/BuildIcons.swift`
+extracts that artwork and generates the icons during the build, without changing
+the upstream image or adding an image dependency. The source remains credited
+to Tw93 and contributors under the repository's GPL-3.0 license.
 
 The desktop build uses a Go build overlay to substitute its own collector
 entrypoint for `cmd/status/main.go`. All metric collection and parsing code is
@@ -115,5 +127,9 @@ desktop/build/model-contract desktop/build/live-snapshot.json
 The smoke check collects three real snapshots within 35 seconds, checks the
 complete process table, saves a local ignored fixture, then stops its helper.
 The Swift check decodes that real fixture and verifies unavailable readings
-stay distinct from zero. Native UI search, sorting, inspection, pause/resume,
-and close-window cleanup were also verified on macOS 27.0.1, Apple M5.
+stay distinct from zero. Native UI search, sorting, inspection, and pause/resume
+were verified on macOS 27.0.1, Apple M5. Menu bar verification covers closing and
+reopening the window, preserving Pause across reopening, live collection with
+the window closed, Reconnect replacing exactly one helper, and Quit stopping
+both processes. The generated app icon includes 1024-pixel artwork, and the
+menu template has a transparent background and solid mascot pixels.

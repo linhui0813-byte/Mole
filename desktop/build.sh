@@ -10,6 +10,14 @@ APP_DIR="$BUILD_DIR/Mole Dashboard.app"
 mkdir -p "$BUILD_DIR/cache/go" "$BUILD_DIR/cache/swift" \
     "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Helpers" "$APP_DIR/Contents/Resources"
 
+echo 'Preparing the upstream Mole artwork...'
+xcrun swiftc -O -module-cache-path "$BUILD_DIR/cache/swift" \
+    "$DESKTOP_DIR/Tools/BuildIcons.swift" -o "$BUILD_DIR/build-icons"
+"$BUILD_DIR/build-icons" "$REPO_DIR/docs/img/mole-banner.png" "$BUILD_DIR/branding"
+/usr/bin/iconutil -c icns "$BUILD_DIR/branding/MoleDashboard.iconset" \
+    -o "$APP_DIR/Contents/Resources/MoleDashboard.icns"
+cp "$BUILD_DIR/branding/MoleLogo.png" "$BUILD_DIR/branding/MoleMenuTemplate.png" "$APP_DIR/Contents/Resources/"
+
 python3 - "$REPO_DIR" "$BUILD_DIR/overlay.json" << 'PY'
 import json
 import pathlib
@@ -39,6 +47,7 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
 <key>CFBundleName</key><string>Mole Dashboard</string>
 <key>CFBundleDisplayName</key><string>Mole Dashboard</string>
 <key>CFBundleExecutable</key><string>MoleDashboard</string>
+<key>CFBundleIconFile</key><string>MoleDashboard</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>
