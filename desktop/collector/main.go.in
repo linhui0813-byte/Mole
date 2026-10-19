@@ -1,0 +1,113 @@
+// Mole Dashboard is a local, read-only frontend for Mole's GPL-3.0 status collectors.
+// This template replaces cmd/status/main.go only in the desktop build overlay.
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/signal"
+	"slices"
+	"sync"
+	"syscall"
+	"time"
+)
+
+const (
+	refreshInterval      = 2 * time.Second
+	processWatchInterval = refreshInterval
+	slowRefreshInterval  = 30 * time.Second
+)
+
+func processWatchOptionsFromFlags() ProcessWatchOptions {
+	return ProcessWatchOptions{Enabled: false, CPUThreshold: 100, Window: 5 * time.Minute}
+}
+
+// The existing text renderer is compiled alongside the collectors. Keep its
+// main.go utility available even though the desktop never invokes the TUI.
+func activeAlerts(alerts []ProcessAlert) []ProcessAlert {
+	var active []ProcessAlert
+	for _, alert := range alerts {
+		if alert.Status == "active" {
+			active = append(active, alert)
+		}
+	}
+	return active
+}
+
+type desktopSnapshot struct {
+	MetricsSnapshot
+	Processes       []ProcessInfo `json:"processes"`
+	CollectionError string        `json:"collection_error,omitempty"`
+	Enriched        bool          `json:"enriched"`
+}
+
+func main() {
+	if len(os.Args) > 1 {
+		fmt.Fprintln(os.Stderr, "Mole Dashboard collector accepts no arguments")
+		os.Exit(2)
+	}
+	// Reuse the exact upstream process parser, keeping its complete, validated
+	// sample for the desktop table rather than changing the CLI's top-five API.
+	var mu sync.Mutex
+	var processes []ProcessInfo
+	original := collectProcessesFunc
+	collectProcessesFunc = func() (processSample, error) {
+		sample, err := original()
+		if err == nil {
+			mu.Lock()
+			processes = slices.Clone(sample.processes)
+			mu.Unlock()
+		}
+		return sample, err
+	}
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
+	// No collector is allowed to survive a crashed or terminated GUI parent.
+	parent := os.Getppid()
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if os.Getppid() != parent || parent == 1 {
+				os.Exit(0)
+			}
+		}
+	}()
+	collector := NewCollector(processWatchOptionsFromFlags())
+	encoder := json.NewEncoder(os.Stdout)
+	var schedule collectionSchedule
+	enriched := false
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		result := collector.collectMode(schedule.nextMode(time.Now()))
+		delay := schedule.recordCompletion(result, refreshInterval)
+		if result.mode == collectionFull {
+			enriched = true
+		}
+		if !result.data.CollectedAt.IsZero() {
+			mu.Lock()
+			rows := slices.Clone(processes)
+			mu.Unlock()
+			frame := desktopSnapshot{MetricsSnapshot: result.data, Processes: rows, Enriched: enriched}
+			if result.err != nil {
+				frame.CollectionError = result.err.Error()
+			}
+			if encoder.Encode(frame) != nil {
+				return
+			}
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-stop:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
