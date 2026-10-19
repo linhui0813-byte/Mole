@@ -253,7 +253,7 @@ total_items=0
 total_size_cleaned=0
 
 # Simulate 'Enter' for confirmation
-printf '\n' | batch_uninstall_applications
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
 
 grep -q "ENSURE_SUDO:Admin required for Homebrew casks: BrewApp" "$HOME/brew_calls.log"
 grep -q "uninstall --cask brew-app-cask" "$HOME/brew_calls.log" || exit 1
@@ -319,7 +319,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications > "$HOME/brew_shared_output.log" 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > "$HOME/brew_shared_output.log" 2>&1
 
 grep -q "uninstall --cask brewshared-beta" "$HOME/brew_shared_calls.log" || {
     echo "WRONG: plain cask uninstall not invoked"
@@ -391,7 +391,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
 
 grep -q "ENSURE_SUDO:Admin required for Homebrew casks: BrewPreAuth" "$HOME/order.log"
 grep -q "BREW_CALL:uninstall --cask brew-preauth-cask" "$HOME/order.log"
@@ -450,7 +450,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
 
 sleep 0.2
 
@@ -522,7 +522,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1 || true
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > /dev/null 2>&1 || true
 
 [[ -d "$HOME/Applications/BrewBroken.app" ]] || exit 1
 [[ ! -f "$HOME/remove.log" ]]
@@ -587,7 +587,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > /dev/null 2>&1
 
 [[ ! -d "$HOME/Applications/BrewCleanup.app" ]] || exit 1
 grep -q "SAFE_REMOVE:$HOME/Applications/BrewCleanup.app" "$HOME/remove.log"
@@ -645,7 +645,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
 EOF
 
     [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
@@ -702,7 +702,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > /dev/null 2>&1
 
 ! grep -q "UNEXPECTED_ENSURE_SUDO:" "$HOME/dry_run.log" 2> /dev/null
 EOF
@@ -737,6 +737,52 @@ grep -Fx '<bad"; touch "$HOME/pwned"; #>' "$HOME/brew_argv.log"
 EOF
 
     [ "$status" -eq 0 ]
+}
+
+@test "brew_uninstall_cask logs the bundle Homebrew removed" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/brew-oplog.XXXXXX")
+    mkdir -p "$fixture_home/Applications/Logged.app"
+
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF2'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/brew.sh"
+debug_log() { :; }
+get_path_size_kb() { echo "100"; }
+run_with_timeout() { shift; "$@"; }
+is_brew_cask_installed() { return 1; }
+brew() { /bin/rm -rf "$HOME/Applications/Logged.app"; }
+export -f brew
+export MOLE_CURRENT_COMMAND=uninstall
+brew_uninstall_cask "logged-cask" "$HOME/Applications/Logged.app" nozap
+EOF2
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -Fq "] [uninstall] REMOVED $fixture_home/Applications/Logged.app (brew uninstall logged-cask)" \
+        "$fixture_home/Library/Logs/mole/operations.log" || return 1
+}
+
+@test "uninstall logs every keg brew autoremove removed" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF2'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+rm -f "$OPERATIONS_LOG_FILE"
+export MOLE_CURRENT_COMMAND=uninstall
+_batch_log_brew_autoremove "==> Autoremoving 2 unneeded formulae:
+libfoo
+libbar
+Uninstalling /opt/homebrew/Cellar/libfoo/1.2.3... (45 files, 3.2MB)
+==> Uninstalling /opt/homebrew/Cellar/libbar/0.9_1... (3 files, 12KB)
+Warning: something unrelated"
+cat "$OPERATIONS_LOG_FILE"
+EOF2
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"[uninstall] REMOVED /opt/homebrew/Cellar/libfoo/1.2.3 (brew autoremove)"* ]] || return 1
+    [[ "$output" == *"[uninstall] REMOVED /opt/homebrew/Cellar/libbar/0.9_1 (brew autoremove)"* ]] || return 1
+    [ "$(printf '%s\n' "$output" | grep -c 'brew autoremove')" -eq 2 ] || return 1
 }
 
 @test "_detect_cask_via_caskroom_search handles empty uniq array expansion under set -u" {
@@ -919,4 +965,102 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"partial-kept"* ]] || return 1
     [[ "$output" != *"unexpected-info"* ]]
+}
+
+# Runs `uninstall_list_apps` (JSON, since stdout is captured) over three
+# Homebrew-installed apps and one plain app. BREW_INFO_MODE picks how the
+# mocked `brew info --cask` answers a multi-token request.
+run_list_mode_brew_case() {
+    local mode="$1"
+    rm -f "$HOME/brew-calls"
+    mkdir -p "$HOME/Applications/Alpha.app" "$HOME/Applications/Beta.app" \
+        "$HOME/Applications/Gamma.app" "$HOME/Applications/Plain.app"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" BREW_INFO_MODE="$mode" \
+        /bin/bash --noprofile --norc <<'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/uninstall.sh"
+_mole_brew_caskroom_roots() { return 0; }
+brew() {
+    printf '%s\n' "$*" >> "$HOME/brew-calls"
+    local block_alpha block_beta block_gamma
+    # Alpha's block names Beta's path; Beta's own block does not.
+    block_alpha=$(printf '==> alpha: 1.0\n%s\n%s\n' "$HOME/Applications/Alpha.app" "$HOME/Applications/Beta.app")
+    block_beta=$(printf '==> beta (Beta): 2.0\nBeta.app (App)\n')
+    block_gamma=$(printf '==> gamma: 3.0\n%s\n' "$HOME/Applications/Gamma.app")
+    case "$*" in
+        "list --cask") printf '%s\n' alpha beta gamma unrelated ;;
+        "info --cask alpha") printf '%s\n' "$block_alpha" ;;
+        "info --cask beta") printf '%s\n' "$block_beta" ;;
+        "info --cask gamma") printf '%s\n' "$block_gamma" ;;
+        "info --cask "*)
+            case "$BREW_INFO_MODE" in
+                split) printf '%s\n\n%s\n\n%s\n' "$block_alpha" "$block_beta" "$block_gamma" ;;
+                unordered) printf '%s\n\n%s\n\n%s\n' "$block_beta" "$block_alpha" "$block_gamma" ;;
+                failed) printf '%s\n' "$block_alpha"; return 1 ;;
+                timeout) return 124 ;;
+                signal) return 130 ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
+}
+export -f brew
+scan_applications() { printf '%s\n' "$HOME/fake-apps"; }
+load_applications() {
+    apps_data=(
+        "0|$HOME/Applications/Alpha.app|Alpha|com.example.alpha|1KB|Today|1"
+        "0|$HOME/Applications/Beta.app|Beta|com.example.beta|1KB|Today|1"
+        "0|$HOME/Applications/Gamma.app|Gamma|com.example.gamma|1KB|Today|1"
+        "0|$HOME/Applications/Plain.app|Plain|com.example.plain|1KB|Today|1"
+    )
+    return 0
+}
+touch "$HOME/fake-apps"
+rc=0
+uninstall_list_apps || rc=$?
+printf 'rc=%s\n' "$rc"
+INNER
+}
+
+list_mode_info_calls() {
+    grep -c '^info --cask' "$HOME/brew-calls" || true
+}
+
+@test "uninstall --list asks brew info once for every Homebrew candidate" {
+    run_list_mode_brew_case split
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+    [[ "$output" == *"rc=0"* ]] || return 1
+    [[ "$(list_mode_info_calls)" -eq 1 ]] || { cat "$HOME/brew-calls"; return 1; }
+    grep -qx 'info --cask alpha beta gamma' "$HOME/brew-calls" || return 1
+    [[ "$output" == *'"name": "Alpha", "bundle_id": "com.example.alpha", "source": "Homebrew", "uninstall_name": "alpha"'* ]] || return 1
+    [[ "$output" == *'"name": "Gamma", "bundle_id": "com.example.gamma", "source": "Homebrew", "uninstall_name": "gamma"'* ]] || return 1
+    # Beta's path appears only in Alpha's block, which is not Beta's evidence.
+    [[ "$output" == *'"name": "Beta", "bundle_id": "com.example.beta", "source": "App"'* ]] || return 1
+    [[ "$output" == *'"name": "Plain", "bundle_id": "com.example.plain", "source": "App"'* ]]
+}
+
+@test "uninstall --list falls back to per-token brew info when the batch cannot be split" {
+    local mode
+    for mode in unordered failed; do
+        run_list_mode_brew_case "$mode"
+        [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+        [[ "$(list_mode_info_calls)" -eq 4 ]] || { echo "$mode"; cat "$HOME/brew-calls"; return 1; }
+        [[ "$output" == *'"name": "Alpha", "bundle_id": "com.example.alpha", "source": "Homebrew"'* ]] || return 1
+        [[ "$output" == *'"name": "Gamma", "bundle_id": "com.example.gamma", "source": "Homebrew"'* ]] || return 1
+        [[ "$output" == *'"name": "Beta", "bundle_id": "com.example.beta", "source": "App"'* ]] || return 1
+    done
+}
+
+@test "uninstall --list treats a timed-out batch as unknown and cancels on a signal" {
+    run_list_mode_brew_case timeout
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+    [[ "$output" == *"rc=0"* ]] || return 1
+    [[ "$(list_mode_info_calls)" -eq 1 ]] || { cat "$HOME/brew-calls"; return 1; }
+    [[ "$output" != *'"source": "Homebrew"'* ]] || return 1
+
+    run_list_mode_brew_case signal
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+    [[ "$output" == *"rc=130"* ]] || return 1
+    [[ "$output" != *'"name": "Alpha"'* ]] || return 1
+    [[ "$(list_mode_info_calls)" -eq 1 ]]
 }

@@ -16,7 +16,7 @@
   <img src="./docs/img/big-mole.png" alt="Mole 清理成果" width="1000" />
 </p>
 
-> 💡 這個倉庫是免費開源的命令列工具（`mo`），喜歡圖形介面的話可以另外下載 [Mole for Mac](https://mole.fit/)，支援刪除前逐項確認、實測 800 多款軟體的解除安裝殘留、系統維護、逐層分析磁碟空間、即時狀態監控，以及在支援的 Mac 上控制風扇，`brew install mole` 只會安裝命令列工具。
+> 💡 這個倉庫是免費開源的命令列工具（`mo`），喜歡圖形介面的話可以另外下載 [Mole for Mac](https://mole.fit/)，支援刪除前逐項確認、實測 800 多款軟體的解除安裝殘留、系統維護、逐層分析磁碟空間、即時狀態監控，以及在支援的 Mac 上控制風扇，Windows 上對應的原生 App 是 [Mole for Windows](https://mole.fit/tw/windows)，`brew install mole` 只會安裝命令列工具。
 
 ## 功能
 
@@ -49,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/tw93/mole/main/install.sh | bash
 iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
 ```
 
-Mole 只透過 Homebrew、這個 GitHub 倉庫和 Mac 版官網 [mole.fit](https://mole.fit/) 發布，自稱基於 Mole 的其他 App，或要你往終端機貼上一段編碼指令的網站，都和 Mole 無關。
+Mole 只透過 Homebrew、這個 GitHub 倉庫和 Mac 版、Windows 版官網 [mole.fit](https://mole.fit/) 發布，自稱基於 Mole 的其他 App，或要你往終端機貼上一段編碼指令的網站，都和 Mole 無關。
 
 **常用指令**
 
@@ -62,6 +62,7 @@ mo analyze                   # 磁碟空間瀏覽（也可寫 mo analyse）
 mo status                    # 即時系統健康儀表板
 mo purge                     # 清理專案建置產物
 mo installer                 # 尋找並刪除安裝檔
+mo slim                      # 移除通用應用程式裡的 Intel 程式碼
 
 mo touchid                   # 設定終端機 Touch ID 指紋認證
 mo completion                # 設定命令列 Tab 鍵自動補全
@@ -80,6 +81,7 @@ mo uninstall --dry-run
 mo optimize --dry-run
 mo purge --dry-run
 mo installer --dry-run
+mo slim --dry-run
 mo history
 mo history --json
 
@@ -131,11 +133,12 @@ nix profile remove mole
 
 Mole 會刪除檔案，所以會先檢查路徑、保護共用和系統目錄，需要時才請你確認，無法確認安全的項目一律略過或拒絕。
 
-- `clean`、`uninstall`、`purge`、`installer` 與 `remove` 會刪除檔案，可先用 `--dry-run` 預覽，需要時加上 `--debug`
+- `clean`、`uninstall`、`purge`、`installer`、`slim` 與 `remove` 會刪除檔案，可先用 `--dry-run` 預覽，需要時加上 `--debug`
 - 日常執行 **無需 `sudo`**，僅在觸及系統級清理時按需請求管理員權限
-- `mo analyze` 中的刪除操作在確認後預設放入 macOS 垃圾桶
+- `mo uninstall`、`mo analyze` 與 `mo slim` 在確認後預設將刪除項目放入垃圾桶；`clean`、`purge` 與 `installer` 為永久刪除，`mo uninstall --permanent` 可跳過垃圾桶
 - 清理操作記錄在 `~/Library/Logs/mole/operations.log` 中，可透過 `mo history` 查看，或設定 `MO_NO_OPLOG=1` 停用
 - 可透過 `mo clean --whitelist` 保護指定快取，或使用 `mo optimize --whitelist` 排除維護項目
+- 白名單檔案無法讀取時，`clean`、`purge` 和 `optimize` 會直接停止，不會在沒有白名單的情況下繼續執行
 
 漏洞回報方式、安全邊界與目前限制見 [SECURITY.md](SECURITY.md) 與 [SECURITY_AUDIT.md](SECURITY_AUDIT.md)。
 
@@ -145,7 +148,7 @@ Mole 會刪除檔案，所以會先檢查路徑、保護共用和系統目錄，
 
 ### 深度清理（Clean）
 
-`mo clean` 掃描並清理已知可安全刪除的快取、日誌、暫存檔案、開發者工具快取以及已移除應用程式的殘留檔案，預設會清空垃圾桶，想保留就在 `mo clean --whitelist` 裡勾選 Trash，同一個選單也用來保護想留下的快取。選好的項目會寫進 `~/.config/mole/whitelist`，想加自訂路徑時先打開選單按 Enter 儲存一次，再往檔案裡每行追加一個路徑，檔案一旦存在就會取代可選的預設規則，內建安全保護仍然生效。
+`mo clean` 掃描並清理已知可安全刪除的快取、日誌、暫存檔案、開發者工具快取以及已移除應用程式的殘留檔案，預設會清空 `~/.Trash`，想保留就在 `mo clean --whitelist` 裡勾選 Trash，同一個選單也用來保護想留下的快取，各卷的垃圾桶（如 `/Volumes/*/.Trashes`）不會隨之清空。選好的項目會寫進 `~/.config/mole/whitelist`，想加自訂路徑時先打開選單按 Enter 儲存一次，再往檔案裡每行追加一個路徑，檔案一旦存在就會取代可選的預設規則，內建安全保護仍然生效。
 
 ```text
 $ mo clean
@@ -181,7 +184,7 @@ Free space: 223.5GB (+4.5GB)
 
 `mo uninstall` 移除已安裝的應用程式，以及 Mole 能確認屬於這個應用程式的相關檔案，若同一應用程式的另一個已安裝副本仍在使用這些檔案，會自動保留；應用程式此前已被手動刪除的話，執行 `mo clean` 掃描殘留。
 
-設定、外掛等個人資料預設保留，在解除安裝預覽頁按 `D` 可逐項選擇要刪除的資料路徑，解除安裝後若發現 shell、Hook 或 MCP 設定仍參照已刪除的路徑，只提示檔案與行號，不修改設定。
+設定、外掛等個人資料預設保留，在解除安裝預覽頁按 `D` 可逐項選擇要刪除的資料路徑，使用 `mo uninstall --with-data` 時這些資料會預先選取，瀏覽器設定檔與 App Group 容器除外，預覽中單獨列出，仍可按 `D` 保留任一路徑，解除安裝後若發現 shell、Hook 或 MCP 設定仍參照已刪除的路徑，只提示檔案與行號，不修改設定。
 
 ```text
 $ mo uninstall
@@ -223,30 +226,29 @@ Optimize
 PERFORMANCE DIAGNOSIS
   ✓ No sustained high-CPU bottleneck detected
 
-➤ DNS & Spotlight Check
-  → DNS cache flushed
-  → Spotlight index verified
-
 ➤ Finder Cache Refresh
   → QuickLook thumbnails refreshed
   → Icon services cache rebuilt
+
+➤ Network Cache Refresh
+  → DNS cache refreshed
 
 ➤ Database Optimization
   ◎ Close these apps before database optimization: Safari
 
 ➤ Disk Health
-  → Disk verify skipped (set MOLE_ENABLE_DISK_VERIFY=1 to enable)
+  → Disk verify skipped
 
 ======================================================================
 Optimization Complete
-Applied 3 optimizations
-14 unchanged | 3 skipped | 1 unavailable
+Applied 2 optimizations
+13 unchanged | 3 skipped | 1 unavailable
 ======================================================================
 ```
 
 ### 磁碟分析（Analyze）
 
-`mo analyze` 開啟終端機互動式磁碟分析器，支援方向鍵與 Vim 快捷鍵瀏覽、快速過濾、多選標記、Finder 預覽與放入垃圾桶。外接磁碟預設不在概覽中顯示，可執行 `mo analyze /Volumes` 或指定掛載路徑單獨檢視，`mo analyze /private/tmp` 只檢查暫存目錄，不會把它們變成自動清理目標。
+`mo analyze` 開啟終端機互動式磁碟分析器，支援方向鍵與 Vim 快捷鍵瀏覽、快速過濾、多選標記、Finder 預覽與放入垃圾桶。外接磁碟預設不在概覽中顯示，可執行 `mo analyze /Volumes` 或指定掛載路徑單獨檢視，`mo analyze /private/tmp` 只檢查暫存目錄，不會把它們變成自動清理目標。逐一掃描檔案時，共用全部資料區塊的 APFS 複製檔案只計一次，資料夾快速估算仍可能重複計算共用區塊。
 
 以 `+` 結尾的大小是部分掃描裡實際測到的位元組數，`unknown` 表示無法測出大小。因臨時逾時中斷的項目不會覆蓋已有完整快取，後續重新整理可自動補全。macOS 不允許終端機讀取的資料夾會一直標為部分掃描，直到存取權限改變。終端機介面只列出最大的 30 個項目，讀不到的項目可能不在這 30 項裡，但總量仍會標為部分掃描，JSON 格式輸出則包含所有掃描項目。
 
@@ -417,6 +419,10 @@ Removed 5 installers, freed 3.83GB
 ```
 
 </details>
+
+### 應用程式瘦身（Slim）
+
+`mo slim` 在 Apple Silicon Mac 上移除通用應用程式裡的 Intel 程式碼。它會列出歸你所有、以 Developer ID 簽署的應用程式及各自的 Intel 程式碼大小，只處理你選取的應用程式。每個應用程式先在副本上瘦身，只動主程式與自帶簽名的巢狀程式碼，副本保留 Apple Silicon 程式碼並通過程式碼簽名與 Gatekeeper 檢查後才取代原應用程式，原應用程式會放入垃圾桶。App Store 應用程式、Apple 應用程式、設為使用 Rosetta 打開的應用程式、屬於其他使用者的應用程式以及正在執行的應用程式都不會處理。不需要安裝開發工具，應用程式更新後 Intel 程式碼會回來。
 
 ## 快捷啟動器
 

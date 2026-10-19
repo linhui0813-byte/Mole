@@ -1,5 +1,5 @@
 #!/bin/bash
-# Mole self-removal: Homebrew formula, manual binaries, config/cache/logs.
+# Mole self-removal: Homebrew formula, manual binaries, config and cache.
 # Extracted from the `mole` dispatcher, which now only routes.
 
 set -euo pipefail
@@ -26,6 +26,104 @@ _remove_is_mole_launcher() {
         NR >= 256 { exit }
         END { exit !(bash && ((main && version && library) || (alias && dispatch))) }
     ' "$1" 2> /dev/null
+}
+
+# Every removal performed by `mo remove` is a change to the Mac and has to
+# leave one operations.log row (the logs themselves are kept).
+_remove_log_removed() {
+    local path="$1"
+    local detail="${2:-}"
+    if declare -f log_operation > /dev/null 2>&1; then
+        log_operation "${MOLE_CURRENT_COMMAND:-remove}" "REMOVED" "$path" "$detail"
+    fi
+}
+
+# Shell integration written by `mo completion`: one marker line in a shell rc
+# file, and generated Fish completion files. Only these exact paths and this
+# exact marker pattern (MOLE_COMPLETION_LINE_PATTERN, shared with
+# bin/completion.sh) are touched; every other rc line is kept.
+
+# Rc files that still carry a Mole completion entry.
+_remove_completion_rc_files() {
+    local candidate
+    for candidate in \
+        "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" \
+        "$HOME/.config/fish/config.fish"; do
+        [[ -e "$candidate" || -L "$candidate" ]] || continue
+        local target
+        target=$(mole_resolve_link_chain "$candidate") || continue
+        [[ -f "$target" ]] || continue
+        if grep -Eq "$MOLE_COMPLETION_LINE_PATTERN" "$target"; then
+            printf '%s\n' "$candidate"
+        fi
+    done
+}
+
+_remove_completion_fish_files() {
+    local candidate
+    for candidate in \
+        "$HOME/.config/fish/completions/mole.fish" \
+        "$HOME/.config/fish/completions/mo.fish"; do
+        [[ -e "$candidate" || -L "$candidate" ]] || continue
+        printf '%s\n' "$candidate"
+    done
+}
+
+# Remove only Mole's own completion entries. A symlinked rc file is rewritten
+# through its target so the user's dotfile link survives, and the original mode
+# is preserved. Returns nonzero when anything could not be cleaned.
+_remove_completion_integration() {
+    local rc_file target original_mode temp_file grep_rc helper_rc=0
+    while IFS= read -r rc_file; do
+        [[ -n "$rc_file" ]] || continue
+        if ! target=$(mole_resolve_link_chain "$rc_file"); then
+            log_warning "Could not resolve shell completion file: $rc_file"
+            helper_rc=1
+            continue
+        fi
+        original_mode=$("$STAT_BSD" -f '%Mp%Lp' "$target" 2> /dev/null || true)
+        temp_file=$(mktemp "${TMPDIR:-/tmp}/mole-completion-clean.XXXXXX") || {
+            log_warning "Could not prepare a temporary file to clean shell completion in $rc_file"
+            helper_rc=1
+            continue
+        }
+        grep_rc=0
+        grep -Ev "$MOLE_COMPLETION_LINE_PATTERN" "$target" > "$temp_file" || grep_rc=$?
+        if [[ "$grep_rc" -gt 1 ]]; then
+            log_warning "Could not read shell completion entries from $target"
+            rm -f "$temp_file" || true # SAFE: exact mktemp-created scratch file
+            helper_rc=1
+            continue
+        fi
+        # The target is fully resolved, so renaming over it leaves every rc
+        # symlink in the chain pointing at the same file. Resolving only one
+        # link used to replace an intermediate link with a plain file.
+        if ! mv -f "$temp_file" "$target"; then
+            log_warning "Could not remove shell completion from $rc_file"
+            rm -f "$temp_file" || true # SAFE: exact mktemp-created scratch file
+            helper_rc=1
+            continue
+        fi
+        if [[ -n "$original_mode" ]]; then
+            chmod "$original_mode" "$target" 2> /dev/null || true
+        fi
+        _remove_log_removed "$rc_file" "shell completion"
+        log_success "Removed shell completion from $rc_file"
+    done < <(_remove_completion_rc_files)
+
+    local fish_file
+    while IFS= read -r fish_file; do
+        [[ -n "$fish_file" ]] || continue
+        if rm -f "$fish_file"; then # SAFE: exact Fish completion files written by mo completion
+            _remove_log_removed "$fish_file" "fish completion"
+            log_success "Removed Fish completions: $fish_file"
+        else
+            log_warning "Could not remove Fish completions: $fish_file"
+            helper_rc=1
+        fi
+    done < <(_remove_completion_fish_files)
+
+    return "$helper_rc"
 }
 
 # Resolve this install without using directory contents as ownership proof.
@@ -189,6 +287,16 @@ remove_mole() {
                 [[ -f "$alias" ]] && echo -e "  ${GRAY}${ICON_LIST} Would remove: ${alias}${NC}"
             done
         fi
+        local completion_rc
+        while IFS= read -r completion_rc; do
+            [[ -n "$completion_rc" ]] || continue
+            echo -e "  ${GRAY}${ICON_LIST} Would remove: Mole shell completion from $completion_rc${NC}"
+        done < <(_remove_completion_rc_files)
+        local completion_fish
+        while IFS= read -r completion_fish; do
+            [[ -n "$completion_fish" ]] || continue
+            echo -e "  ${GRAY}${ICON_LIST} Would remove: $completion_fish${NC}"
+        done < <(_remove_completion_fish_files)
         [[ -d "$HOME/.cache/mole" ]] && echo -e "  ${GRAY}${ICON_LIST} Would remove: $HOME/.cache/mole${NC}"
         if [[ -d "$remove_config_dir" ]]; then
             if [[ "$remove_config_dir" == "${HOME%/}/.config/mole" ]]; then
@@ -197,7 +305,7 @@ remove_mole() {
                 echo "  ${ICON_LIST} $remove_config_dir (kept for manual review)"
             fi
         fi
-        [[ -d "$HOME/Library/Logs/mole" ]] && echo -e "  ${GRAY}${ICON_LIST} Would remove: $HOME/Library/Logs/mole${NC}"
+        [[ -d "$HOME/Library/Logs/mole" ]] && echo "  ${ICON_LIST} $HOME/Library/Logs/mole (kept, operation history)"
 
         printf '\n%s\n\n' "${GREEN}${ICON_SUCCESS}${NC} Dry run complete, no changes made"
         exit 0
@@ -210,16 +318,52 @@ remove_mole() {
     for install in ${manual_installs[@]+"${manual_installs[@]}"} ${alias_installs[@]+"${alias_installs[@]}"}; do
         echo "  ${ICON_LIST} $install"
     done
+    local completion_rc
+    while IFS= read -r completion_rc; do
+        [[ -n "$completion_rc" ]] || continue
+        echo "  ${ICON_LIST} Mole shell completion in $completion_rc"
+    done < <(_remove_completion_rc_files)
+    local completion_fish
+    while IFS= read -r completion_fish; do
+        [[ -n "$completion_fish" ]] || continue
+        echo "  ${ICON_LIST} $completion_fish"
+    done < <(_remove_completion_fish_files)
     if [[ "$remove_config_dir" == "${HOME%/}/.config/mole" ]]; then
         echo "  ${ICON_LIST} ~/.config/mole (to Trash)"
     elif [[ -d "$remove_config_dir" ]]; then
         echo "  ${ICON_LIST} $remove_config_dir (kept for manual review)"
     fi
     echo "  ${ICON_LIST} ~/.cache/mole"
-    echo "  ${ICON_LIST} ~/Library/Logs/mole"
+    [[ -d "$HOME/Library/Logs/mole" ]] && echo "  ${ICON_LIST} ~/Library/Logs/mole (kept, operation history)"
+    # A read from a non-terminal fails and becomes an empty key, which the
+    # case below treats as Enter: a script or background runner could confirm
+    # removal without user consent. Only a real terminal may answer; tests
+    # opt in through MOLE_TEST_MODE and drive the prompt explicitly.
+    if [[ ! -t 0 && "${MOLE_TEST_MODE:-0}" != "1" ]]; then
+        echo ""
+        log_error "Removal confirmation needs an interactive terminal; Mole was not removed."
+        log_info "Run mo remove from an interactive terminal, or use mo remove --dry-run to preview"
+        exit 1
+    fi
+
     echo -ne "${PURPLE}${ICON_ARROW}${NC} Press ${GREEN}Enter${NC} to confirm, ${GRAY}ESC${NC} to cancel: "
 
-    IFS= read -r -s -n1 key || key=""
+    drain_pending_input # Clean up any pending input before confirmation
+    local key="" key_rc=0
+    IFS= read -r -s -n1 key || key_rc=$?
+    if [[ $key_rc -ne 0 ]]; then
+        # Test fixtures drive the prompt through a pipe and may have
+        # already consumed it; production only reaches here on a real
+        # terminal, where EOF is not consent.
+        if [[ "${MOLE_TEST_MODE:-0}" == "1" ]]; then
+            key=""
+        else
+            echo ""
+            log_error "Could not read the removal confirmation; Mole was not removed."
+            log_info "Run mo remove from an interactive terminal; nothing was changed"
+            exit 1
+        fi
+    fi
     drain_pending_input # Clean up any escape sequence remnants
     case "$key" in
         $'\e')
@@ -261,15 +405,34 @@ remove_mole() {
             continue
         fi
         if [[ ! -w "$(dirname "$install")" ]]; then
-            if [[ "${MOLE_TEST_MODE:-0}" == "1" || "${MOLE_TEST_NO_AUTH:-0}" == "1" ]] || ! sudo rm -f "$install" 2> /dev/null; then
+            if [[ "${MOLE_TEST_MODE:-0}" == "1" || "${MOLE_TEST_NO_AUTH:-0}" == "1" ]]; then
+                log_warning "Could not remove $install: admin access is unavailable in test mode"
                 has_error=true
+            elif ! sudo rm -f "$install"; then
+                log_warning "Could not remove $install"
+                has_error=true
+            else
+                _remove_log_removed "$install" "launcher"
             fi
-        elif ! rm -f "$install" 2> /dev/null; then
+        elif ! rm -f "$install"; then
+            log_warning "Could not remove $install"
             has_error=true
+        else
+            _remove_log_removed "$install" "launcher"
         fi
     done
+    # Shell completion is installed outside the config folder, so removing the
+    # launchers alone hides it rather than taking it out.
+    if ! _remove_completion_integration; then
+        has_error=true
+    fi
     if [[ -d "$HOME/.cache/mole" ]]; then
-        rm -rf "$HOME/.cache/mole" 2> /dev/null || true # SAFE: hardcoded Mole-owned dir, -d guarded
+        if ! rm -rf "$HOME/.cache/mole"; then # SAFE: hardcoded Mole-owned dir, -d guarded
+            log_warning "Could not remove $HOME/.cache/mole"
+            has_error=true
+        else
+            _remove_log_removed "$HOME/.cache/mole" "cache"
+        fi
     fi
     # --config can merge into a shared tree such as ~/.local. Neither known
     # top-level names nor a recursive filename inventory proves ownership.
@@ -277,8 +440,8 @@ remove_mole() {
     if [[ "$remove_config_dir" == "${HOME%/}/.config/mole" && -d "$remove_config_dir" ]]; then
         # The config dir holds user-authored state (whitelist, purge config),
         # which is the one thing here a reinstall cannot rebuild. Move it to
-        # Trash so it stays recoverable (#1346); cache and logs around it are
-        # rebuildable and stay permanent removals. On failure leave it in
+        # Trash so it stays recoverable (#1346); the cache around it is
+        # rebuildable and stays a permanent removal. On failure leave it in
         # place rather than falling back to deletion.
         local config_trash="$HOME/.Trash/mole-config"
         local config_trash_n=1
@@ -292,9 +455,9 @@ remove_mole() {
             log_warning "Could not move $remove_config_dir to Trash; left in place"
         fi
     fi
-    if [[ -d "$HOME/Library/Logs/mole" ]]; then
-        rm -rf "$HOME/Library/Logs/mole" 2> /dev/null || true # SAFE: hardcoded Mole-owned dir, -d guarded
-    fi
+    # ~/Library/Logs/mole stays. operations.log and deletions.log are the
+    # only record of what Mole removed, support answers deletion reports from
+    # them, and Mole Mac reads the same folder for its own history.
 
     local final_message
     if [[ "$has_error" == "true" ]]; then
@@ -304,5 +467,8 @@ remove_mole() {
     fi
     printf '\n%s\n\n' "$final_message"
 
+    if [[ "$has_error" == "true" ]]; then
+        exit 1
+    fi
     exit 0
 }

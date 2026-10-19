@@ -83,8 +83,24 @@ func (m model) Init() tea.Cmd {
 	}
 }
 
-func (m model) scanCmd(path string) tea.Cmd {
+func (m *model) newLiveScanRequest() (int64, *scanPublication) {
+	m.cancelLiveScan()
+	id := nextLiveScanID.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	publication := newScanPublication(ctx, cancel)
+	// Reserve identity before dispatch, including cache reads and commands
+	// that have not begun enumerating yet.
+	m.liveScanID = id
+	m.liveScanCancel = publication.cancel
+	return id, publication
+}
+
+func (m *model) scanCmd(path string) tea.Cmd {
+	id, publication := m.newLiveScanRequest()
 	return func() tea.Msg {
+		if err := publication.ctx.Err(); err != nil {
+			return liveScanStartMsg{id: id, path: path, err: err}
+		}
 		if cached, err := loadCacheFromDisk(path); err == nil {
 			result := scanResult{
 				State:      cached.State,
@@ -94,9 +110,9 @@ func (m model) scanCmd(path string) tea.Cmd {
 				TotalFiles: cached.TotalFiles,
 			}
 			if cached.NeedsRefresh {
-				return scanResultMsg{path: path, result: result, err: nil, stale: true}
+				return scanResultMsg{id: id, path: path, result: result, err: nil, stale: true}
 			}
-			return scanResultMsg{path: path, result: result, err: nil}
+			return scanResultMsg{id: id, path: path, result: result, err: nil}
 		}
 
 		if stale, err := loadStaleCacheFromDisk(path); err == nil {
@@ -107,23 +123,21 @@ func (m model) scanCmd(path string) tea.Cmd {
 				TotalSize:  stale.TotalSize,
 				TotalFiles: stale.TotalFiles,
 			}
-			return scanResultMsg{path: path, result: result, err: nil, stale: true}
+			return scanResultMsg{id: id, path: path, result: result, err: nil, stale: true}
 		}
 
-		return startLiveScanCmd(path, m.filesScanned, m.dirsScanned, m.bytesScanned, m.currentPath)()
+		return startLiveScanCmd(id, path, publication, m.filesScanned, m.dirsScanned, m.bytesScanned, m.currentPath, scanCacheReuse)()
 	}
 }
 
-func (m model) scanFreshCmd(path string) tea.Cmd {
-	return func() tea.Msg {
-		return startLiveScanCmd(path, m.filesScanned, m.dirsScanned, m.bytesScanned, m.currentPath)()
-	}
+func (m *model) scanFreshCmd(path string) tea.Cmd {
+	id, publication := m.newLiveScanRequest()
+	return startLiveScanCmd(id, path, publication, m.filesScanned, m.dirsScanned, m.bytesScanned, m.currentPath, scanCacheReuse)
 }
 
-func (m model) scanBypassingCacheCmd(path string) tea.Cmd {
-	return func() tea.Msg {
-		return startLiveScanCmdWithPolicy(path, m.filesScanned, m.dirsScanned, m.bytesScanned, m.currentPath, scanCacheBypass)()
-	}
+func (m *model) scanBypassingCacheCmd(path string) tea.Cmd {
+	id, publication := m.newLiveScanRequest()
+	return startLiveScanCmd(id, path, publication, m.filesScanned, m.dirsScanned, m.bytesScanned, m.currentPath, scanCacheBypass)
 }
 
 func tickCmd() tea.Cmd {
@@ -248,7 +262,12 @@ func (m *model) finishLiveScan(result scanResult) {
 	} else if selectedPath != "" {
 		m.selectEntryPath(selectedPath)
 	}
-	m.cache[m.path] = historyEntryFromScanResult(m.path, result, m.cache[m.path], false)
+	cached := historyEntryFromScanResult(m.path, result, m.cache[m.path], false)
+	m.cache[m.path] = cached
+	// The view mutates its backing arrays when rows are removed. The writer
+	// shares the immutable history snapshot instead of racing those changes.
+	result.Entries = cached.Entries
+	result.LargeFiles = cached.LargeFiles
 	publication := m.newBackgroundCacheWrite(context.Background(), m.path)
 	if m.scanState == scanComplete && m.totalSize > 0 {
 		if m.overviewSizeCache == nil {
@@ -295,7 +314,7 @@ func (m *model) selectEntryPath(path string) {
 	for i, entry := range m.entries {
 		if entry.Path == path {
 			m.selected = i
-			return
+			break
 		}
 	}
 	m.clampEntrySelection()
@@ -342,6 +361,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.status = fmt.Sprintf("Deleted %d items", msg.count)
 				}
+				if msg.logWarning != "" {
+					m.status += " · " + msg.logWarning
+				}
 
 				// Selective invalidation: only views whose size the delete
 				// changed need a refresh.
@@ -381,18 +403,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = fmt.Sprintf("Deleted %d items", msg.count)
 			}
+			if msg.logWarning != "" {
+				m.status += " · " + msg.logWarning
+			}
 		}
 		return m, nil
 	case scanResultMsg:
-		if msg.path != "" && msg.path != m.path {
-			if msg.err == nil {
-				filteredEntries := filterNonEmptyEntries(msg.result.Entries)
-				result := msg.result
-				result.Entries = filteredEntries
-				m.cache[msg.path] = historyEntryFromScanResult(msg.path, result, m.cache[msg.path], msg.stale)
-			}
+		if msg.id == 0 || msg.id != m.liveScanID || msg.path != m.path {
 			return m, nil
 		}
+		m.cancelLiveScan()
 		m.scanning = false
 		if msg.err != nil {
 			m.status = fmt.Sprintf("Scan failed: %v", msg.err)
@@ -401,6 +421,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		filteredEntries := filterNonEmptyEntries(msg.result.Entries)
 		result := msg.result
 		result.Entries = filteredEntries
+		selectedPath := m.selectedEntryPath()
 		m.entriesAll = filteredEntries
 		m.entries = filteredEntries
 		m.largeFilesAll = msg.result.LargeFiles
@@ -415,6 +436,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// query is empty.
 		m.applyEntryFilter()
 		m.applyLargeFilter()
+		m.selectEntryPath(selectedPath)
 		m.cache[m.path] = historyEntryFromScanResult(m.path, result, m.cache[m.path], msg.stale)
 		if !msg.stale && m.scanState == scanComplete && m.totalSize > 0 {
 			if m.overviewSizeCache == nil {
@@ -446,14 +468,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = scanSummary(m.totalSize, m.scanState)
 		return m, nil
 	case liveScanStartMsg:
-		if msg.path != m.path {
+		if msg.id == 0 || msg.id != m.liveScanID || msg.path != m.path {
 			if msg.cancel != nil {
 				msg.cancel()
 			}
 			return m, nil
 		}
-		m.cancelLiveScan()
 		if msg.err != nil {
+			m.cancelLiveScan()
 			m.scanning = false
 			m.status = fmt.Sprintf("Scan failed: %v", msg.err)
 			return m, nil
@@ -621,15 +643,16 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+			audit := newDeleteAudit(m.selectedPathSizes(pathsToDelete))
 			if len(pathsToDelete) == 1 {
 				targetPath := pathsToDelete[0]
 				m.status = fmt.Sprintf("Deleting %s...", filepath.Base(targetPath))
-				cmd := tea.Batch(deletePathCmd(targetPath, m.deleteCount), m.startTick())
+				cmd := tea.Batch(deletePathCmd(targetPath, m.deleteCount, audit), m.startTick())
 				return m, cmd
 			}
 
 			m.status = fmt.Sprintf("Deleting %d items...", len(pathsToDelete))
-			cmd := tea.Batch(deleteMultiplePathsCmd(pathsToDelete, m.deleteCount), m.startTick())
+			cmd := tea.Batch(deleteMultiplePathsCmd(pathsToDelete, m.deleteCount, audit), m.startTick())
 			return m, cmd
 		case "esc", "q":
 			m.status = "Cancelled"

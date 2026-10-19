@@ -359,6 +359,90 @@ ensure_safety_whitelist_patterns() {
     done
 }
 
+# 0 when the file can be opened for reading. Existing is not enough: a list the
+# user wrote but this process cannot open (mode 000, a privacy denial) is
+# unknown protection, and reading it as empty would clean what it protects.
+mole_file_openable() {
+    { : < "$1"; } 2> /dev/null
+}
+
+# One factual cause and one next action for an exclusion list that cannot be read.
+mole_report_unreadable_whitelist() {
+    local file="$1" label="${2:-whitelist}" reason="${3:-file}"
+    case "$reason" in
+        directory)
+            printf 'Cannot access your %s directory: %s\n' "$label" "${file//[[:cntrl:]]/?}" >&2
+            printf '  Mole stops so nothing you protected is cleaned by mistake. Run: chmod u+rx %q\n' "$file" >&2
+            ;;
+        invalid)
+            printf 'Cannot read your %s: invalid path or broken link: %s\n' "$label" "${file//[[:cntrl:]]/?}" >&2
+            printf '  Mole stops so nothing you protected is cleaned by mistake. Restore this path or its link target before retrying.\n' >&2
+            ;;
+        unknown)
+            printf 'Cannot inspect your %s path: %s\n' "$label" "${file//[[:cntrl:]]/?}" >&2
+            printf '  Mole stops because absence could not be verified. Check access to this path before retrying.\n' >&2
+            ;;
+        *)
+            printf 'Cannot read your %s: %s\n' "$label" "${file//[[:cntrl:]]/?}" >&2
+            printf '  Mole stops so nothing you protected is cleaned by mistake. Run: chmod u+r %q\n' "$file" >&2
+            ;;
+    esac
+}
+
+# 0 = readable file, 1 = confirmed ENOENT, 2 = unknown/invalid. Shell test -f
+# cannot distinguish absence from EACCES or I/O failure. System Perl exposes
+# errno without adding a dependency beyond the existing macOS runtime probes.
+# Inspect parents first so an inaccessible directory names the right repair,
+# and a broken symlink never authorizes defaults or a legacy-list fallback.
+mole_whitelist_file_state() {
+    local file="$1" label="${2:-whitelist}" problem="" probe_rc=0
+    if [[ ! -x /usr/bin/perl ]]; then
+        printf 'Cannot inspect your %s: the system Perl runtime is unavailable.\n' "$label" >&2
+        printf '  Mole stops so nothing you protected is cleaned by mistake. Restore /usr/bin/perl before retrying.\n' >&2
+        return 2
+    fi
+    problem=$(/usr/bin/perl -e '
+        use strict;
+        use warnings;
+        use Errno qw(ENOENT);
+        use Fcntl qw(S_ISDIR S_ISREG S_ISLNK);
+        my $file = shift;
+        sub stop { my ($status, $path) = @_; print $path, "."; exit $status; }
+        $file =~ m{^/} or stop(5, $file);
+        my @parts = grep { length } split m{/}, $file;
+        my $path = "";
+        for my $i (0 .. $#parts) {
+            $path .= "/" . $parts[$i];
+            my @meta = lstat($path);
+            if (!@meta) { stop($! == ENOENT ? 1 : 5, $path); }
+            if (S_ISLNK($meta[2])) {
+                @meta = stat($path);
+                if (!@meta) { stop($! == ENOENT ? 3 : 5, $path); }
+            }
+            if ($i < $#parts) {
+                S_ISDIR($meta[2]) or stop(3, $path);
+                -x $path or stop(2, $path);
+            } else {
+                S_ISREG($meta[2]) or stop(3, $path);
+            }
+        }
+        exit 0;
+    ' -- "$file" 2> /dev/null) || probe_rc=$?
+    # Preserve trailing newlines in a path across command substitution.
+    problem="${problem%.}"
+    case "$probe_rc" in
+        0)
+            mole_file_openable "$file" && return 0
+            mole_report_unreadable_whitelist "$file" "$label"
+            ;;
+        1) return 1 ;;
+        2) mole_report_unreadable_whitelist "$problem" "$label" directory ;;
+        3) mole_report_unreadable_whitelist "$problem" "$label" invalid ;;
+        *) mole_report_unreadable_whitelist "${problem:-$file}" "$label" unknown ;;
+    esac
+    return 2
+}
+
 # Load and validate the invoking user's clean whitelist. Both `clean` and
 # `purge` use safe_remove as their final deletion sink, so they must share the
 # same source of WHITELIST_PATTERNS before either command starts scanning.
@@ -377,7 +461,10 @@ load_mole_whitelist() {
     WHITELIST_WARNINGS=()
 
     local whitelist_file="$MOLE_USER_HOME/.config/mole/whitelist"
-    if [[ -f "$whitelist_file" ]]; then
+    local whitelist_state=0
+    mole_whitelist_file_state "$whitelist_file" || whitelist_state=$?
+    [[ $whitelist_state -ne 2 ]] || return 1
+    if [[ $whitelist_state -eq 0 ]]; then
         local line duplicate existing
         while IFS= read -r line; do
             # shellcheck disable=SC2295
@@ -453,7 +540,37 @@ load_mole_whitelist() {
 # ============================================================================
 # BSD Stat Compatibility
 # ============================================================================
-readonly STAT_BSD="/usr/bin/stat"
+# Every stat call names this path: a PATH stat can be GNU coreutils, whose
+# `-f` prints file-system text that reads as a value (#1196, #1752). Assigned
+# unconditionally on load, so the environment cannot redirect it; not readonly
+# so a test can rebind it to a fixture stub after sourcing.
+STAT_BSD="/usr/bin/stat"
+# Scans whose result depends on BSD find's error format or its handling of
+# File Provider mounts use this path too; GNU findutils earlier in PATH quotes
+# paths in its errors and fails on mounts BSD find walks past.
+FIND_BSD="/usr/bin/find"
+
+# Only complete generated completion lines are owned by Mole. A quoted mention
+# or a mixed command may carry unrelated user settings and must remain intact.
+# Include the previous eval/source forms when normalizing or removing them.
+# shellcheck disable=SC2016 # Match literal shell substitutions in rc files.
+MOLE_COMPLETION_LINE_PATTERN='^[[:space:]]*(# Mole shell completion|if output="\$\((mole|mo) completion (bash|zsh) 2>/dev/null\)"; then eval "\$output"; fi|eval "\$\((mole|mo) completion (bash|zsh)\)"|source <\((mole|mo) completion (bash|zsh)\)|set -l output \((mole|mo) completion fish 2>/dev/null\); and echo "\$output" \| source|(mole|mo) completion fish \| source)[[:space:]]*$'
+
+# Print the final file a symlink chain points at. Renaming a rewritten rc file
+# over this target keeps every link in a dotfile chain; renaming over the first
+# link replaced it with a plain file. Fails on an unreadable link or a cycle.
+mole_resolve_link_chain() {
+    local target="$1"
+    local link hops=0
+    while [[ -L "$target" ]]; do
+        link=$(readlink "$target") || return 1
+        [[ "$link" == /* ]] || link="$(dirname "$target")/$link"
+        target="$link"
+        hops=$((hops + 1))
+        [[ $hops -le 40 ]] || return 1
+    done
+    printf '%s\n' "$target"
+}
 
 # Get file size in bytes
 get_file_size() {
@@ -532,13 +649,15 @@ get_free_space_target() {
     printf '%s\n' "$target"
 }
 
-# Get free disk space on root volume in 1K blocks.
+# Get free disk space in 1K blocks. An omitted path selects the system volume.
 get_free_space_kb() {
-    local target
-    target=$(get_free_space_target)
+    local target="${1:-}"
+    [[ -n "$target" ]] || target=$(get_free_space_target)
 
     local available_kb
-    available_kb=$(command df -Pk "$target" 2> /dev/null | awk 'NR==2 {print $4}' || true)
+    if ! available_kb=$(command df -Pk "$target" 2> /dev/null | awk 'NR==2 {print $4}'); then
+        return 1
+    fi
     if [[ "$available_kb" =~ ^[0-9]+$ ]]; then
         printf '%s\n' "$available_kb"
         return 0
@@ -962,6 +1081,14 @@ mole_is_reverse_dns_bundle_id() {
     [[ "$bundle_id" =~ ^[A-Za-z0-9][-A-Za-z0-9]*(\.[A-Za-z0-9][-A-Za-z0-9]*)+$ ]]
 }
 
+# An executable name a runtime gives every app that does not rename it, so it
+# names no single app: an unrenamed Electron binary is `Electron` everywhere.
+mole_is_shared_runtime_executable() {
+    local lowered=""
+    mole_ascii_lowercase lowered "${1:-}"
+    [[ "$lowered" == "electron" ]]
+}
+
 mole_name_starts_with_bundle_id_boundary() {
     local name="${1##*/}"
     local bundle_id="${2:-}"
@@ -984,9 +1111,11 @@ mole_name_has_bundle_id_boundary() {
 # Colorize an already-formatted human size string by unit.
 colorize_human_size() {
     local size_human="$1"
+    # A lower-bound total ("3.27GB+") takes its unit's color.
+    local size_unit="${size_human%+}"
 
     local size_color=""
-    case "$size_human" in
+    case "$size_unit" in
         *GB) size_color="$RED" ;;
         *MB) size_color="$YELLOW" ;;
         *KB) size_color="$GREEN" ;;

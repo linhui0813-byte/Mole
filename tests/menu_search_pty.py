@@ -98,6 +98,52 @@ def after_partial_escape(master):
     os.write(master, b'zebra')
 
 
+def check_term_without_keypress():
+    # A TERM sent to the menu process alone (not the terminal's process
+    # group) used to wait for the next keypress before the trap ran.
+    with tempfile.TemporaryDirectory(prefix="mole-menu-term-") as home:
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, b'\x28\x00\x78\x00\x00\x00\x00\x00')
+        env = dict(os.environ, HOME=home, TERM="xterm-256color",
+                   MOLE_TEST_MODE="1", MOLE_TEST_NO_AUTH="1", TEST_ROOT=str(root))
+
+        def own_terminal():
+            # bash cannot trap a signal it inherited ignored.
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+        process = subprocess.Popen(
+            ["/bin/bash", "--noprofile", "--norc", "-c", child_script],
+            stdin=slave, stdout=slave, stderr=slave, env=env,
+            preexec_fn=own_terminal)
+        output = b''
+        try:
+            output = read_until(master, output, b'selected', 10)
+            time.sleep(.3)
+            os.kill(process.pid, signal.SIGTERM)
+            deadline = time.monotonic() + 4
+            while process.poll() is None:
+                assert time.monotonic() < deadline, 'menu ignored TERM until a keypress'
+                if select.select([master], [], [], .05)[0]:
+                    try:
+                        output += os.read(master, 65536)
+                    except OSError:
+                        break
+            print('PASS: menu stopped on TERM without a keypress')
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except PermissionError:
+                    process.kill()
+                process.wait(timeout=5)
+            os.close(slave)
+            os.close(master)
+
+
 check_search(paste)
 check_search(fast_typing)
 check_search(after_partial_escape)
+check_term_without_keypress()

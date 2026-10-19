@@ -78,6 +78,43 @@ setup() {
     rm -rf "$test_cache"
 }
 
+@test "clean_service_worker_cache finds depth-two entries with GNU find first in PATH" {
+    local test_cache="$HOME/sw_gnu_find"
+    local stub_bin="$HOME/sw-gnu-bin"
+    mkdir -p "$test_cache/origin_a/cache_one/deeper" "$stub_bin"
+    # GNU find takes -depth as an option with no argument, so the BSD-only
+    # `-depth 2` made it read "2" as a path and fail the whole discovery.
+    cat > "$stub_bin/find" << 'STUB'
+#!/bin/bash
+prev=""
+for arg in "$@"; do
+    if [[ "$prev" == "-depth" && "$arg" =~ ^[0-9]+$ ]]; then
+        echo "find: paths must precede expression: '$arg'" >&2
+        exit 1
+    fi
+    prev="$arg"
+done
+exec /usr/bin/find "$@"
+STUB
+    chmod +x "$stub_bin/find"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$stub_bin:$PATH" CACHE="$test_cache" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+DRY_RUN=true
+PROTECTED_SW_DOMAINS=(capcut.com)
+record_dry_run_cleanup_target() { echo "RECORD:$1"; }
+clean_service_worker_cache "TestBrowser" "$CACHE"
+EOF
+
+    rm -rf "$test_cache" "$stub_bin"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"RECORD:$test_cache/origin_a/cache_one"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"RECORD:$test_cache/origin_a/cache_one/deeper"* ]] || { echo "$output"; return 1; }
+}
+
 @test "clean_service_worker_cache protects specified domains" {
     local test_cache="$HOME/test_sw_cache"
     mkdir -p "$test_cache/abc123_https_capcut.com_0"
@@ -387,6 +424,49 @@ EOF
     [ "$status" -eq 0 ]
 
     rm -rf "$HOME/Projects"
+}
+
+@test "clean_project_caches skips an unwalkable CloudStorage root before scanning it" {
+    mkdir -p "$HOME/Library/CloudStorage/Drive/project/.next/cache"
+    mkdir -p "$HOME/Projects/app/.next/cache"
+    touch "$HOME/Library/CloudStorage/Drive/project/package.json" \
+        "$HOME/Library/CloudStorage/Drive/project/.next/cache/cloud.cache" \
+        "$HOME/Projects/app/package.json" "$HOME/Projects/app/.next/cache/local.cache"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+DRY_RUN=true
+real_find="$FIND_BSD"
+find_stub="$HOME/find-stub.sh"
+{
+    printf '#!/bin/bash\n'
+    printf 'printf "%%s\\n" "$*" >> "$HOME/find-calls"\n'
+    printf 'for arg in "$@"; do\n'
+    printf '    if [[ "$arg" == *"/Library/CloudStorage"* ]]; then\n'
+    printf '        printf "find: %%s: Operation not permitted\\n" "$arg" >&2\n'
+    printf '        exit 1\n'
+    printf '    fi\n'
+    printf 'done\n'
+    printf 'exec %q "$@"\n' "$real_find"
+} > "$find_stub"
+chmod +x "$find_stub"
+FIND_BSD="$find_stub"
+clean_project_caches
+EOF
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+    [ -f "$HOME/find-calls" ] || { printf '%s\n' "$output"; return 1; }
+    # The CloudStorage root is decided by the depth-two precheck and never
+    # handed to the depth-nine scan.
+    [ "$(grep -c -- '/Library/CloudStorage' "$HOME/find-calls")" -eq 1 ] || { cat "$HOME/find-calls"; return 1; }
+    grep -q -- '-maxdepth 2' "$HOME/find-calls" || { cat "$HOME/find-calls"; return 1; }
+    # The readable projects root keeps its normal depth-nine scan.
+    grep -q -- "$HOME/Projects.*-maxdepth 9" "$HOME/find-calls" || { cat "$HOME/find-calls"; return 1; }
+    # Coverage loss is still reported once as a skipped root.
+    [[ "$output" == *"skipped 1 slow/incomplete root scan"* ]] || { printf '%s\n' "$output"; return 1; }
+
+    rm -rf "$HOME/Library/CloudStorage" "$HOME/Projects" "$HOME/find-calls" "$HOME/find-stub.sh"
 }
 
 @test "clean_project_caches groups pycache directories by project root" {
@@ -1078,7 +1158,7 @@ touch "$repo/pyproject.toml" "$repo/Svc/p/__pycache__/m.pyc" "$repo/Svc/q/__pyca
 git init -q "$repo"
 git -C "$repo" add -f Svc/p/__pycache__/m.pyc
 # A plain mv leaves the index with the old spelling and git status clean.
-mv "$repo/Svc" "$repo/svc"
+/bin/mv "$repo/Svc" "$repo/svc"
 cache="$repo/svc/p/__pycache__"
 
 # Discovery: the listing prefix and the spelling on disk differ only in case.
@@ -1146,6 +1226,7 @@ set -euo pipefail
 printf '%s\n' "$HOME/CustomProjects" > "$HOME/.config/mole/purge_paths"
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/caches.sh"
+FIND_BSD=find  # route the scan through the stub
 run_with_timeout() { shift; "$@"; }
 safe_clean() { echo "$2|$1"; }
 safe_clean_guarded() { shift; safe_clean "$@"; }
@@ -1287,6 +1368,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/caches.sh"
+FIND_BSD=find  # route the scan through the stub
 roots=$(discover_project_cache_roots)
 printf '%s\n' "$roots"
 printf 'COUNT=%s\n' "$(printf '%s\n' "$roots" | sed '/^$/d' | wc -l | tr -d ' ')"
@@ -1327,6 +1409,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/caches.sh"
+FIND_BSD=find  # route the scan through the stub
 MO_TIMEOUT_BIN=""
 MO_TIMEOUT_PERL_BIN="${MO_TIMEOUT_PERL_BIN:-$(command -v perl)}"
 export MOLE_PROJECT_CACHE_DISCOVERY_TIMEOUT=0.5
@@ -1513,6 +1596,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/caches.sh"
+FIND_BSD=find  # route the scan through the stub
 SECONDS=0
 scan_rc=0
 scan_project_cache_root "$HOME/Projects" "$OUTPUT_FILE" || scan_rc=$?
@@ -1601,4 +1685,35 @@ EOF
     [ "$status" -eq 0 ]
 
     rm -rf "$HOME/Projects"
+}
+
+@test "project cache and hint scans ignore a failing find earlier in PATH" {
+    local stub_bin="$HOME/gnu-find-scan-bin"
+    local root="$HOME/gnu-scan-root"
+    mkdir -p "$stub_bin" "$root/app/.next" "$root/other"
+    # GNU find failed on a File Provider mount BSD find walks past, and the
+    # whole root was then counted as a failed scan.
+    printf '#!/bin/bash\necho "find: Operation timed out" >&2\nexit 1\n' > "$stub_bin/find"
+    chmod +x "$stub_bin/find"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$stub_bin:$PATH" ROOT="$root" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/hints.sh"
+rc=0
+scan_project_cache_root "$ROOT" "$HOME/gnu-scan.out" || rc=$?
+echo "SCAN_RC=$rc"
+cat "$HOME/gnu-scan.out"
+rc=0
+hint_collect_child_dirs_with_timeout "$ROOT" "$HOME/gnu-children.out" 5 || rc=$?
+echo "HINT_RC=$rc"
+tr '\0' '\n' < "$HOME/gnu-children.out"
+EOF
+    rm -rf "$stub_bin" "$root"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"SCAN_RC=0"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"$root/app/.next"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"HINT_RC=0"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"$root/other"* ]] || { echo "$output"; return 1; }
 }

@@ -379,6 +379,30 @@ EOF
     [[ "$output" == *'refresh-interruption-cleaned no-later-row'* ]] || return 1
 }
 
+@test "detached metadata refresh writes debug lines to the session log users send" {
+    # A script file, not stdin: the detached refresh forks while bash is still
+    # reading its own script, and a shared stdin offset would truncate it.
+    cat > "$HOME/refresh-debug.sh" <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/uninstall.sh"
+trap - EXIT INT TERM
+export MO_DEBUG=1
+mkdir -p "$MOLE_UNINSTALL_META_CACHE_DIR" "$HOME/First.app"
+printf 'original-cache\n' > "$MOLE_UNINSTALL_META_CACHE_FILE"
+chmod 444 "$MOLE_UNINSTALL_META_CACHE_FILE"
+printf '%s|1|org.example.App|First|%s\n' "$HOME/First.app" "$MOLE_UNINSTALL_LANGUAGE_SIGNATURE" > "$HOME/refresh"
+disown() { :; }
+start_uninstall_metadata_refresh "$HOME/refresh" || exit 1
+wait "$!" || true
+grep -q 'metadata-refresh\] Cache file not writable' "$HOME/Library/Logs/mole/mole_debug_session.log" || { printf 'refresh debug line missing from session log\n'; exit 1; }
+[[ ! -e "$HOME/.config/mole/mole_debug_session.log" ]] || { printf 'refresh debug line went to the config dir\n'; exit 1; }
+printf 'refresh-debug-in-session-log\n'
+EOF
+    run /bin/bash "$HOME/refresh-debug.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'refresh-debug-in-session-log'* ]] || return 1
+}
+
 @test "first uninstall inventory snapshot matches live discovery and preserves its generation" {
     create_test_app_bundle "$HOME/Applications/Test.app" com.example.Test Test
     run /bin/bash <<'EOF'
@@ -415,7 +439,7 @@ EOF
 	# and display name, plus a matching language signature, are the conditions
 	# the awk classifier and
 	# use_cached_scan_metadata require for the cached branch to "stick".
-	app_mtime="$(stat -f %m "$apps_root/TestApp.app")"
+	app_mtime="$(/usr/bin/stat -f %m "$apps_root/TestApp.app")"
 	done_marker="$HOME/scan.done"
 
 	# The bug not only emits "unbound variable"; the spinner subshell can
@@ -507,7 +531,7 @@ EOF
 	mkdir -p "$app_path/Contents/Resources/en.lproj"
 	printf '"CFBundleDisplayName" = "VideoFusion";\n' \
 		> "$app_path/Contents/Resources/en.lproj/InfoPlist.strings"
-	app_mtime="$(stat -f %m "$app_path")"
+	app_mtime="$(/usr/bin/stat -f %m "$app_path")"
 
 	bin_dir="$HOME/bin"
 	mkdir -p "$bin_dir"

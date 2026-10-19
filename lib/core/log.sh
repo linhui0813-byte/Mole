@@ -47,12 +47,27 @@ _mole_prepare_log_append() {
     ensure_user_file "$1"
 }
 
+# Surface audit-log write failures once per session. operations.log and
+# deletions.log are what support reads after a reported deletion; a write
+# that fails quietly (root-owned file from an earlier sudo run, ENOSPC, a
+# read-only volume) leaves no trail and no hint that it is missing.
+_mole_warn_log_broken() {
+    [[ -n "${_MOLE_DELETE_LOG_WARNED:-}" ]] && return 0
+    _MOLE_DELETE_LOG_WARNED=1
+    export _MOLE_DELETE_LOG_WARNED
+    printf 'Warning: audit log unavailable (%s). Forensic trail incomplete this session.\n' "$1" >&2
+}
+
 append_log_line() {
     local file_path="$1"
     local line="${2:-}"
 
     if [[ "$file_path" == "$OPERATIONS_LOG_FILE" ]]; then
         _mole_escape_log_value line "$line"
+        _mole_prepare_log_append "$file_path" 2> /dev/null || true
+        printf '%s\n' "$line" >> "$file_path" 2> /dev/null ||
+            _mole_warn_log_broken "write to: $file_path"
+        return 0
     fi
     _mole_prepare_log_append "$file_path"
     printf '%s\n' "$line" >> "$file_path" 2> /dev/null || true
@@ -62,18 +77,20 @@ append_log_lines() {
     local file_path="$1"
     shift
 
-    _mole_prepare_log_append "$file_path"
     if [[ "$file_path" == "$OPERATIONS_LOG_FILE" ]]; then
+        _mole_prepare_log_append "$file_path" 2> /dev/null || true
         local record
         local -a operation_records=()
         for record in "$@"; do
             _mole_escape_log_value record "$record"
             operation_records+=("$record")
         done
-        printf '%s\n' "${operation_records[@]+"${operation_records[@]}"}" >> "$file_path" 2> /dev/null || true
-    else
-        printf '%s\n' "$@" >> "$file_path" 2> /dev/null || true
+        printf '%s\n' "${operation_records[@]+"${operation_records[@]}"}" >> "$file_path" 2> /dev/null ||
+            _mole_warn_log_broken "write to: $file_path"
+        return 0
     fi
+    _mole_prepare_log_append "$file_path"
+    printf '%s\n' "$@" >> "$file_path" 2> /dev/null || true
 }
 
 # Rotate log file if it exceeds maximum size
@@ -245,12 +262,18 @@ oplog_enabled() {
 # child shell. Marker-less commands retain their existing log format.
 _MOLE_OPLOG_RUN_ID="${_MOLE_OPLOG_RUN_ID:-}"
 _MOLE_OPLOG_RUN_COMMAND="${_MOLE_OPLOG_RUN_COMMAND:-}"
+_MOLE_OPLOG_RUN_DRY="${_MOLE_OPLOG_RUN_DRY:-}"
 
 # Write the command field into the caller's variable without a per-record
 # subshell. Session markers and batched operations share this same format.
+# A dry-run session names its command `<command>-dry-run`, so a preview never
+# reads as a real run in mo history, Mole Mac or a support diagnostic. Every
+# reader accepts that token as a command name; a word added anywhere else in
+# the marker would break their fixed marker grammar.
 operation_log_command() {
     local _mole_log_output="$1" _mole_log_command="$2"
     if [[ "$_mole_log_command" == "$_MOLE_OPLOG_RUN_COMMAND" && -n "$_MOLE_OPLOG_RUN_ID" ]]; then
+        [[ "$_MOLE_OPLOG_RUN_DRY" == "1" ]] && _mole_log_command+="-dry-run"
         printf -v "$_mole_log_output" '%s run=%s' "$_mole_log_command" "$_MOLE_OPLOG_RUN_ID"
     else
         printf -v "$_mole_log_output" '%s' "$_mole_log_command"
@@ -288,7 +311,7 @@ log_operation() {
 # Log session start marker
 # Usage: log_operation_session_start <command>
 log_operation_session_start() {
-    export _MOLE_OPLOG_RUN_ID="" _MOLE_OPLOG_RUN_COMMAND=""
+    export _MOLE_OPLOG_RUN_ID="" _MOLE_OPLOG_RUN_COMMAND="" _MOLE_OPLOG_RUN_DRY=""
     oplog_enabled || return 0
 
     local command="${1:-mole}"
@@ -298,6 +321,7 @@ log_operation_session_start() {
     # scratch file. The identity remains opaque to readers.
     export _MOLE_OPLOG_RUN_ID="${timestamp//[!0-9]/}-$$-$RANDOM-$RANDOM"
     export _MOLE_OPLOG_RUN_COMMAND="$command"
+    [[ "${MOLE_DRY_RUN:-0}" == "1" ]] && export _MOLE_OPLOG_RUN_DRY=1
     local log_command
     operation_log_command log_command "$command"
 
@@ -313,7 +337,7 @@ log_operation_session_end() {
     operation_log_command log_command "$command"
     # Ownership ends even when the optional end marker is disabled or fails.
     if [[ "$command" == "$_MOLE_OPLOG_RUN_COMMAND" ]]; then
-        export _MOLE_OPLOG_RUN_ID="" _MOLE_OPLOG_RUN_COMMAND=""
+        export _MOLE_OPLOG_RUN_ID="" _MOLE_OPLOG_RUN_COMMAND="" _MOLE_OPLOG_RUN_DRY=""
     fi
     oplog_enabled || return 0
 

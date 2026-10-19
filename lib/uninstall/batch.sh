@@ -2,6 +2,13 @@
 
 set -euo pipefail
 
+# Bundle-supplied display names can carry terminal control bytes. These render
+# sites only sanitize the text they print; stored names and every matching or
+# removal decision keep the original bytes.
+_uninstall_display_text() {
+    mole_terminal_safe_text "${1:-}"
+}
+
 # Ensure common.sh is loaded.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [[ -z "${MOLE_COMMON_LOADED:-}" ]] && source "$SCRIPT_DIR/lib/core/common.sh"
@@ -217,9 +224,13 @@ format_uninstall_preview_path() {
     local display_path="${path/#$HOME/$tilde}"
     local size_kb="0"
     local size_rc=0
-    size_kb=$(get_path_size_kb "$path" 2> /dev/null) || size_rc=$?
-    mole_rc_timeout_or_signal "$size_rc" && return "$size_rc"
-    [[ $size_rc -eq 0 ]] || size_kb="0"
+    if [[ $# -gt 1 ]]; then
+        size_kb="$2"
+    else
+        size_kb=$(get_path_size_kb "$path" 2> /dev/null) || size_rc=$?
+        mole_rc_timeout_or_signal "$size_rc" && return "$size_rc"
+        [[ $size_rc -eq 0 ]] || size_kb="0"
+    fi
 
     if [[ "$size_kb" =~ ^[0-9]+$ && "$size_kb" -gt 0 ]]; then
         printf '%s %s, %s%s' "$display_path" "$GRAY" "$(bytes_to_human "$((size_kb * 1024))")" "$NC"
@@ -364,6 +375,10 @@ bootout_login_item_helpers() {
         run_with_timeout "$MOLE_TIMEOUT_MEDIUM_PROBE_SEC" launchctl \
             bootout "gui/$uid/$helper_id" > /dev/null 2>&1 || bootout_rc=$?
         mole_rc_timeout_or_signal "$bootout_rc" && return "$bootout_rc"
+        if [[ $bootout_rc -eq 0 ]]; then
+            log_operation "${MOLE_CURRENT_COMMAND:-uninstall}" "REMOVED" \
+                "gui/$uid/$helper_id" "launchctl bootout"
+        fi
     done <<< "$helper_ids"
     return 0
 }
@@ -425,6 +440,9 @@ unload_launch_plist() {
             unload "$plist" > /dev/null 2>&1 || unload_rc=$?
     fi
     mole_rc_timeout_or_signal "$unload_rc" && return "$unload_rc"
+    if [[ $unload_rc -eq 0 ]]; then
+        log_operation "${MOLE_CURRENT_COMMAND:-uninstall}" "REMOVED" "$plist" "launchctl unload"
+    fi
     return 0
 }
 
@@ -619,9 +637,10 @@ remove_login_item() {
             local escaped_name="${clean_name//\\/\\\\}"
             escaped_name="${escaped_name//\"/\\\"}"
 
-            local login_item_rc=0
-            run_with_timeout "$MOLE_TIMEOUT_MEDIUM_PROBE_SEC" osascript \
-                > /dev/null 2>&1 <<- EOF || login_item_rc=$?
+            local login_item_rc=0 deleted_count=""
+            deleted_count=$(
+                run_with_timeout "$MOLE_TIMEOUT_MEDIUM_PROBE_SEC" osascript 2> /dev/null <<- EOF
+				set deletedCount to 0
 				tell application "System Events"
 				    try
 				        set itemCount to count of login items
@@ -631,15 +650,37 @@ remove_login_item() {
 				                set itemName to name of login item i
 				                if itemName is "$escaped_name" then
 				                    delete login item i
+				                    set deletedCount to deletedCount + 1
 				                end if
 				            end try
 				        end repeat
 				    end try
 				end tell
+				return deletedCount
 			EOF
+            ) || login_item_rc=$?
             mole_rc_timeout_or_signal "$login_item_rc" && return "$login_item_rc"
+            if [[ $login_item_rc -eq 0 && "$deleted_count" =~ ^[1-9][0-9]*$ ]]; then
+                log_operation "${MOLE_CURRENT_COMMAND:-uninstall}" "REMOVED" "$clean_name" "login item"
+            fi
         fi
     fi
+}
+
+# A container survives a removal in two shapes: an emptied root that
+# containermanagerd keeps (only its metadata plist left), or the whole
+# container because macOS denied the move. Only the first is a stub. An
+# unlistable or slow root is not proof of emptiness. Returns 0 for a stub,
+# 1 otherwise, and a signal status unchanged.
+_uninstall_container_is_stub() {
+    local container="$1"
+    [[ -f "$container/.com.apple.containermanagerd.metadata.plist" ]] || return 1
+    local entry="" scan_rc=0
+    entry=$(run_with_timeout "$MOLE_TIMEOUT_QUICK_DETECT_SEC" find "$container" \
+        -mindepth 1 -maxdepth 1 ! -name ".com.apple.containermanagerd.metadata.plist" \
+        -print -quit 2> /dev/null) || scan_rc=$?
+    mole_rc_signal "$scan_rc" && return "$scan_rc"
+    [[ $scan_rc -eq 0 && -z "$entry" ]]
 }
 
 # Remove files (handles symlinks, optional sudo).
@@ -711,7 +752,10 @@ remove_file_list() {
         local validation_rc=0
         validate_path_for_deletion "$file" || validation_rc=$?
         mole_rc_timeout_or_signal "$validation_rc" && return "$validation_rc"
-        [[ $validation_rc -eq 0 ]] || continue
+        if [[ $validation_rc -ne 0 ]]; then
+            log_operation "${MOLE_CURRENT_COMMAND:-uninstall}" "SKIPPED" "$file" "${_MOLE_VALIDATION_REASON:-protected}"
+            continue
+        fi
 
         local launch_agent=false
         local launch_agent_identity=""
@@ -918,6 +962,34 @@ _MOLE_UNINSTALL_LIVE_VOLUMES_ROOT="/Volumes"
 # 3 is safe to add to the 0/1/124/128+ set these scans already speak.
 readonly MOLE_UNINSTALL_SCAN_PARTIAL=3
 
+# The first path a partial same-bundle scan could not read, so the preview can
+# name it instead of saying "some paths". One per app; reset by the caller.
+_MOLE_UNINSTALL_SCAN_UNREADABLE=""
+
+# Prints the path from the first "find: <path>: Permission denied" (or
+# "Operation not permitted") line of a find error file, ignoring the
+# timeout-backend preamble. Returns 1 when no such line exists.
+_uninstall_first_unreadable_path() {
+    local error_file="$1" line="" path=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            'find: '*': Permission denied')
+                path="${line#find: }"
+                path="${path%: Permission denied}"
+                ;;
+            'find: '*': Operation not permitted')
+                path="${line#find: }"
+                path="${path%: Operation not permitted}"
+                ;;
+            *) continue ;;
+        esac
+        [[ -n "$path" ]] || continue
+        printf '%s\n' "$path"
+        return 0
+    done < "$error_file"
+    return 1
+}
+
 _uninstall_materialize_complete_find0() {
     local output_file="$1"
     local deadline_seconds="$2"
@@ -938,7 +1010,7 @@ _uninstall_materialize_complete_find0() {
         # (#1339, #1340).
         local scan_errors=""
         scan_errors=$(create_temp_file) || return 2
-        run_with_timeout "$scan_timeout" find "$@" -print0 \
+        run_with_timeout "$scan_timeout" "$FIND_BSD" "$@" -print0 \
             < /dev/null > "$output_file" 2> "$scan_errors" || scan_rc=$?
         if [[ "${MO_DEBUG:-0}" == "1" && $scan_rc -ne 0 ]]; then
             local scan_error_detail=""
@@ -960,6 +1032,9 @@ _uninstall_materialize_complete_find0() {
             # Partial view: the listing is real but not exhaustive, so it can
             # support "something is there" and never "nothing is there".
             scan_rc="$MOLE_UNINSTALL_SCAN_PARTIAL"
+            if [[ -z "$_MOLE_UNINSTALL_SCAN_UNREADABLE" ]]; then
+                _MOLE_UNINSTALL_SCAN_UNREADABLE=$(_uninstall_first_unreadable_path "$scan_errors") || true
+            fi
         fi
         rm -f -- "$scan_errors" 2> /dev/null || true # SAFE: exact tracked temp file created above
     fi
@@ -1224,6 +1299,27 @@ _uninstall_volume_is_unreachable_share() {
     [[ $probe_rc -eq 0 ]]
 }
 
+# A folder under /Volumes that sits on the same device as /Volumes itself is
+# not a mount point, so no disk is attached there (Time Machine leaves root
+# 0111 "Backups of <Mac>" folders behind after network backups, #1735). When
+# it is also unreadable it is left out instead of making the scan incomplete;
+# an unreadable mounted volume still does. Unknown metadata keeps the entry.
+_uninstall_volume_is_unmounted_unreadable_folder() {
+    local entry="$1"
+    local deadline_seconds="$2"
+    [[ -d "$entry" && ! -L "$entry" ]] || return 1
+    [[ ! -r "$entry" || ! -x "$entry" ]] || return 1
+    local probe_timeout="" devices="" probe_rc=0
+    probe_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_MEDIUM_PROBE_SEC" "$deadline_seconds") || return 1
+    devices=$(run_with_timeout "$probe_timeout" "$STAT_BSD" -f '%d' \
+        "$entry" "$_MOLE_UNINSTALL_LIVE_VOLUMES_ROOT" < /dev/null 2> /dev/null) || probe_rc=$?
+    [[ $probe_rc -ge 128 ]] && return "$probe_rc"
+    [[ $probe_rc -eq 0 && "$devices" == *$'\n'* ]] || return 1
+    local entry_device="${devices%%$'\n'*}"
+    local root_device="${devices#*$'\n'}"
+    [[ "$entry_device" =~ ^[0-9]+$ && "$entry_device" == "$root_device" ]]
+}
+
 # Return 0 for one or more other live installs, 1 only for a complete
 # proof of absence, 2 for incomplete/unknown state, and preserve signals.
 # A deadline timeout degrades to MOLE_UNINSTALL_SCAN_PARTIAL: out of budget
@@ -1235,6 +1331,7 @@ uninstall_live_bundle_has_other_install() {
     local selected_path="$2"
     _MOLE_UNINSTALL_LIVE_SIBLING_FINGERPRINT=""
     _MOLE_UNINSTALL_LIVE_SIBLING_PATHS=()
+    _MOLE_UNINSTALL_SCAN_UNREADABLE=""
     mole_is_reverse_dns_bundle_id "$bundle_id" || return 1
 
     local deadline_seconds=$((SECONDS + (2 * MOLE_TIMEOUT_DISK_VERIFY_SEC)))
@@ -1287,7 +1384,7 @@ uninstall_live_bundle_has_other_install() {
             local snapshot_metadata="" snapshot_rc=0 metadata_timeout
             metadata_timeout=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_MEDIUM_PROBE_SEC" "$deadline_seconds") || snapshot_rc=$?
             if [[ $snapshot_rc -eq 0 ]]; then
-                snapshot_metadata=$(run_with_timeout "$metadata_timeout" stat -f '%u:%d' \
+                snapshot_metadata=$(run_with_timeout "$metadata_timeout" "$STAT_BSD" -f '%u:%d' \
                     "$snapshot_root" "$_MOLE_UNINSTALL_LIVE_VOLUMES_ROOT" < /dev/null 2> /dev/null) || snapshot_rc=$?
             fi
             if [[ $snapshot_rc -ge 128 ]]; then
@@ -1341,6 +1438,17 @@ uninstall_live_bundle_has_other_install() {
                     "$deadline_seconds" || share_rc=$?
                 if [[ $share_rc -eq 0 ]]; then
                     debug_log "Skipping unreachable network share: $(mole_terminal_safe_text "$volume_entry")"
+                    continue
+                elif [[ $share_rc -ge 128 ]]; then
+                    eval "$restore_glob_options"
+                    rm -f -- "$volume_roots_file" "$scan_file" "$pkg_paths_file" 2> /dev/null || true # SAFE: exact tracked temp files created above
+                    return "$share_rc"
+                fi
+                share_rc=0
+                _uninstall_volume_is_unmounted_unreadable_folder "$volume_entry" \
+                    "$deadline_seconds" || share_rc=$?
+                if [[ $share_rc -eq 0 ]]; then
+                    debug_log "Skipping unreadable folder that is not a mounted volume: $(mole_terminal_safe_text "$volume_entry")"
                     continue
                 elif [[ $share_rc -ge 128 ]]; then
                     eval "$restore_glob_options"
@@ -1405,7 +1513,8 @@ uninstall_live_bundle_has_other_install() {
         local scan_rc=0
         _uninstall_materialize_complete_find0 "$scan_file" \
             "$deadline_seconds" "$root" -maxdepth 3 \
-            \( -type d -o -type l \) -iname '*.app' || scan_rc=$?
+            \( -type d -name '.*' ! -iname '*.app' ! -path "$root" -prune \) -o \
+            \( \( -type d -o -type l \) -iname '*.app' \) || scan_rc=$?
         if [[ $scan_rc -eq $MOLE_UNINSTALL_SCAN_PARTIAL ]]; then
             debug_log "Sibling application root scan incomplete (exit $scan_rc): $(mole_terminal_safe_text "$root")"
             # Unreadable subpaths under an app root. The apps this listing did
@@ -1617,6 +1726,21 @@ _uninstall_strip_version_suffix_into() {
     printf -v "$1" '%s' "$_strip_value"
 }
 
+# The preview's "is this app running" probe. CFBundleExecutable comes from the
+# bundle, and pgrep reads it as an ERE, so escape it to a literal before the
+# probe: a crafted ".*" would otherwise report every process as this app. An
+# empty or control-byte name cannot be probed safely, so it reports nothing
+# here; force_kill_app has its own guard and refuses to signal that name.
+_uninstall_app_running_by_executable() {
+    local app_name="$1"
+    local exec_name="$2"
+    local escaped=""
+
+    mole_is_shared_runtime_executable "$exec_name" && return 1
+    escaped=$(_mole_process_pattern_literal "${exec_name:-$app_name}") || return 1
+    pgrep -qx "$escaped" 2> /dev/null
+}
+
 # Internal helpers for batch_uninstall_applications. They read and write
 # locals declared in the orchestrator's scope via bash dynamic scoping; do
 # not call them outside batch_uninstall_applications.
@@ -1797,7 +1921,13 @@ _batch_scan_app_details_impl() {
             live_sibling_present=true
             # Printed with this app's preview, not here: the scan spinner owns
             # this line, and the note belongs next to the plan it explains.
-            leftover_notes+=("$app_path|Shared leftovers kept (some paths unreadable)")
+            local unreadable_what="some paths unreadable"
+            if [[ -n "${_MOLE_UNINSTALL_SCAN_UNREADABLE:-}" ]]; then
+                # The note is printed with echo -e, so a backslash in the path stays literal.
+                unreadable_what="cannot read $(mole_terminal_safe_text "$_MOLE_UNINSTALL_SCAN_UNREADABLE")"
+                unreadable_what="${unreadable_what//\\/\\\\}"
+            fi
+            leftover_notes+=("$app_path|Shared leftovers kept ($unreadable_what)")
             debug_log "Same-bundle scan for $app_name could not read every path; shared leftovers kept"
         elif [[ $live_sibling_rc -ge 128 ]]; then
             return "$live_sibling_rc"
@@ -1886,7 +2016,9 @@ _batch_scan_app_details_impl() {
         if [[ -e "$info_plist" ]]; then
             exec_name=$(plutil -extract CFBundleExecutable raw "$info_plist" 2> /dev/null || echo "")
         fi
-        if pgrep -qx "${exec_name:-$app_name}" 2> /dev/null; then
+        # A shared runtime name such as Electron would report any other
+        # unrenamed Electron app as this one.
+        if _uninstall_app_running_by_executable "$app_name" "$exec_name"; then
             running_apps+=("$app_name")
         fi
 
@@ -2035,17 +2167,6 @@ _batch_scan_app_details_impl() {
             eligible_related_files=$(append_line "$eligible_related_files" "$related_path")
         done <<< "$related_files"
         related_files="$eligible_related_files"
-        local related_size_kb="0"
-        local related_size_rc=0
-        related_size_kb=$(calculate_total_size "$related_files") || related_size_rc=$?
-        if mole_rc_timeout "$related_size_rc"; then
-            # Size is display-only here; keep the leftover plan and under-report.
-            related_size_kb=0
-            debug_log "Related-file size probe timed out for $app_name"
-        elif [[ $related_size_rc -ge 128 ]]; then
-            return "$related_size_rc"
-        fi
-        [[ $related_size_rc -eq 0 && "$related_size_kb" =~ ^[0-9]+$ ]] || related_size_kb=0
         local review_only_system_files="$system_files"
         review_only_system_files=$(append_line "$review_only_system_files" "$diag_system")
         # System-level remnants are review-only in the CLI: shown in the preview
@@ -2056,7 +2177,9 @@ _batch_scan_app_details_impl() {
         # this blanking, or system files would become deletable again.
         system_files=""
         diag_system=""
-        local total_kb=$((app_size_kb + related_size_kb))
+        # The review classifies personal data before measuring leftovers.
+        # Until then this field carries only this invocation's bundle size.
+        local total_kb=$app_size_kb
         total_estimated_size=$((total_estimated_size + total_kb))
 
         if [[ "$needs_sudo" == "true" ]]; then
@@ -2104,14 +2227,14 @@ _batch_scan_app_details_impl() {
         local blocked_detail blocked_name blocked_vendor
         for blocked_detail in "${blocked_apps[@]}"; do
             IFS='|' read -r blocked_name blocked_vendor <<< "$blocked_detail"
-            log_warning "$blocked_name requires the official $blocked_vendor uninstaller"
+            log_warning "$(_uninstall_display_text "$blocked_name") requires the official $blocked_vendor uninstaller"
         done
     fi
 
     if [[ ${#manual_removal_apps[@]} -gt 0 ]]; then
         local manual_name
         for manual_name in "${manual_removal_apps[@]}"; do
-            log_warning "$manual_name cannot be removed safely by Mole from this location"
+            log_warning "$(_uninstall_display_text "$manual_name") cannot be removed safely by Mole from this location"
             log_info "Move it to Trash in Finder; Mole left protected containers and app data untouched"
         done
     fi
@@ -2135,6 +2258,7 @@ _batch_preview_and_confirm() {
 
         echo -e "\n${PURPLE_BOLD}Files to be removed:${NC}"
 
+        local review_index=0
         for detail in "${app_details[@]}"; do
             IFS='|' read -r app_name app_path bundle_id total_kb encoded_files encoded_system_files has_sensitive_data needs_sudo_flag is_brew_cask cask_name encoded_diag_system encoded_review_system encoded_login_item_helpers sibling_guard _expected_app_identity _original_bundle_id _encoded_live_sibling_fingerprint _expected_info_identity <<< "$detail"
             local app_size_display=$(bytes_to_human "$((total_kb * 1024))")
@@ -2146,10 +2270,11 @@ _batch_preview_and_confirm() {
                 steam_managed=true
                 app_size_display="N/A (Steam-managed)"
             fi
-            echo -e "${BLUE}${ICON_CONFIRM}${NC} ${app_name}${brew_tag} ${GRAY}, ${app_size_display}${NC}"
+            local display_app_name
+            display_app_name=$(_uninstall_display_text "$app_name")
+            echo -e "${BLUE}${ICON_CONFIRM}${NC} ${display_app_name}${brew_tag} ${GRAY}, ${app_size_display}${NC}"
 
             # Show detailed file list for ALL apps (brew casks leave user data behind)
-            local related_files=$(decode_file_list "$encoded_files" "$app_name")
             local system_files=$(decode_file_list "$encoded_system_files" "$app_name")
             local diag_system_display
             diag_system_display=$(decode_file_list "$encoded_diag_system" "$app_name")
@@ -2170,24 +2295,37 @@ _batch_preview_and_confirm() {
             done
 
             local preview_path=""
-            preview_path=$(format_uninstall_preview_path "$app_path") || return $?
+            preview_path=$(format_uninstall_preview_path "$app_path" "${_review_app_sizes[review_index]}") || return $?
             echo -e "  ${GREEN}${ICON_SUCCESS}${NC} $preview_path"
 
-            _uninstall_print_preview_paths "$related_files" "  ${GREEN}${ICON_SUCCESS}${NC} " || return $?
+            # Selected personal data is listed under its own heading below,
+            # so only the automatic leftovers sit beside the app.
+            _uninstall_print_preview_paths "${_review_auto_files[review_index]}" "  ${GREEN}${ICON_SUCCESS}${NC} " || return $?
+            review_index=$((review_index + 1))
             _uninstall_print_preview_paths "$system_files" "  ${BLUE}${ICON_WARNING}${NC} System: " || return $?
             _uninstall_print_preview_paths "$review_system_display" "  ${YELLOW}${ICON_WARNING}${NC} Review only: " || return $?
         done
 
         if [[ ${#_review_personal_paths[@]} -gt 0 ]]; then
-            local kept_data="" personal_path
+            local kept_data="" removed_data="" personal_path
             for personal_path in "${_review_personal_paths[@]}"; do
-                if ! mole_identity_in_list "$personal_path" "${_review_selected_paths[@]+"${_review_selected_paths[@]}"}"; then
+                if mole_identity_in_list "$personal_path" "${_review_selected_paths[@]+"${_review_selected_paths[@]}"}"; then
+                    removed_data=$(append_line "$removed_data" "$personal_path")
+                else
                     kept_data=$(append_line "$kept_data" "$personal_path")
                 fi
             done
+            if [[ -n "$removed_data" ]]; then
+                echo -e "\n${PURPLE_BOLD}Personal data to remove:${NC}"
+                _uninstall_print_preview_paths "$removed_data" "  ${GREEN}${ICON_SUCCESS}${NC} " || return $?
+            fi
             if [[ -n "$kept_data" ]]; then
                 echo -e "\n${GRAY}Personal data kept:${NC}"
-                _uninstall_print_preview_paths "$kept_data" "  ${GRAY}${ICON_REVIEW}${NC} " || return $?
+                while IFS= read -r personal_path; do
+                    local kept_display="$personal_path" tilde='~'
+                    kept_display="${kept_display/#$HOME/$tilde}"
+                    printf '  %b%s%b\n' "${GRAY}${ICON_REVIEW} " "$(mole_terminal_safe_text "$kept_display")" "$NC"
+                done <<< "$kept_data"
             fi
         fi
 
@@ -2199,14 +2337,41 @@ _batch_preview_and_confirm() {
         echo ""
         local removal_note="Remove ${app_total} ${app_text}"
         [[ -n "$size_display" ]] && removal_note+=", ${size_display}"
+        [[ ${#_review_selected_paths[@]} -eq 0 ]] || removal_note+=", including personal data"
         if [[ ${#running_apps[@]} -gt 0 ]]; then
             removal_note+=" ${YELLOW}[Running]${NC}"
         fi
         [[ ${#_review_personal_paths[@]} -eq 0 ]] || echo -e "${GRAY}D${NC} choose personal data"
+
+        # A read from a non-terminal fails and used to become an empty key,
+        # which the case below treats as Enter: a script or agent could confirm
+        # an uninstall nobody reviewed. Only a real terminal may answer; tests
+        # opt in through the test flags and drive the prompt explicitly.
+        if [[ ! -t 0 && "${MOLE_TEST_MODE:-0}" != "1" ]]; then
+            echo ""
+            log_error "Uninstall confirmation needs an interactive terminal; no apps were removed."
+            log_info "Run mo uninstall from an interactive terminal, or use mo uninstall --list to inspect apps"
+            return 3
+        fi
+
         echo -ne "${PURPLE}${ICON_ARROW}${NC} ${removal_note}  ${GREEN}Enter${NC} confirm, ${GRAY}ESC${NC} cancel: "
 
         drain_pending_input # Clean up any pending input before confirmation
-        IFS= read -r -s -n1 key || key=""
+        local key="" key_rc=0
+        IFS= read -r -s -n1 key || key_rc=$?
+        if [[ $key_rc -ne 0 ]]; then
+            # Test fixtures drive the prompt through a pipe and may have
+            # already consumed it; production only reaches here on a real
+            # terminal, where EOF is not consent.
+            if [[ "${MOLE_TEST_MODE:-0}" == "1" ]]; then
+                key=""
+            else
+                echo ""
+                log_error "Could not read the uninstall confirmation; no apps were removed."
+                log_info "Run mo uninstall from an interactive terminal; nothing was changed"
+                return 3
+            fi
+        fi
         drain_pending_input # Clean up any escape sequence remnants
         case "$key" in
             $'\e' | q | Q)
@@ -2298,9 +2463,9 @@ _batch_execute_removals() {
         [[ "$is_brew_cask" == "true" ]] && brew_tag=" ${CYAN}[Brew]${NC}"
         if [[ -t 1 ]]; then
             if [[ ${#app_details[@]} -gt 1 ]]; then
-                start_inline_spinner "[$current_index/${#app_details[@]}] Uninstalling ${app_name}${brew_tag}..."
+                start_inline_spinner "[$current_index/${#app_details[@]}] Uninstalling $(_uninstall_display_text "$app_name")${brew_tag}..."
             else
-                start_inline_spinner "Uninstalling ${app_name}${brew_tag}..."
+                start_inline_spinner "Uninstalling $(_uninstall_display_text "$app_name")${brew_tag}..."
             fi
         fi
 
@@ -2634,11 +2799,15 @@ _batch_execute_removals() {
                 while IFS= read -r _lf; do
                     [[ -n "$_lf" && -e "$_lf" ]] || continue
                     # Skip macOS-managed container stubs: containermanagerd protects
-                    # these directories via com.apple.provenance xattr; rm -rf always
-                    # fails on them by design. User data is already gone at this point.
+                    # the emptied root via com.apple.provenance xattr, so rm -rf
+                    # always leaves it. A denied Trash move leaves the whole
+                    # container instead, which must be reported and not counted.
                     if [[ $related_remove_rc -ne $MOLE_ERR_OWNER_UNVERIFIED &&
-                        "$_lf" == */Library/Containers/* && -f "$_lf/.com.apple.containermanagerd.metadata.plist" ]]; then
-                        continue
+                        "$_lf" == */Library/Containers/* ]]; then
+                        local _stub_rc=0
+                        _uninstall_container_is_stub "$_lf" || _stub_rc=$?
+                        [[ $_stub_rc -eq 0 ]] && continue
+                        mole_rc_signal "$_stub_rc" && return "$_stub_rc"
                     fi
                     leftover_paths+=("$_lf")
                 done <<< "$related_files"
@@ -2983,7 +3152,7 @@ _batch_render_summary() {
         local idx
         for ((idx = 0; idx < ${#background_items_warning_apps[@]}; idx++)); do
             [[ $idx -gt 0 ]] && bg_list+=", "
-            bg_list+="${background_items_warning_apps[idx]}"
+            bg_list+="$(_uninstall_display_text "${background_items_warning_apps[idx]}")"
         done
 
         summary_details+=("${ICON_REVIEW} Background item still running for ${YELLOW}${bg_list}${NC}, turn it off in ${GRAY}System Settings > Login Items & Extensions${NC}")
@@ -2994,7 +3163,7 @@ _batch_render_summary() {
         local idx
         for ((idx = 0; idx < ${#running_at_uninstall_apps[@]}; idx++)); do
             [[ $idx -gt 0 ]] && running_list+=", "
-            running_list+="${running_at_uninstall_apps[idx]}"
+            running_list+="$(_uninstall_display_text "${running_at_uninstall_apps[idx]}")"
         done
 
         summary_details+=("${ICON_REVIEW} Still running during uninstall, files removed but process kept alive: ${YELLOW}${running_list}${NC}")
@@ -3018,6 +3187,20 @@ _batch_render_summary() {
 # (scan, preview/confirm, execute, summary) and manages the cross-phase
 # shared state, the SIGINT/SIGTERM trap, sudo keepalive, and the deferred
 # Dock / LaunchServices refresh.
+# brew autoremove prints one "Uninstalling <keg>... (<files>, <size>)" line per
+# formula it removes. Homebrew does the removal, so record each keg here.
+_batch_log_brew_autoremove() {
+    local output="$1" line keg
+    while IFS= read -r line; do
+        line="${line#==> }"
+        [[ "$line" == "Uninstalling "*"... ("* ]] || continue
+        keg="${line#Uninstalling }"
+        keg="${keg%%... (*}"
+        [[ "$keg" == /* ]] || continue
+        log_operation "${MOLE_CURRENT_COMMAND:-uninstall}" "REMOVED" "$keg" "brew autoremove"
+    done <<< "$output"
+}
+
 batch_uninstall_applications() {
     local total_size_freed=0
 
@@ -3129,6 +3312,10 @@ batch_uninstall_applications() {
             _abort_uninstall_batch
             return 0
             ;;
+        3)
+            _abort_uninstall_batch
+            return 1
+            ;;
         *)
             _abort_uninstall_batch
             return 1
@@ -3203,8 +3390,9 @@ batch_uninstall_applications() {
         # attached lets the Perl timeout fallback hand off the controlling tty
         # and suspend the foreground uninstall prompt with SIGTTIN.
         (
-            HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_AUTO_UPDATE=1 NONINTERACTIVE=1 \
-                run_with_timeout "$MOLE_TIMEOUT_DISK_VERIFY_SEC" brew autoremove > /dev/null 2>&1 || true
+            autoremove_output=$(HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_AUTO_UPDATE=1 NONINTERACTIVE=1 \
+                run_with_timeout "$MOLE_TIMEOUT_DISK_VERIFY_SEC" brew autoremove 2>&1) || true
+            _batch_log_brew_autoremove "$autoremove_output"
         ) > /dev/null 2>&1 < /dev/null &
         disown $! 2> /dev/null || true
     fi

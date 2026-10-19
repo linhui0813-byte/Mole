@@ -16,7 +16,7 @@
   <img src="./docs/img/big-mole.png" alt="Résultats du nettoyage avec Mole" width="1000" />
 </p>
 
-> 💡 Ce dépôt contient la CLI open source gratuite (`mo`). Vous préférez une app native ? [Mole for Mac](https://mole.fit/) se télécharge séparément : vérification avant suppression, nettoyage des résidus testé sur plus de 800 apps, maintenance, exploration détaillée du disque, état en direct et contrôle des ventilateurs sur les Mac compatibles. `brew install mole` installe uniquement la CLI.
+> 💡 Ce dépôt contient la CLI open source gratuite (`mo`). Vous préférez une app native ? [Mole for Mac](https://mole.fit/) se télécharge séparément : vérification avant suppression, nettoyage des résidus testé sur plus de 800 apps, maintenance, exploration détaillée du disque, état en direct et contrôle des ventilateurs sur les Mac compatibles. Sous Windows, l'app native est [Mole for Windows](https://mole.fit/fr/windows). `brew install mole` installe uniquement la CLI.
 
 ## Fonctionnalités
 
@@ -49,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/tw93/mole/main/install.sh | bash
 iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
 ```
 
-Mole est distribué uniquement via Homebrew, ce dépôt GitHub et [mole.fit](https://mole.fit/) pour l'app Mac. Les sites qui proposent une app « basée sur Mole » ou vous demandent de coller une commande encodée dans le Terminal n'ont aucun lien avec Mole.
+Mole est distribué uniquement via Homebrew, ce dépôt GitHub et [mole.fit](https://mole.fit/) pour les apps Mac et Windows. Les sites qui proposent une app « basée sur Mole » ou vous demandent de coller une commande encodée dans le Terminal n'ont aucun lien avec Mole.
 
 **Commandes principales**
 
@@ -62,6 +62,7 @@ mo analyze                   # Explorateur visuel de disque (ou 'mo analyse')
 mo status                    # Tableau de bord de santé système en direct
 mo purge                     # Nettoyer les fichiers de build de projets
 mo installer                 # Trouver et supprimer les fichiers d'installation
+mo slim                      # Retirer le code Intel des apps universelles
 
 mo touchid                   # Configurer Touch ID pour sudo dans le terminal
 mo completion                # Activer l'autocomplétion du shell
@@ -80,6 +81,7 @@ mo uninstall --dry-run
 mo optimize --dry-run
 mo purge --dry-run
 mo installer --dry-run
+mo slim --dry-run
 mo history
 mo history --json
 
@@ -131,11 +133,12 @@ Pour une installation déclarative, ajoutez `github:tw93/mole/main` comme entré
 
 Mole peut supprimer des fichiers ; il valide donc les chemins, protège les emplacements partagés et ceux du système, et demande une confirmation quand une action l'exige. Quand Mole ne peut pas prouver qu'un élément peut être modifié sans risque, il l'ignore ou refuse l'opération.
 
-- `clean`, `uninstall`, `purge`, `installer` et `remove` suppriment des fichiers : prévisualisez toujours leurs actions avec `--dry-run`, complété au besoin de `--debug`
+- `clean`, `uninstall`, `purge`, `installer`, `slim` et `remove` suppriment des fichiers : prévisualisez toujours leurs actions avec `--dry-run`, complété au besoin de `--debug`
 - Exécutez Mole **sans `sudo`** : les privilèges administrateur ne sont demandés que pour les actions touchant au système
-- `mo analyze` place les éléments sélectionnés dans la Corbeille de macOS après confirmation
+- `mo uninstall`, `mo analyze` et `mo slim` placent leurs suppressions dans la Corbeille par défaut après confirmation ; `clean`, `purge` et `installer` suppriment définitivement. `mo uninstall --permanent` évite la Corbeille
 - Les opérations de nettoyage sont consignées dans `~/Library/Logs/mole/operations.log` ; consultez-les avec `mo history` ou désactivez la journalisation avec `MO_NO_OPLOG=1`
 - Préservez des caches avec `mo clean --whitelist` ou excluez des opérations avec `mo optimize --whitelist`
+- Si le fichier de liste blanche est illisible, `clean`, `purge` et `optimize` s'arrêtent au lieu de s'exécuter sans lui
 
 Consultez [SECURITY.md](SECURITY.md) et [SECURITY_AUDIT.md](SECURITY_AUDIT.md) pour la marche à suivre en cas de vulnérabilité, les limites de sécurité et les restrictions actuelles.
 
@@ -145,7 +148,7 @@ Les exemples suivants sont abrégés. Les éléments détectés, les tailles et 
 
 ### Nettoyage (Clean)
 
-`mo clean` analyse les caches sûrs, les journaux, les fichiers temporaires, les dossiers de développement et les résidus d'applications désinstallées. Il vide la corbeille par défaut ; pour la conserver, sélectionnez Trash dans `mo clean --whitelist`, le même menu qui préserve les caches à garder. La sélection est enregistrée dans `~/.config/mole/whitelist`. Avant d'ajouter des chemins personnalisés, ouvrez le menu et appuyez sur Entrée pour enregistrer la sélection, puis ajoutez un chemin par ligne. Un fichier existant remplace les règles par défaut optionnelles ; les protections de sécurité intégrées s'appliquent toujours.
+`mo clean` analyse les caches sûrs, les journaux, les fichiers temporaires, les dossiers de développement et les résidus d'applications désinstallées. Il vide `~/.Trash` par défaut ; pour le conserver, sélectionnez Trash dans `mo clean --whitelist`, le même menu qui préserve les caches à garder. Les corbeilles de volume telles que `/Volumes/*/.Trashes` ne sont pas vidées par cette opération. La sélection est enregistrée dans `~/.config/mole/whitelist`. Avant d'ajouter des chemins personnalisés, ouvrez le menu et appuyez sur Entrée pour enregistrer la sélection, puis ajoutez un chemin par ligne. Un fichier existant remplace les règles par défaut optionnelles ; les protections de sécurité intégrées s'appliquent toujours.
 
 ```text
 $ mo clean
@@ -181,7 +184,7 @@ Free space: 223.5GB (+4.5GB)
 
 `mo uninstall` supprime une application installée ainsi que les fichiers associés que Mole peut rattacher à cette application. Si une autre copie installée de la même application utilise encore des fichiers partagés, Mole les conserve. Si l'application a déjà été supprimée manuellement, lancez `mo clean` pour trouver les résidus orphelins.
 
-Les données personnelles, notamment les réglages et les extensions, sont conservées par défaut. Appuyez sur `D` dans l’aperçu pour sélectionner les chemins de données à supprimer. Après la désinstallation, les références aux chemins supprimés dans les configurations shell, Hook ou MCP sont indiquées uniquement par fichier et numéro de ligne, sans modifier ces configurations.
+Les données personnelles, notamment les réglages et les extensions, sont conservées par défaut. Appuyez sur `D` dans l’aperçu pour sélectionner les chemins de données à supprimer. Avec `mo uninstall --with-data`, ces données sont présélectionnées, sauf les profils de navigateur et les conteneurs App Group ; l’aperçu les liste à part et `D` permet toujours de conserver n’importe quel chemin. Après la désinstallation, les références aux chemins supprimés dans les configurations shell, Hook ou MCP sont indiquées uniquement par fichier et numéro de ligne, sans modifier ces configurations.
 
 ```text
 $ mo uninstall
@@ -223,30 +226,29 @@ Optimize
 PERFORMANCE DIAGNOSIS
   ✓ No sustained high-CPU bottleneck detected
 
-➤ DNS & Spotlight Check
-  → DNS cache flushed
-  → Spotlight index verified
-
 ➤ Finder Cache Refresh
   → QuickLook thumbnails refreshed
   → Icon services cache rebuilt
+
+➤ Network Cache Refresh
+  → DNS cache refreshed
 
 ➤ Database Optimization
   ◎ Close these apps before database optimization: Safari
 
 ➤ Disk Health
-  → Disk verify skipped (set MOLE_ENABLE_DISK_VERIFY=1 to enable)
+  → Disk verify skipped
 
 ======================================================================
 Optimization Complete
-Applied 3 optimizations
-14 unchanged | 3 skipped | 1 unavailable
+Applied 2 optimizations
+13 unchanged | 3 skipped | 1 unavailable
 ======================================================================
 ```
 
 ### Analyse de l'espace (Analyze)
 
-`mo analyze` ouvre un explorateur de disque interactif dans le terminal. Il prend en charge les touches fléchées et les raccourcis Vim, le filtrage rapide, la sélection multiple, la prévisualisation dans le Finder et le déplacement confirmé vers la Corbeille. Les disques externes sont ignorés par défaut dans la vue générale ; examinez-les avec `mo analyze /Volumes` ou un point de montage précis. Utilisez `mo analyze /private/tmp` pour vérifier les dossiers temporaires sans déclencher de nettoyage automatique.
+`mo analyze` ouvre un explorateur de disque interactif dans le terminal. Il prend en charge les touches fléchées et les raccourcis Vim, le filtrage rapide, la sélection multiple, la prévisualisation dans le Finder et le déplacement confirmé vers la Corbeille. Les disques externes sont ignorés par défaut dans la vue générale ; examinez-les avec `mo analyze /Volumes` ou un point de montage précis. Utilisez `mo analyze /private/tmp` pour vérifier les dossiers temporaires sans déclencher de nettoyage automatique. L’analyse fichier par fichier compte une seule fois les clones APFS qui partagent tous leurs blocs ; les estimations rapides des dossiers peuvent encore compter plusieurs fois les blocs partagés.
 
 Une taille terminée par `+` signale une analyse partielle ; `unknown` indique que le volume n'a pas pu être mesuré. Les résultats interrompus par un délai d'attente n'écrasent pas les mesures complètes en cache ; une analyse ultérieure comblera les données manquantes. Les dossiers que macOS ne laisse pas lire au terminal restent marqués comme partiels tant que les droits d'accès ne changent pas. La liste du terminal ne garde que les 30 plus gros éléments, si bien qu'un élément illisible peut ne pas y figurer ; le total signale tout de même une analyse partielle. La sortie JSON d'un dossier inclut tous les éléments analysés.
 
@@ -417,6 +419,10 @@ Removed 5 installers, freed 3.83GB
 ```
 
 </details>
+
+### Alléger les apps (Slim)
+
+`mo slim` retire le code Intel des apps universelles sur les Mac Apple Silicon. Il liste les apps qui vous appartiennent et sont signées avec un Developer ID, avec la taille de leur code Intel, et ne modifie que celles que vous sélectionnez. Chaque app est d'abord allégée sur une copie, en ne touchant qu'aux exécutables principaux et au code imbriqué doté de sa propre signature ; la copie ne remplace l'app que si elle conserve son code Apple Silicon et passe les vérifications de signature de code et de Gatekeeper, et l'original est placé dans la Corbeille. Les apps de l'App Store, les apps Apple, les apps réglées sur « Ouvrir avec Rosetta », celles d'un autre utilisateur et les apps en cours d'exécution ne sont pas modifiées. Aucun outil de développement n'est nécessaire, et une mise à jour de l'app réintroduit le code Intel.
 
 ## Lanceurs rapides
 

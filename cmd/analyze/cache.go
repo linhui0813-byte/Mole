@@ -31,7 +31,10 @@ import (
 // permission denials can be cached and still reads as partial.
 // v6: deletions invalidate ancestor totals and overview measurements.
 // v7: Library overview totals count cross-directory hardlinks once again.
-const cacheSchemaVersion = 7
+// v8: APFS clones that share every block count once, so v7 totals can be inflated.
+// v9: mixed clone/hardlink groups deduplicate together; bounded lists use path ties.
+// v10: shortened directory listings must refresh before they are browsed.
+const cacheSchemaVersion = 10
 
 type overviewSizeSnapshot struct {
 	Size          int64     `json:"size"`
@@ -636,9 +639,7 @@ func loadCacheFromDisk(path string) (*cacheEntry, error) {
 	// loadStaleCacheFromDisk and refreshes behind it, and the rescan reuses the
 	// unchanged subtrees below, so refusing costs one level, not a full scan.
 	if info.ModTime().After(entry.ModTime) {
-		if cacheModTimeGrace <= 0 || info.ModTime().Sub(entry.ModTime) > cacheModTimeGrace {
-			return nil, fmt.Errorf("cache expired: directory modified")
-		}
+		return nil, fmt.Errorf("cache expired: directory modified")
 	}
 
 	return entry, nil
@@ -690,9 +691,17 @@ func saveCacheToDiskWithOptions(publication *scanPublication, path string, resul
 		return err
 	}
 
+	// Recursive measurements and disk snapshots stay bounded. A shortened
+	// listing is useful for first paint and subtree totals, but browsing it
+	// requires a live scan to enumerate every direct child.
+	entries := result.Entries
+	if len(entries) > maxEntries {
+		entries = entries[:maxEntries]
+		needsRefresh = true
+	}
 	entry := cacheEntry{
 		State:         result.State,
-		Entries:       result.Entries,
+		Entries:       entries,
 		LargeFiles:    result.LargeFiles,
 		TotalSize:     result.TotalSize,
 		TotalFiles:    result.TotalFiles,

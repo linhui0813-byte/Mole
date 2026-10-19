@@ -105,7 +105,7 @@ Gradle daemon processes cache|$HOME/.gradle/daemon/*|ide_cache
 Gradle worker cache|$HOME/.gradle/workers/*|ide_cache
 Xcode DerivedData (build outputs, indexes)|$HOME/Library/Developer/Xcode/DerivedData/*|ide_cache
 Xcode internal cache files|$HOME/Library/Caches/com.apple.dt.Xcode/*|ide_cache
-Xcode iOS device support symbols|$HOME/Library/Developer/Xcode/iOS DeviceSupport/*/Symbols/System/Library/Caches/*|ide_cache
+Xcode device support symbols|$HOME/Library/Developer/Xcode/* DeviceSupport/*/Symbols/System/Library/Caches/*|ide_cache
 JetBrains IDEs data (IntelliJ, PyCharm, WebStorm, GoLand)|$HOME/Library/Application Support/JetBrains/*|ide_cache
 JetBrains IDEs cache|$HOME/Library/Caches/JetBrains/*|ide_cache
 Android Studio cache and indexes|$HOME/Library/Caches/Google/AndroidStudio*/*|ide_cache
@@ -216,13 +216,21 @@ load_whitelist() {
         config_file="$WHITELIST_CONFIG_CLEAN"
     fi
 
-    local using_legacy="false"
-    if [[ ! -f "$config_file" && -n "$legacy_file" && -f "$legacy_file" ]]; then
-        config_file="$legacy_file"
-        using_legacy="true"
+    local using_legacy="false" config_state=0 unreadable_label="whitelist"
+    [[ "$mode" != "optimize" ]] || unreadable_label="optimize whitelist"
+    mole_whitelist_file_state "$config_file" "$unreadable_label" || config_state=$?
+    [[ $config_state -ne 2 ]] || return 1
+    if [[ $config_state -eq 1 && -n "$legacy_file" ]]; then
+        config_state=0
+        mole_whitelist_file_state "$legacy_file" "$unreadable_label" || config_state=$?
+        [[ $config_state -ne 2 ]] || return 1
+        if [[ $config_state -eq 0 ]]; then
+            config_file="$legacy_file"
+            using_legacy="true"
+        fi
     fi
 
-    if [[ -f "$config_file" ]]; then
+    if [[ $config_state -eq 0 ]]; then
         while IFS= read -r line; do
             # shellcheck disable=SC2295
             line="${line#"${line%%[![:space:]]*}"}"
@@ -260,6 +268,13 @@ load_whitelist() {
             # unchecking clears it; keeping it saves the wider default instead.
             if [[ "$mode" == "clean" ]] && patterns_equivalent "$pattern" "$HOME/.gradle/caches/build-cache-*/*"; then
                 pattern="$HOME/.gradle/caches/*"
+            fi
+            # The menu saved the Xcode device support symbols row as iOS-only
+            # before all DeviceSupport platforms were covered. Read that line as
+            # the row so it shows checked and unchecking clears it; keeping it
+            # saves the wider pattern instead.
+            if [[ "$mode" == "clean" ]] && patterns_equivalent "$pattern" "$HOME/Library/Developer/Xcode/iOS DeviceSupport/*/Symbols/System/Library/Caches/*"; then
+                pattern="$HOME/Library/Developer/Xcode/* DeviceSupport/*/Symbols/System/Library/Caches/*"
             fi
             local duplicate="false"
             if [[ ${#unique_patterns[@]} -gt 0 ]]; then
@@ -326,8 +341,9 @@ manage_whitelist() {
 manage_whitelist_categories() {
     local mode="$1"
 
-    # Load currently enabled patterns from both sources
-    load_whitelist "$mode"
+    # Load currently enabled patterns from both sources. An unreadable file
+    # stops here: saving the menu would replace what the user wrote.
+    load_whitelist "$mode" || return 1
 
     # Build cache items list
     local -a cache_items=()

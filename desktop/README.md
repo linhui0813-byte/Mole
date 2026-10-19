@@ -16,7 +16,8 @@ with an ad hoc signature; it is not notarized for public distribution.
 The dashboard shows live CPU, memory, disk, network and process readings,
 the collector's health score, hardware details, and any available GPU,
 temperature or fan readings. It uses a warm collector every two seconds;
-hardware enrichment refreshes every 30 seconds. A dash means unavailable,
+slow enrichment refreshes every 30 seconds, and static hardware descriptions
+are cached for ten minutes. A dash means unavailable,
 never a simulated reading. The thermal-state badge comes from macOS and is
 separate from CPU/GPU temperature. Thermal and GPU fields can be cached between
 hardware refreshes.
@@ -40,12 +41,54 @@ retains the validated full process sample for the desktop table, preserving
 the CLI's original JSON contract.
 
 Mole and this derivative dashboard use the repository's GPL-3.0 license.
-The app includes the original license and the source commit it was built from.
+The app includes the original license, the upstream core commit, and the
+dashboard checkout commit it was built from.
 The additional dashboard source lives in this directory.
+
+## Core and dashboard ownership
+
+The execution and metric-collection code comes from **Mole CLI (macOS)** at
+`tw93/Mole`. Our code lives entirely in `desktop/`, including any compatibility
+adapter needed by the graphical dashboard. Keep the upstream root documentation,
+CLI entrypoint, `lib/`, `cmd/`, `internal/`, tests, and dependencies unchanged.
+
+- `main` follows `upstream/main` by fast-forward only.
+- `native-dashboard` merges those upstream updates and owns the desktop app.
+- `desktop/UPSTREAM_COMMIT` records the exact upstream snapshot in use.
+- `desktop/check-upstream.sh` refuses a build if files outside `desktop/` differ
+  from that snapshot, or extra Go files could enter the collector build.
+- The build compiles the collector from the merged upstream source. It does not
+  copy and maintain a second version of the engine.
+
+Upstream updates require a deliberate merge and verification. Changes to
+collector interfaces are adapted inside `desktop/`; a merge is not proof that
+the dashboard still builds or decodes the live data correctly.
+
+To update from a clean checkout:
+
+```bash
+git fetch upstream main
+git switch main
+git merge --ff-only upstream/main
+git switch native-dashboard
+git merge --no-commit main
+git rev-parse upstream/main > desktop/UPSTREAM_COMMIT
+./desktop/check-upstream.sh
+./desktop/build.sh
+```
+
+Run the dashboard checks below and the repository's required checks before
+committing the merge. Adapt only files inside `desktop/` if compatibility work
+is needed. Then push `main` and `native-dashboard` to `origin`, our GitHub fork.
+The official `upstream` remote remains the source of core updates.
+
+See [the integration status](UPSTREAM_STATUS.md) for the current source pin,
+verification evidence, and known upstream test limitations.
 
 ## Verification
 
 ```bash
+python3 desktop/Tests/test_upstream_isolation.py
 MOLE_TEST_NO_AUTH=1 go test ./cmd/status
 python3 desktop/Tests/collector_smoke.py
 xcrun swiftc -swift-version 5 -parse-as-library \

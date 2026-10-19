@@ -20,8 +20,11 @@ _mole_browser_clones_idle() {
         case "$line" in
             *"/Google Chrome"*".app/"* | *"/Google Chrome"*".app.bundle/"* | \
                 *"/Chromium.app/"* | *"/Chromium.app.bundle/"* | \
+                *"/Helium.app/"* | *"/Helium.app.bundle/"* | \
                 *"/com.google.Chrome"*".code_sign_clone/"* | *"/org.chromium.Chromium.code_sign_clone/"* | \
-                "Google Chrome"* | "Chromium" | *"/Google Chrome" | *"/Chromium") return 1 ;;
+                *"/net.imput.helium.code_sign_clone/"* | \
+                "Google Chrome"* | "Chromium" | *"/Google Chrome" | *"/Chromium" | \
+                "Helium" | "Helium Helper"* | *"/Helium") return 1 ;;
         esac
     done <<< "$output"
 }
@@ -38,6 +41,9 @@ _mole_browser_clone_snapshot() {
         com.google.Chrome.dev.code_sign_clone) app="Google Chrome Dev" ;;
         com.google.Chrome.canary.code_sign_clone) app="Google Chrome Canary" ;;
         org.chromium.Chromium.code_sign_clone) app="Chromium" ;;
+        # Helium: 20 idle clones left on a Mac (2026-10-19). Mole Mac parity:
+        # BrowserClonePolicy.browsers.
+        net.imput.helium.code_sign_clone) app="Helium" ;;
         *) return 1 ;;
     esac
     [[ "${rest#*/}" =~ ^code_sign_clone\.[A-Za-z0-9]{6}$ ]] || return 1
@@ -93,7 +99,7 @@ clean_browser_code_sign_clones() {
     [[ $rc -lt 128 ]] || return "$rc"
     [[ $rc -eq 0 ]] || return 0
     local _MOLE_BROWSER_CLONE_REVIEW="" _MOLE_SAFE_REMOVE_FINAL_GUARD=_mole_browser_clone_final_guard
-    for id in com.google.Chrome com.google.Chrome.beta com.google.Chrome.dev com.google.Chrome.canary org.chromium.Chromium; do
+    for id in com.google.Chrome com.google.Chrome.beta com.google.Chrome.dev com.google.Chrome.canary org.chromium.Chromium net.imput.helium; do
         for path in "$root/$id.code_sign_clone"/code_sign_clone.*; do
             [[ -d "$path" && ! -L "$path" ]] || continue
             system_cleanup_budget_reached "$deadline" && return 0

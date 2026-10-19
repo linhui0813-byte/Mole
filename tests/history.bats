@@ -87,8 +87,9 @@ import pathlib, sys
 b = pathlib.Path(sys.argv[1]).read_bytes()
 assert b"SKIPPED lit\\name (back\\slash)\n" in b, b
 assert b"SKIPPED real\\nname (tab\\there)\n" in b, b
+assert b"SKIPPED " in b and b"/ctl\\tx (invalid path)\n" in b, b
 lines = [l for l in b.split(b"\n") if l]
-assert len(lines) == 7, lines
+assert len(lines) == 8, lines
 assert all(l.startswith((b"[", b"# ==========")) for l in lines), lines
 assert not any(c < 32 and c != 10 or c == 127 for c in b), b
 ' "$log_dir/operations.log"
@@ -248,6 +249,54 @@ EOF
 
     [[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
     [[ "$output" == *"[optimize] TASK_FAILED disk_verify (task outcome)"* ]] || return 1
+}
+
+@test "dry-run sessions are named as previews in markers and rows" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+MOLE_DRY_RUN=1 log_operation_session_start clean
+log_operation clean SKIPPED /tmp/preview "dry-run stub-container"
+log_operation_session_end clean 1 4
+log_operation_session_start clean
+log_operation clean REMOVED /tmp/real 4KB
+log_operation_session_end clean 1 4
+EOF
+    [[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+    local log_file="$HOME/Library/Logs/mole/operations.log"
+    run python3 - "$log_file" <<'EOF'
+import re, sys
+lines = [l for l in open(sys.argv[1]).read().splitlines() if l]
+# The shapes Mole-Diagnose.command keeps; a marker outside them is dropped.
+row = re.compile(r'^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] \[([a-z][a-z0-9._-]*(?: run=[0-9-]+)?)\] ([A-Z][A-Z_]*) (.+)$')
+marker = re.compile(r'^# =+ [a-z][a-z0-9._-]*(?: run=[0-9-]+)? session (?:started|ended) at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:, \d+ items, \d+(?:\.\d+)?[KMGT]?B)? =+$')
+assert len(lines) == 6, lines
+assert all(marker.match(l) for l in (lines[0], lines[2], lines[3], lines[5])), lines
+assert all(row.match(l) for l in (lines[1], lines[4])), lines
+assert lines[0].startswith("# ========== clean-dry-run run="), lines[0]
+assert "] [clean-dry-run run=" in lines[1], lines[1]
+assert lines[2].startswith("# ========== clean-dry-run run="), lines[2]
+assert lines[3].startswith("# ========== clean run="), lines[3]
+assert "] [clean run=" in lines[4], lines[4]
+EOF
+    [[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+    run env HOME="$HOME" "$PROJECT_ROOT/mole" history --json
+    [[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+    printf '%s\n' "$output" | python3 -c '
+import json, sys
+sessions = json.load(sys.stdin)["sessions"]
+assert sorted(s["command"] for s in sessions) == ["clean", "clean-dry-run"], sessions
+'
+}
+
+@test "uninstall help and rejected flags open no operation session" {
+    local log_file="$HOME/Library/Logs/mole/operations.log"
+    rm -f "$log_file"
+    run env HOME="$HOME" MOLE_TEST_NO_AUTH=1 "$PROJECT_ROOT/mole" uninstall --help
+    [[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+    run env HOME="$HOME" MOLE_TEST_NO_AUTH=1 "$PROJECT_ROOT/mole" uninstall --bogus-flag
+    [[ "$status" -ne 0 ]] || return 1
+    ! grep -q "session started" "$log_file" 2> /dev/null || { cat "$log_file"; return 1; }
 }
 
 @test "mo history --json escapes unusual path characters" {
@@ -682,24 +731,26 @@ def write_log(ended):
         f.write("\n".join(lines) + "\n")
 
 
-def load_seconds(ended):
+def load_once(ended):
     write_log(ended)
-    best = None
-    for _ in range(2):
-        start = time.perf_counter()
-        subprocess.run([root + "/mole", "history", "--json"], env=dict(os.environ, HOME=home),
-                       stdout=subprocess.DEVNULL, check=True)
-        elapsed = time.perf_counter() - start
-        best = elapsed if best is None else min(best, elapsed)
-    return best
+    start = time.perf_counter()
+    subprocess.run([root + "/mole", "history", "--json"], env=dict(os.environ, HOME=home),
+                   stdout=subprocess.DEVNULL, check=True)
+    return time.perf_counter() - start
 
 
-finished = load_seconds(True)
-interrupted = load_seconds(False)
+# Alternate the two logs so a busy host slows both sides alike, and keep each
+# side's fastest run.
+finished = interrupted = None
+for _ in range(3):
+    f = load_once(True)
+    i = load_once(False)
+    finished = f if finished is None else min(finished, f)
+    interrupted = i if interrupted is None else min(interrupted, i)
 print("finished=%.2fs interrupted=%.2fs" % (finished, interrupted))
 assert interrupted < 2.0 * finished, (finished, interrupted)
 PY
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "mo history does not create logs when none exist" {

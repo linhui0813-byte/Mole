@@ -172,7 +172,6 @@ flush_dns_cache() {
     esac
 
     if [[ "${MOLE_DRY_RUN:-0}" == "1" ]]; then
-        MOLE_DNS_FLUSHED=1
         return 0
     fi
 
@@ -181,49 +180,9 @@ flush_dns_cache() {
     fi
 
     if sudo dscacheutil -flushcache 2> /dev/null && sudo killall -HUP mDNSResponder 2> /dev/null; then
-        MOLE_DNS_FLUSHED=1
         return 0
     fi
     return 1
-}
-
-# Basic system maintenance.
-opt_system_maintenance() {
-    if [[ "${MOLE_DRY_RUN:-0}" != "1" ]] && ! optimize_sudo_available; then
-        opt_msg "DNS & Spotlight check skipped (admin access required)"
-        optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_SKIPPED"
-        return 0
-    fi
-
-    local dns_status=0
-    flush_dns_cache || dns_status=$?
-    case "$dns_status" in
-        0) opt_msg "DNS cache flushed" ;;
-        1) echo -e "  ${YELLOW}${ICON_WARNING}${NC} Failed to refresh DNS cache" ;;
-        2) opt_msg "DNS cache flush skipped, active VPN detected" ;;
-        3) echo -e "  ${YELLOW}${ICON_WARNING}${NC} Failed to inspect active VPN state" ;;
-    esac
-
-    local spotlight_status=""
-    local spotlight_failed=0
-    if ! spotlight_status=$(run_with_timeout "$MOLE_TIMEOUT_SHORT_QUERY_SEC" mdutil -s / 2> /dev/null); then
-        echo -e "  ${YELLOW}${ICON_WARNING}${NC} Failed to verify Spotlight index"
-        spotlight_failed=1
-    elif echo "$spotlight_status" | grep -qi "Indexing disabled"; then
-        echo -e "  ${GRAY}${ICON_EMPTY}${NC} Spotlight indexing disabled"
-    else
-        opt_msg "Spotlight index verified"
-    fi
-
-    local applied=0
-    local failed="$spotlight_failed"
-    local skipped=0
-    case "$dns_status" in
-        0) applied=1 ;;
-        2) skipped=1 ;;
-        *) failed=$((failed + 1)) ;;
-    esac
-    optimize_task_result_from_counts "$applied" "$failed" "$skipped"
 }
 
 # Refresh Finder caches (QuickLook/icon services).
@@ -448,12 +407,6 @@ opt_network_optimization() {
         debug_operation_detail "Method" "dscacheutil -flushcache, then SIGHUP to mDNSResponder (skipped under an active VPN)"
         debug_operation_detail "Expected outcome" "Faster DNS resolution, fixed network connectivity issues"
         debug_risk_level "LOW" "DNS cache is automatically rebuilt"
-    fi
-
-    if [[ "${MOLE_DNS_FLUSHED:-0}" == "1" ]]; then
-        opt_msg "DNS cache already refreshed"
-        optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_UNCHANGED"
-        return 0
     fi
 
     if [[ "${MOLE_DRY_RUN:-0}" != "1" ]] && ! optimize_sudo_available; then
@@ -1516,7 +1469,7 @@ opt_notification_cleanup() {
 # causing the system to freeze. Set MOLE_ENABLE_DISK_VERIFY=1 to opt in.
 opt_disk_verify() {
     if [[ "${MOLE_ENABLE_DISK_VERIFY:-0}" != "1" ]]; then
-        opt_msg "Disk verify skipped (set MOLE_ENABLE_DISK_VERIFY=1 to enable)"
+        opt_msg "Disk verify skipped"
         optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_SKIPPED"
         return 0
     fi
@@ -2127,7 +2080,12 @@ execute_optimization() {
         return 1
     fi
 
-    if command -v is_whitelisted > /dev/null && is_whitelisted "$action"; then
+    # V1.59 and earlier refreshed DNS in a "DNS & Spotlight Check" task; a
+    # saved opt-out for it still keeps DNS untouched.
+    local legacy_action=""
+    [[ "$action" == "network_optimization" ]] && legacy_action="system_maintenance"
+    if command -v is_whitelisted > /dev/null &&
+        { is_whitelisted "$action" || { [[ -n "$legacy_action" ]] && is_whitelisted "$legacy_action"; }; }; then
         optimize_task_start
         opt_msg "Skipped (whitelisted): $health_name"
         optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_SKIPPED"

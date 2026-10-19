@@ -157,7 +157,8 @@ official_uninstaller_vendor() {
     for rule in "${OFFICIAL_UNINSTALLER_RULES[@]}"; do
         IFS='|' read -r vendor prefixes fragments <<< "$rule"
         IFS=',' read -r -a _prefixes <<< "$prefixes"
-        for prefix in "${_prefixes[@]}"; do
+        # A rule may leave a field empty; bash 3.2 under set -u rejects an empty "${arr[@]}".
+        for prefix in "${_prefixes[@]+"${_prefixes[@]}"}"; do
             [[ -n "$prefix" && "$normalized_bundle" == "$prefix"* ]] && {
                 printf '%s\n' "$vendor"
                 return 0
@@ -165,7 +166,7 @@ official_uninstaller_vendor() {
         done
 
         IFS=',' read -r -a _fragments <<< "$fragments"
-        for fragment in "${_fragments[@]}"; do
+        for fragment in "${_fragments[@]+"${_fragments[@]}"}"; do
             if [[ -n "$fragment" ]] &&
                 { [[ "$normalized_name" == *"$fragment"* ]] || [[ "$normalized_path" == *"$fragment"* ]]; }; then
                 printf '%s\n' "$vendor"
@@ -355,6 +356,40 @@ _mole_is_shared_home_state_root() {
     return 1
 }
 
+# Steam keeps the user's whole game library (steamapps/common) and per-account
+# userdata under this one root, so an uninstall must never offer the root or
+# anything inside it, whichever app is being removed. Exact root only: the
+# character classes cover the case-insensitive spellings of the same directory,
+# not similarly named siblings. mo clean still reaches the rebuildable caches
+# inside it, so callers apply this in uninstall mode only.
+_mole_is_steam_library_path() {
+    local path="${1%/}"
+    case "$path" in
+        "$HOME"/[Ll][Ii][Bb][Rr][Aa][Rr][Yy]/[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn]\ [Ss][Uu][Pp][Pp][Oo][Rr][Tt]/[Ss][Tt][Ee][Aa][Mm] | \
+            "$HOME"/[Ll][Ii][Bb][Rr][Aa][Rr][Yy]/[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Tt][Ii][Oo][Nn]\ [Ss][Uu][Pp][Pp][Oo][Rr][Tt]/[Ss][Tt][Ee][Aa][Mm]/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# WeChat's built-in browser keeps one Chromium profile per tab group under
+# radium/web/profiles. Only entries inside a profile's HTTP cache and Service
+# Worker CacheStorage are regenerable; IndexedDB, WebStorage and the profile
+# itself stay protected with the rest of the container.
+_is_wechat_web_profile_cache_child() {
+    local path="$1"
+    local root="$HOME/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/web/profiles/"
+    local relative="${path#"$root"}"
+    [[ "$relative" != "$path" ]] || return 1
+    local profile="${relative%%/*}"
+    [[ -n "$profile" && "$profile" != "$relative" ]] || return 1
+    case "${relative#*/}" in
+        Cache/?* | "Service Worker/CacheStorage/"?*) return 0 ;;
+    esac
+    return 1
+}
+
 # Check if a path is protected from deletion
 # Centralized logic to protect system settings, control center, and critical apps
 #
@@ -381,6 +416,10 @@ should_protect_path() {
     fi
 
     if _mole_is_shared_home_state_root "$path"; then
+        return 0
+    fi
+
+    if [[ "${MOLE_UNINSTALL_MODE:-0}" == "1" ]] && _mole_is_steam_library_path "$path"; then
         return 0
     fi
 
@@ -456,7 +495,8 @@ should_protect_path() {
         # blocking on the blanket com.apple.* match in should_protect_data.
         if [[ "$path" == */Data/Library/Caches/* || "$path" == */Data/tmp/* ||
             "$path" == "$HOME/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/log/"* ||
-            "$path" == "$HOME/Library/Containers/com.tencent.xinWeChat/Data/.wxapplet/WMPF/"* ]]; then
+            "$path" == "$HOME/Library/Containers/com.tencent.xinWeChat/Data/.wxapplet/WMPF/"* ]] ||
+            _is_wechat_web_profile_cache_child "$path"; then
             _container_cache_path=true
         elif [[ "${MOLE_UNINSTALL_MODE:-0}" != "1" ]] && should_protect_data "$bundle_id"; then
             return 0
@@ -694,7 +734,7 @@ is_path_whitelisted() {
 }
 
 _mole_uninstall_lower() {
-    printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+    printf '%s' "${1:-}" | /usr/bin/tr '[:upper:]' '[:lower:]'
 }
 
 _mole_uninstall_is_common_app_name() {
@@ -967,7 +1007,7 @@ _path_belongs_to_independent_cli() {
     local base parent lc_name
     base="${path##*/}"
     parent="${path%/*}"
-    lc_name=$(printf '%s' "${base#.}" | tr '[:upper:]' '[:lower:]')
+    lc_name=$(printf '%s' "${base#.}" | /usr/bin/tr '[:upper:]' '[:lower:]')
     [[ -z "$lc_name" ]] && return 1
 
     case "$lc_name" in
@@ -1017,7 +1057,8 @@ _mole_uninstall_embedded_bundle_ids() {
         bundle_root="${info%/Contents/Info.plist}"
         [[ "$bundle_root" != "$app_path" ]] || continue
         bundle_name="${bundle_root##*/}"
-        ext=$(printf '%s' "${bundle_name##*.}" | tr '[:upper:]' '[:lower:]')
+        # Extensions are ASCII; an unexpected byte only fails the match below.
+        mole_ascii_lowercase ext "${bundle_name##*.}"
 
         case "$ext" in
             xpc | appex) ;;
@@ -1129,13 +1170,13 @@ find_app_files() {
     # Normalize app name for matching - generate all common naming variants
     # Apps use inconsistent naming: "Maestro Studio" vs "maestro-studio" vs "MaestroStudio"
     # Note: Using tr for lowercase conversion (Bash 3.2 compatible, no ${var,,} support)
-    local nospace_name="${app_name// /}"                                               # "Maestro Studio" -> "MaestroStudio"
-    local underscore_name="${app_name// /_}"                                           # "Maestro Studio" -> "Maestro_Studio"
-    local hyphen_name="${app_name// /-}"                                               # "Maestro Studio" -> "Maestro-Studio"
-    local lowercase_name=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')              # "Zed Nightly" -> "zed nightly"
-    local lowercase_nospace=$(echo "$nospace_name" | tr '[:upper:]' '[:lower:]')       # "MaestroStudio" -> "maestrostudio"
-    local lowercase_hyphen=$(echo "$hyphen_name" | tr '[:upper:]' '[:lower:]')         # "Maestro-Studio" -> "maestro-studio"
-    local lowercase_underscore=$(echo "$underscore_name" | tr '[:upper:]' '[:lower:]') # "Maestro_Studio" -> "maestro_studio"
+    local nospace_name="${app_name// /}"                                                        # "Maestro Studio" -> "MaestroStudio"
+    local underscore_name="${app_name// /_}"                                                    # "Maestro Studio" -> "Maestro_Studio"
+    local hyphen_name="${app_name// /-}"                                                        # "Maestro Studio" -> "Maestro-Studio"
+    local lowercase_name=$(echo "$app_name" | /usr/bin/tr '[:upper:]' '[:lower:]')              # "Zed Nightly" -> "zed nightly"
+    local lowercase_nospace=$(echo "$nospace_name" | /usr/bin/tr '[:upper:]' '[:lower:]')       # "MaestroStudio" -> "maestrostudio"
+    local lowercase_hyphen=$(echo "$hyphen_name" | /usr/bin/tr '[:upper:]' '[:lower:]')         # "Maestro-Studio" -> "maestro-studio"
+    local lowercase_underscore=$(echo "$underscore_name" | /usr/bin/tr '[:upper:]' '[:lower:]') # "Maestro_Studio" -> "maestro_studio"
 
     # Extract base name by removing common version/channel suffixes
     # "Zed Nightly" -> "Zed", "Firefox Developer Edition" -> "Firefox"
@@ -1145,7 +1186,7 @@ find_app_files() {
     if [[ "$app_name" =~ ^(.+)[[:space:]]+(${version_suffixes})$ ]]; then
         base_name="${BASH_REMATCH[1]}"
     fi
-    local base_lowercase=$(echo "$base_name" | tr '[:upper:]' '[:lower:]') # "Zed" -> "zed"
+    local base_lowercase=$(echo "$base_name" | /usr/bin/tr '[:upper:]' '[:lower:]') # "Zed" -> "zed"
 
     # Only use bundle_id in literal paths or find patterns after reverse-DNS
     # validation. A malformed Info.plist should not be able to traverse out of
@@ -1212,7 +1253,19 @@ find_app_files() {
             "$HOME/Library/Input Methods/$bundle_id.app"
             "$HOME/Library/Autosave Information/$bundle_id"
             "$HOME/Library/SyncedPreferences/$bundle_id.plist"
+            # PLCrashReporter keeps one folder per bundle id under its own root (#1736).
+            "$HOME/Library/Caches/com.plausiblelabs.crashreporter.data/$bundle_id"
         )
+        # The per-user Darwin cache root holds a folder named by the exact
+        # bundle id too. An unresolved root skips this one path, a signal stops.
+        local darwin_cache_root="" darwin_cache_rc=0
+        darwin_cache_root=$(mole_darwin_user_cache_root 2> /dev/null) || darwin_cache_rc=$?
+        if mole_rc_signal "$darwin_cache_rc" 2> /dev/null; then
+            return "$darwin_cache_rc"
+        fi
+        if [[ $darwin_cache_rc -eq 0 && -n "$darwin_cache_root" ]]; then
+            user_patterns+=("$darwin_cache_root/$bundle_id")
+        fi
     fi
 
     # A bundle id's last segment often names the data directory more precisely
@@ -1231,8 +1284,8 @@ find_app_files() {
         local bundle_leaf="${bundle_id##*.}"
         local app_name_nospace="${app_name// /}"
         local bundle_leaf_lower app_name_nospace_lower
-        bundle_leaf_lower=$(printf '%s' "$bundle_leaf" | tr '[:upper:]' '[:lower:]')
-        app_name_nospace_lower=$(printf '%s' "$app_name_nospace" | tr '[:upper:]' '[:lower:]')
+        bundle_leaf_lower=$(printf '%s' "$bundle_leaf" | /usr/bin/tr '[:upper:]' '[:lower:]')
+        app_name_nospace_lower=$(printf '%s' "$app_name_nospace" | /usr/bin/tr '[:upper:]' '[:lower:]')
         if [[ ${#bundle_leaf} -ge 8 && ${#app_name_nospace} -ge 3 &&
             "$bundle_leaf" != "$app_name" &&
             "$bundle_leaf" =~ [a-z][A-Z] &&
@@ -1352,6 +1405,10 @@ find_app_files() {
         # with the GUI app being uninstalled (issue #993).
         if _mole_is_shared_home_state_root "$expanded_path"; then
             debug_log "Skipping shared home state root: $expanded_path"
+            continue
+        fi
+        if _mole_is_steam_library_path "$expanded_path"; then
+            debug_log "Skipping Steam library root: $expanded_path"
             continue
         fi
 
@@ -1603,9 +1660,10 @@ find_app_files() {
         # source); ~/DevEco-Studio (IDE config + license state); ~/Library/
         # Application Support/Huawei, ~/Library/Huawei, ~/.huawei, ~/.ohos
         # (Huawei account tokens, signed device profiles, SDK config). Only
-        # sweep cache and log roots; everything else is opt-in.
-        for d in ~/Library/Caches/Huawei ~/Library/Logs/Huawei; do
-            [[ -d "$d" ]] && files_to_clean+=("$d")
+        # sweep DevEco's own cache and log leaves; the Huawei roots are shared
+        # with other Huawei products.
+        for d in ~/Library/Caches/Huawei/DevEcoStudio* ~/Library/Logs/Huawei/DevEcoStudio*; do
+            [[ -d "$d" && ! -L "$d" ]] && files_to_clean+=("$d")
         done
     fi
 
@@ -1719,6 +1777,18 @@ find_app_files() {
     if [[ "$collect_toolchain_leftovers" == "true" ]] &&
         { [[ "$bundle_id" == "net.ankiweb.anki" ]] || [[ "$app_name" == "Anki" ]]; }; then
         [[ -d "$HOME/Library/Application Support/AnkiProgramFiles" ]] && files_to_clean+=("$HOME/Library/Application Support/AnkiProgramFiles")
+    fi
+
+    # Claude Desktop signed in to a third-party provider (Bedrock, Vertex or a
+    # gateway) appends "-3p" to its userData and log folders (2.31226.1), so the
+    # display-name patterns never reach them; one uninstall left 436 MB of
+    # Application Support/Claude-3p behind. Exact paths only: ~/.claude and
+    # ~/.local/share/claude belong to the Claude Code CLI (#993).
+    if [[ "$collect_toolchain_leftovers" == "true" && "$bundle_id" == "com.anthropic.claudefordesktop" ]]; then
+        local claude_3p_dir
+        for claude_3p_dir in "$HOME/Library/Application Support/Claude-3p" "$HOME/Library/Logs/Claude-3p"; do
+            [[ -d "$claude_3p_dir" && ! -L "$claude_3p_dir" ]] && files_to_clean+=("$claude_3p_dir")
+        done
     fi
 
     # 7. Raycast
@@ -1871,8 +1941,13 @@ get_diagnostic_report_paths_for_app() {
             exec_name=$(grep -A1 "CFBundleExecutable" "$app_path/Contents/Info.plist" 2> /dev/null | grep "<string>" | sed -n 's/.*<string>\([^<]*\)<\/string>.*/\1/p' | head -1)
         fi
     fi
+    # Every unrenamed Electron app reports as Electron-*.ips; that prefix
+    # would take other apps' reports, so use the app name instead.
+    mole_is_shared_runtime_executable "$exec_name" && exec_name=""
     prefix="${exec_name:-$nospace_name}"
     [[ -z "$prefix" || ${#prefix} -lt 3 ]] && return 0
+    # The Electron runtime app itself has no reports of its own to claim.
+    mole_is_shared_runtime_executable "$prefix" && return 0
     local -a prefixes=("$prefix")
     if [[ "$prefix" != *" Helper" ]]; then
         prefixes+=("$prefix Helper")
@@ -1891,8 +1966,8 @@ get_diagnostic_report_paths_for_app() {
     fi
     while IFS= read -r -d '' f; do
         [[ -z "$f" ]] && continue
-        local base
-        base=$(basename "$f" 2> /dev/null)
+        # find -print0 paths never end in a slash.
+        local base="${f##*/}"
         local matched_prefix=false
         local report_prefix
         for report_prefix in "${prefixes[@]}"; do
@@ -1928,10 +2003,10 @@ find_app_system_files() {
     local nospace_name="${app_name// /}"
     local underscore_name="${app_name// /_}"
     local hyphen_name="${app_name// /-}"
-    local lowercase_name=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
-    local lowercase_nospace=$(echo "$nospace_name" | tr '[:upper:]' '[:lower:]')
-    local lowercase_hyphen=$(echo "$hyphen_name" | tr '[:upper:]' '[:lower:]')
-    local lowercase_underscore=$(echo "$underscore_name" | tr '[:upper:]' '[:lower:]')
+    local lowercase_name=$(echo "$app_name" | /usr/bin/tr '[:upper:]' '[:lower:]')
+    local lowercase_nospace=$(echo "$nospace_name" | /usr/bin/tr '[:upper:]' '[:lower:]')
+    local lowercase_hyphen=$(echo "$hyphen_name" | /usr/bin/tr '[:upper:]' '[:lower:]')
+    local lowercase_underscore=$(echo "$underscore_name" | /usr/bin/tr '[:upper:]' '[:lower:]')
 
     # Standard system path patterns
     local -a system_patterns=(
@@ -2320,6 +2395,21 @@ receipt_payload_path_is_allowlisted() {
     return 1
 }
 
+# A CFBundleExecutable is attacker-controlled, and pgrep/pkill read their
+# argument as an extended regular expression: a crafted ".*" matches nearly
+# every process, turning a name-based probe or kill into a machine-wide one.
+# Escape the same ERE metacharacters as _mole_regex_escape (a backslash before
+# any other byte is undefined in POSIX ERE and GNU grep warns "stray \") and
+# reject the shapes a real executable name cannot have, so callers fail closed
+# instead of handing pgrep an empty pattern, which matches every process.
+_mole_process_pattern_literal() {
+    local value="${1:-}"
+
+    [[ -n "$value" ]] || return 1
+    [[ ! "$value" =~ [[:cntrl:]] ]] || return 1
+    printf '%s' "$value" | LC_ALL=C sed 's/[][(){}.^$*+?|\\]/\\&/g'
+}
+
 # Terminate a running application during uninstall.
 # The user has already confirmed removal, so after the graceful Quit Apple
 # Event we escalate through SIGTERM and SIGKILL (and one sudo retry when
@@ -2329,6 +2419,8 @@ receipt_payload_path_is_allowlisted() {
 # user has implicitly accepted by confirming.
 # Poll after a signal so an already-exited app does not consume the whole
 # grace period. Keep the original two-second sleep budget and signal statuses.
+# The pattern is a name already escaped by _mole_process_pattern_literal, so
+# pgrep matches it as a literal instead of an ERE.
 _mole_wait_for_app_exit() {
     local pattern="$1" ticks=20 probe_rc=0 sleep_rc=0
     while :; do
@@ -2385,10 +2477,48 @@ force_kill_app() {
             return 1
             ;;
     esac
+    # A shared runtime name such as Electron matches every unrenamed Electron
+    # app, so name-based probes and kills would reach apps the user did not
+    # select. Only Apple Events addressed by bundle id stay exact: quit the app
+    # if it runs, and report it as possibly running when it does not exit.
+    if mole_is_shared_runtime_executable "$match_pattern"; then
+        debug_log "force_kill_app: no name-based kill for shared runtime executable '$match_pattern'"
+        [[ "${MOLE_TEST_MODE:-0}" == "1" || "${MOLE_TEST_NO_AUTH:-0}" == "1" ]] && return 0
+        command -v osascript > /dev/null 2>&1 || return 1
+        mole_is_reverse_dns_bundle_id "$bundle_id" || return 1
+        local shared_state="" shared_rc=0 shared_wait=20
+        while true; do
+            shared_rc=0
+            shared_state=$(run_with_timeout "$MOLE_TIMEOUT_SHORT_QUERY_SEC" \
+                osascript -e "application id \"$bundle_id\" is running" 2> /dev/null < /dev/null) || shared_rc=$?
+            [[ $shared_rc -ge 128 ]] && return "$shared_rc"
+            [[ $shared_rc -eq 0 && "$shared_state" == "false" ]] && return 0
+            [[ $shared_rc -eq 0 && "$shared_state" == "true" ]] || return 1
+            [[ $shared_wait -gt 0 ]] || return 1
+            if [[ $shared_wait -eq 20 ]]; then
+                run_with_timeout "$MOLE_TIMEOUT_SHORT_QUERY_SEC" \
+                    osascript -e "tell application id \"$bundle_id\" to quit" > /dev/null 2>&1 < /dev/null || shared_rc=$?
+                [[ $shared_rc -ge 128 ]] && return "$shared_rc"
+            fi
+            sleep 0.1 || return $?
+            shared_wait=$((shared_wait - 1))
+        done
+    fi
+
+    # match_pattern comes from the bundle, not from Mole: probe and signal its
+    # literal name only. A name that cannot be a real process name (empty or
+    # holding a control byte) is refused instead of reaching pgrep, whose
+    # empty pattern matches every process.
+    local escaped_pattern="" pattern_rc=0
+    escaped_pattern=$(_mole_process_pattern_literal "$match_pattern") || pattern_rc=$?
+    if [[ $pattern_rc -ne 0 ]]; then
+        debug_log "force_kill_app: refusing unsafe process pattern '$match_pattern'"
+        return 1
+    fi
 
     # Check if process is running using exact match only
     local process_probe_rc=0
-    pgrep -x "$match_pattern" > /dev/null 2>&1 || process_probe_rc=$?
+    pgrep -x "$escaped_pattern" > /dev/null 2>&1 || process_probe_rc=$?
     [[ $process_probe_rc -ge 128 ]] && return "$process_probe_rc"
     if [[ $process_probe_rc -ne 0 ]]; then
         return 0
@@ -2418,7 +2548,7 @@ force_kill_app() {
         local quit_wait=20
         while [[ $quit_wait -gt 0 ]]; do
             process_probe_rc=0
-            pgrep -x "$match_pattern" > /dev/null 2>&1 || process_probe_rc=$?
+            pgrep -x "$escaped_pattern" > /dev/null 2>&1 || process_probe_rc=$?
             [[ $process_probe_rc -ge 128 ]] && return "$process_probe_rc"
             [[ $process_probe_rc -eq 0 ]] || break
             local sleep_rc=0
@@ -2433,7 +2563,7 @@ force_kill_app() {
 
     # Graceful Quit landed: skip the kill ladder entirely.
     process_probe_rc=0
-    pgrep -x "$match_pattern" > /dev/null 2>&1 || process_probe_rc=$?
+    pgrep -x "$escaped_pattern" > /dev/null 2>&1 || process_probe_rc=$?
     [[ $process_probe_rc -ge 128 ]] && return "$process_probe_rc"
     if [[ $process_probe_rc -ne 0 ]]; then
         return 0
@@ -2444,26 +2574,26 @@ force_kill_app() {
     # confirmed uninstall, so a still-running process at this point is
     # blocking a clean result and we trade unsaved state for that.
     local kill_rc=0
-    pkill -x "$match_pattern" 2> /dev/null || kill_rc=$?
+    pkill -x "$escaped_pattern" 2> /dev/null || kill_rc=$?
     [[ $kill_rc -ge 128 ]] && return "$kill_rc"
     local sleep_rc=0
-    _mole_wait_for_app_exit "$match_pattern" || sleep_rc=$?
+    _mole_wait_for_app_exit "$escaped_pattern" || sleep_rc=$?
     [[ $sleep_rc -ge 128 ]] && return "$sleep_rc"
     process_probe_rc=0
-    pgrep -x "$match_pattern" > /dev/null 2>&1 || process_probe_rc=$?
+    pgrep -x "$escaped_pattern" > /dev/null 2>&1 || process_probe_rc=$?
     [[ $process_probe_rc -ge 128 ]] && return "$process_probe_rc"
     if [[ $process_probe_rc -ne 0 ]]; then
         return 0
     fi
 
     kill_rc=0
-    pkill -9 -x "$match_pattern" 2> /dev/null || kill_rc=$?
+    pkill -9 -x "$escaped_pattern" 2> /dev/null || kill_rc=$?
     [[ $kill_rc -ge 128 ]] && return "$kill_rc"
     sleep_rc=0
-    _mole_wait_for_app_exit "$match_pattern" || sleep_rc=$?
+    _mole_wait_for_app_exit "$escaped_pattern" || sleep_rc=$?
     [[ $sleep_rc -ge 128 ]] && return "$sleep_rc"
     process_probe_rc=0
-    pgrep -x "$match_pattern" > /dev/null 2>&1 || process_probe_rc=$?
+    pgrep -x "$escaped_pattern" > /dev/null 2>&1 || process_probe_rc=$?
     [[ $process_probe_rc -ge 128 ]] && return "$process_probe_rc"
     if [[ $process_probe_rc -ne 0 ]]; then
         return 0
@@ -2477,10 +2607,10 @@ force_kill_app() {
     fi
     if [[ $sudo_probe_rc -eq 0 ]]; then
         kill_rc=0
-        sudo pkill -9 -x "$match_pattern" 2> /dev/null || kill_rc=$?
+        sudo pkill -9 -x "$escaped_pattern" 2> /dev/null || kill_rc=$?
         [[ $kill_rc -ge 128 ]] && return "$kill_rc"
         sleep_rc=0
-        _mole_wait_for_app_exit "$match_pattern" || sleep_rc=$?
+        _mole_wait_for_app_exit "$escaped_pattern" || sleep_rc=$?
         [[ $sleep_rc -ge 128 ]] && return "$sleep_rc"
     fi
 
@@ -2489,7 +2619,7 @@ force_kill_app() {
     local retries=3
     while [[ $retries -gt 0 ]]; do
         process_probe_rc=0
-        pgrep -x "$match_pattern" > /dev/null 2>&1 || process_probe_rc=$?
+        pgrep -x "$escaped_pattern" > /dev/null 2>&1 || process_probe_rc=$?
         [[ $process_probe_rc -ge 128 ]] && return "$process_probe_rc"
         if [[ $process_probe_rc -ne 0 ]]; then
             return 0
@@ -2501,7 +2631,7 @@ force_kill_app() {
     done
 
     process_probe_rc=0
-    pgrep -x "$match_pattern" > /dev/null 2>&1 || process_probe_rc=$?
+    pgrep -x "$escaped_pattern" > /dev/null 2>&1 || process_probe_rc=$?
     [[ $process_probe_rc -ge 128 ]] && return "$process_probe_rc"
     [[ $process_probe_rc -eq 0 ]] && return 1
     return 0

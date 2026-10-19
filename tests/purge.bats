@@ -1366,6 +1366,7 @@ EOF
 		/bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/clean/project.sh"
+_MOLE_PURGE_FIND=find  # route the purge walk through the stub
 
 scan_status=0
 MO_USE_FIND=1 scan_purge_targets "$HOME/www" "$SCAN_OUTPUT" || scan_status=$?
@@ -1384,14 +1385,12 @@ EOF
 
 	local mock_bin="$HOME/mock-find-tag-failure"
 	mkdir -p "$mock_bin"
+	# One walk lists targets and tags (#1666); it fails after printing both.
 	cat > "$mock_bin/find" <<'EOF'
 #!/bin/bash
 args=" $* "
-if [[ "$args" != *" -type f "* ]]; then
-	printf '%s\n' "$HOME/www/test-project/node_modules"
-	exit 0
-fi
-
+[[ "$args" == *" -type f "* ]] || exit 8
+printf '%s\n' "$HOME/www/test-project/node_modules"
 printf '%s\n' "$HOME/www/test-project/.cache/CACHEDIR.TAG"
 exit 9
 EOF
@@ -1404,6 +1403,7 @@ EOF
 		/bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/clean/project.sh"
+_MOLE_PURGE_FIND=find  # route the purge walk through the stub
 
 scan_status=0
 MO_USE_FIND=1 scan_purge_targets "$HOME/www" "$SCAN_OUTPUT" || scan_status=$?
@@ -1530,10 +1530,7 @@ EOF
 	mkdir -p "$mock_bin"
 	cat > "$mock_bin/find" <<'EOF'
 #!/bin/bash
-args=" $* "
-if [[ "$args" != *" -type f "* ]]; then
-	printf '%s\n' "$HOME/www/test-project/node_modules"
-fi
+printf '%s\n' "$HOME/www/test-project/node_modules"
 EOF
 	chmod +x "$mock_bin/find"
 	cat > "$mock_bin/sort" <<'EOF'
@@ -1772,6 +1769,7 @@ EOF
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/clean/project.sh"
+_MOLE_PURGE_FIND=find  # route the purge walk through the stub
 mkdir -p "$HOME/probe/project/node_modules" "$HOME/.cache/mole"
 touch "$HOME/probe/project/package.json"
 fd() { :; }
@@ -2876,6 +2874,13 @@ EOF
 	[[ "$output" == *"Show zero-size project artifact directories"* ]]
 }
 
+@test "mo purge -h shows usage and exits 0" {
+	run env HOME="$HOME" "$PROJECT_ROOT/mole" purge -h
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"Usage:"* && "$output" == *"mo purge [options]"* ]] || return 1
+	[[ "$output" == *"-h, --help"* ]]
+}
+
 @test "mo purge: accepts --debug flag" {
 	if ! command -v gtimeout >/dev/null 2>&1 && ! command -v timeout >/dev/null 2>&1; then
 		skip "gtimeout/timeout not available"
@@ -3492,7 +3497,7 @@ printf generated > "$root/repo/Svc/other/build/out.txt"
 git init -q "$root/repo"
 git -C "$root/repo" add Svc/app/build/source.txt
 # A plain mv leaves the index with the old spelling and git status clean.
-mv "$root/repo/Svc" "$root/repo/svc"
+/bin/mv "$root/repo/Svc" "$root/repo/svc"
 is_protected_purge_artifact "$root/repo/svc/app/build" || exit 11
 # An untracked sibling under the same folder is still disposable.
 if is_protected_purge_artifact "$root/repo/svc/other/build"; then exit 12; fi
@@ -4473,6 +4478,47 @@ EOF
     [ "$failures" -eq 0 ]
 }
 
+@test "scan_purge_targets still walks when find rejects the dataless flag name" {
+	# An older macOS find that does not know `dataless` fails the whole walk
+	# with the flag in it. The probe must turn the prune off instead.
+	local root="$HOME/dataless-probe"
+	mkdir -p "$root/app/node_modules"
+	touch "$root/app/package.json"
+
+	local scan_output
+	scan_output="$(mktemp)"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ROOT="$root" SCAN_OUTPUT="$scan_output" \
+		/bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/clean/project.sh"
+_MOLE_PURGE_FIND=find  # route the purge walk through the stub
+run_with_timeout() { shift; "$@"; }
+fd() { return 1; }
+find() {
+	local arg
+	for arg in "$@"; do
+		if [[ "$arg" == "-flags" ]]; then
+			echo "FLAG_SEEN" >> "$HOME/walk.log"
+			echo "find: -flags: dataless: illegal flag name" >&2
+			return 1
+		fi
+	done
+	/usr/bin/find "$@"
+}
+scan_purge_targets "$ROOT" "$SCAN_OUTPUT"
+cat "$SCAN_OUTPUT"
+echo "WALK_LOG:$(cat "$HOME/walk.log")"
+EOF
+
+	rm -f "$scan_output" "$HOME/walk.log"
+	rm -rf "$root"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"$root/app/node_modules"* ]] || return 1
+	[[ "$output" == *"WALK_LOG:FLAG_SEEN"* ]] || return 1
+	[[ "$output" != *"WALK_LOG:FLAG_SEEN"*"FLAG_SEEN"* ]]
+}
+
 @test "scan_purge_targets skips online-only cloud folders and never uses fd for a cloud root (#1679)" {
 	local cloud="$HOME/Library/CloudStorage/GoogleDrive-test"
 	mkdir -p "$cloud/Local/app/node_modules" "$cloud/OnlineOnly/app/node_modules"
@@ -4485,6 +4531,7 @@ EOF
 		/bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/clean/project.sh"
+_MOLE_PURGE_FIND=find  # route the purge walk through the stub
 run_with_timeout() { shift; "$@"; }
 fd() { echo "FD_USED" >> "$HOME/walk.log"; return 1; }
 # A real dataless flag needs a File Provider, so the stub stands in for it with
@@ -4518,4 +4565,461 @@ EOF
 	[[ "$output" == *"WALK_DATALESS=true"* ]] || return 1
 	[[ "$output" != *"WALK_DATALESS=false"* ]] || return 1
 	[[ "$output" != *"FD_USED"* ]]
+}
+
+@test "purge keeps the dataless prune with GNU find first in PATH" {
+	# GNU findutils has no -flags primary, so a PATH find would always answer
+	# "unknown" and the walk would list online-only cloud folders. The probe
+	# and both walks use the system find instead.
+	local root="$HOME/gnu-find-purge"
+	local stub_bin="$HOME/gnu-find-bin"
+	mkdir -p "$root/app/node_modules" "$stub_bin"
+	touch "$root/app/package.json"
+	cat > "$stub_bin/find" <<'STUB'
+#!/bin/bash
+echo "PATH_FIND $*" >> "$HOME/gnu-find.log"
+for arg in "$@"; do
+	[[ "$arg" == "-flags" ]] && { echo "find: unknown predicate '-flags'" >&2; exit 1; }
+done
+exec /usr/bin/find "$@"
+STUB
+	chmod +x "$stub_bin/find"
+
+	local scan_output
+	scan_output="$(mktemp)"
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$stub_bin:$PATH" ROOT="$root" SCAN_OUTPUT="$scan_output" \
+		/bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/clean/project.sh"
+run_with_timeout() { shift; "$@"; }
+fd() { return 1; }
+rc=0
+_purge_find_knows_dataless || rc=$?
+echo "DATALESS_RC=$rc"
+scan_purge_targets "$ROOT" "$SCAN_OUTPUT"
+cat "$SCAN_OUTPUT"
+EOF
+
+	local path_find_calls=""
+	path_find_calls=$(cat "$HOME/gnu-find.log" 2> /dev/null || true)
+	rm -f "$scan_output" "$HOME/gnu-find.log"
+	rm -rf "$root" "$stub_bin"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"DATALESS_RC=0"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"$root/app/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$path_find_calls" != *"-flags"* ]] || { echo "$path_find_calls"; return 1; }
+	[[ "$path_find_calls" != *"$root -mindepth"* ]] || { echo "$path_find_calls"; return 1; }
+}
+
+@test "dataless capability signals cancel discovery before any candidate is published" {
+    local signal
+    for signal in 130 143; do
+        run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" SIGNAL="$signal" /bin/bash --noprofile --norc <<'SH'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/clean/project.sh"
+_MOLE_PURGE_FIND=find  # route the purge walk through the stub
+mkdir -p "$HOME/.cache/mole" "$HOME/projects/app/node_modules"
+touch "$HOME/projects/app/package.json"
+run_with_timeout() { shift; "$@"; }
+fd() { return 1; }
+find() {
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == -flags ]]; then return "$SIGNAL"; fi
+    done
+    /usr/bin/find "$@"
+}
+rc=0
+scan_purge_targets "$HOME/projects" "$HOME/result" || rc=$?
+[[ $rc -eq $SIGNAL ]] || exit 1
+[[ ! -s "$HOME/result" ]] || exit 1
+SH
+        [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    done
+}
+
+# #1666: a container root (purge_paths entry that is not a project) is scanned
+# as one unit first. Only when that scan times out is it scanned again one
+# child at a time, each with its own budget, so one slow project no longer
+# skips every sibling under the same root.
+_purge_unit_flow_script() {
+	cat <<'EOF_FLOW'
+get_dir_size_kb() { echo 4; }
+is_recently_modified() { _PURGE_ACTIVITY_STATE=old; return 1; }
+purge_target_activity_still_safe() { return 0; }
+safe_remove() { printf 'REMOVE:%s\n' "$1"; }
+export MOLE_DRY_RUN=1
+clean_rc=0
+clean_project_artifacts </dev/null || clean_rc=$?
+printf 'RC=%s OUTCOME=%s\n' "$clean_rc" "$PURGE_RUN_OUTCOME"
+EOF_FLOW
+}
+
+@test "purge falls back to child units when a container root times out and keeps completed siblings (#1666)" {
+	local root="$HOME/sites-1666"
+	local name
+	for name in a-fast b-slow c-fast; do
+		mkdir -p "$root/$name/node_modules"
+		touch "$root/$name/package.json"
+	done
+	local stub="$HOME/find-1666-slow"
+	cat > "$stub" <<'STUB'
+#!/bin/bash
+# A walk that enters b-slow never finishes in time: the child walk itself, or
+# any deep walk started at the container root.
+if [[ "$1" == "$ROOT/b-slow" ]]; then exec /bin/sleep 20; fi
+if [[ "$1" == "$ROOT" && " $* " != *" -maxdepth 1 "* ]]; then exec /bin/sleep 20; fi
+exec /usr/bin/find "$@"
+STUB
+	chmod +x "$stub"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ROOT="$root" STUB="$stub" FLOW="$(_purge_unit_flow_script)" \
+		MO_USE_FIND=1 MO_PURGE_SCAN_TIMEOUT_SEC=3 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/project.sh"
+mkdir -p "$HOME/.cache/mole"
+_MOLE_PURGE_FIND="$STUB"  # route the purge walk through the stub
+PURGE_SEARCH_PATHS=("$ROOT")
+get_optimal_parallel_jobs() { echo 2; }
+eval "$FLOW"
+EOF
+
+	rm -rf "$root" "$stub"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"REMOVE:$root/a-fast/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"REMOVE:$root/c-fast/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"REMOVE:$root/b-slow/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Skipped 1 project scan root because scanning did not complete"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"~/sites-1666/b-slow"*"(status 124)"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"OUTCOME=incomplete"* ]] || { echo "$output"; return 1; }
+}
+
+@test "purge scans a container root that completes as one unit with one find call (#1666)" {
+	local root="$HOME/sites-1666-calls"
+	mkdir -p "$root/a/node_modules" "$root/b/.cache"
+	touch "$root/a/package.json" "$root/b/package.json"
+	printf 'Signature: 8a477f597d28d172789f06886806bc55\n' > "$root/b/.cache/CACHEDIR.TAG"
+	local stub="$HOME/find-1666-calls" log="$HOME/find-1666-calls.log"
+	cat > "$stub" <<'STUB'
+#!/bin/bash
+printf '%s\t%s\n' "$1" "$*" >> "$LOG"
+exec /usr/bin/find "$@"
+STUB
+	chmod +x "$stub"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ROOT="$root" STUB="$stub" LOG="$log" FLOW="$(_purge_unit_flow_script)" \
+		MO_USE_FIND=1 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/project.sh"
+mkdir -p "$HOME/.cache/mole"
+_MOLE_PURGE_FIND="$STUB"  # route the purge walk through the stub
+PURGE_SEARCH_PATHS=("$ROOT")
+eval "$FLOW"
+EOF
+
+	local root_calls a_calls b_calls root_deep
+	root_calls=$(awk -F'\t' -v r="$root" '$1 == r' "$log" | wc -l | tr -d ' ')
+	root_deep=$(awk -F'\t' -v r="$root" '$1 == r && $2 !~ / -maxdepth 1 /' "$log" | wc -l | tr -d ' ')
+	a_calls=$(awk -F'\t' -v r="$root/a" '$1 == r' "$log" | wc -l | tr -d ' ')
+	b_calls=$(awk -F'\t' -v r="$root/b" '$1 == r' "$log" | wc -l | tr -d ' ')
+	rm -rf "$root" "$stub" "$log"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"REMOVE:$root/a/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"REMOVE:$root/b/.cache"* ]] || { echo "$output"; return 1; }
+	[[ "$root_calls" == 1 && "$root_deep" == 1 ]] || { echo "ROOT=$root_calls DEEP=$root_deep"; return 1; }
+	[[ "$a_calls" == 0 && "$b_calls" == 0 ]] || { echo "A=$a_calls B=$b_calls"; return 1; }
+}
+
+@test "purge keeps target and CACHEDIR.TAG depth coverage when walking scan units (#1666)" {
+	local sig='Signature: 8a477f597d28d172789f06886806bc55'
+	local box="$HOME/parity-1666"
+	local container="$box/container" project="$box/project"
+	# Container root: targets at depth 1, 2, 6 and 7; tags at depth 2, 3, 7 and 8.
+	mkdir -p "$container/node_modules" "$container/x/node_modules" \
+		"$container/x/a/b/c/d/node_modules" "$container/x/a/b/c/d/e/node_modules" \
+		"$container/t" "$container/x/k" "$container/x/a/b/c/d/cachy" "$container/x/a/b/c/d/e/cachy"
+	touch "$container/x/package.json"
+	printf '%s\n' "$sig" > "$container/t/CACHEDIR.TAG"
+	printf '%s\n' "$sig" > "$container/x/k/CACHEDIR.TAG"
+	printf '%s\n' "$sig" > "$container/x/a/b/c/d/cachy/CACHEDIR.TAG"
+	printf '%s\n' "$sig" > "$container/x/a/b/c/d/e/cachy/CACHEDIR.TAG"
+	# Project root: direct-child target, tags at depth 1 and 2.
+	mkdir -p "$project/node_modules" "$project/c"
+	touch "$project/package.json"
+	printf '%s\n' "$sig" > "$project/CACHEDIR.TAG"
+	printf '%s\n' "$sig" > "$project/c/CACHEDIR.TAG"
+
+	# The second pass makes the container's single walk time out, so the same
+	# fixture is found again through child units with shifted depth limits.
+	local stub="$HOME/find-1666-parity"
+	cat > "$stub" <<'STUB'
+#!/bin/bash
+if [[ "$FALLBACK" == 1 && "$1" == "$BOX/container" && " $* " != *" -maxdepth 1 "* && " $* " != *" -maxdepth 0 "* ]]; then
+	exec /bin/sleep 20
+fi
+exec /usr/bin/find "$@"
+STUB
+	chmod +x "$stub"
+
+	local expected="container/x/a/b/c/d/cachy,container/x/a/b/c/d/node_modules,container/x/k,container/x/node_modules,project/c,project/node_modules"
+	local fallback removed
+	for fallback in 0 1; do
+		run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" BOX="$box" STUB="$stub" FALLBACK="$fallback" FLOW="$(_purge_unit_flow_script)" \
+			MO_USE_FIND=1 MO_PURGE_SCAN_TIMEOUT_SEC=2 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/project.sh"
+mkdir -p "$HOME/.cache/mole"
+_MOLE_PURGE_FIND="$STUB"  # route the purge walk through the stub
+PURGE_SEARCH_PATHS=("$BOX/container" "$BOX/project")
+eval "$FLOW"
+EOF
+		[ "$status" -eq 0 ] || { echo "$output"; rm -rf "$box" "$stub"; return 1; }
+		removed=$(printf '%s\n' "$output" | sed -n "s|^REMOVE:$box/||p" | LC_ALL=C sort | paste -sd, -)
+		[[ "$removed" == "$expected" ]] || { echo "FALLBACK=$fallback GOT=$removed"; echo "$output"; rm -rf "$box" "$stub"; return 1; }
+		[[ "$output" != *"Skipped"* ]] || { echo "$output"; rm -rf "$box" "$stub"; return 1; }
+	done
+	rm -rf "$box" "$stub"
+}
+
+@test "purge never offers a CACHEDIR.TAG directory inside a depth-one .git or Library (#1666)" {
+	local sig='Signature: 8a477f597d28d172789f06886806bc55'
+	local root="$HOME/git-tag-1666"
+	mkdir -p "$root/node_modules" "$root/Library/cache"
+	touch "$root/package.json"
+	git -C "$root" init -q
+	mkdir -p "$root/.git/lfs-cache"
+	printf '%s\n' "$sig" > "$root/.git/lfs-cache/CACHEDIR.TAG"
+	printf '%s\n' "$sig" > "$root/Library/cache/CACHEDIR.TAG"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ROOT="$root" FLOW="$(_purge_unit_flow_script)" \
+		MO_USE_FIND=1 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/project.sh"
+mkdir -p "$HOME/.cache/mole"
+PURGE_SEARCH_PATHS=("$ROOT")
+eval "$FLOW"
+EOF
+
+	rm -rf "$root"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"REMOVE:$root/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"REMOVE:$root/.git/"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"REMOVE:$root/Library/"* ]] || { echo "$output"; return 1; }
+}
+
+@test "purge container expansion keeps the root's safety rules for its children (#1666)" {
+	local root="$HOME/expand-safety-1666"
+	local outside="$HOME/outside-1666"
+	mkdir -p "$root/node_modules" "$root/ok/node_modules" "$root/OnlineOnly/app/node_modules" \
+		"$outside/app/node_modules"
+	touch "$root/ok/package.json" "$root/OnlineOnly/app/package.json" "$outside/app/package.json"
+	ln -s "$outside" "$root/linked"
+	local stub="$HOME/find-1666-dataless" log="$HOME/find-1666-dataless.log"
+	# A real dataless flag needs a File Provider; the stub turns the flag into a
+	# name match on OnlineOnly and records where every walk started. The deep
+	# walk of the root never finishes, so the root falls back to child units.
+	cat > "$stub" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$1" >> "$LOG"
+if [[ "$1" == "$ROOT" && " $* " != *" -maxdepth 1 "* && " $* " != *" -maxdepth 0 "* ]]; then exec /bin/sleep 20; fi
+args=()
+while [[ $# -gt 0 ]]; do
+	if [[ "$1" == "-flags" && "${2:-}" == "+dataless" ]]; then
+		args+=(-name OnlineOnly)
+		shift 2
+		continue
+	fi
+	args+=("$1")
+	shift
+done
+exec /usr/bin/find "${args[@]}"
+STUB
+	chmod +x "$stub"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ROOT="$root" STUB="$stub" LOG="$log" FLOW="$(_purge_unit_flow_script)" \
+		MO_USE_FIND=1 MO_PURGE_SCAN_TIMEOUT_SEC=2 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/project.sh"
+mkdir -p "$HOME/.cache/mole"
+_MOLE_PURGE_FIND="$STUB"  # route the purge walk through the stub
+PURGE_SEARCH_PATHS=("$ROOT")
+eval "$FLOW"
+EOF
+
+	local starts
+	starts=$(cat "$log" 2> /dev/null || true)
+	rm -rf "$root" "$outside" "$stub" "$log"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"REMOVE:$root/ok/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"REMOVE:$root/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"OnlineOnly"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"$outside"* && "$output" != *"REMOVE:$root/linked"* ]] || { echo "$output"; return 1; }
+	[[ "$starts" == *"$root/ok"* ]] || { echo "$starts"; return 1; }
+	[[ "$starts" != *"$root/OnlineOnly"* && "$starts" != *"$root/linked"* ]] || { echo "$starts"; return 1; }
+	[[ "$starts" != *"$root/node_modules"* ]] || { echo "$starts"; return 1; }
+}
+
+@test "purge removes every scan unit temp file when one unit is cancelled (#1666)" {
+	local box="$HOME/cancel-1666"
+	local root="$box/sites"
+	local name
+	for name in a b c d; do
+		mkdir -p "$root/$name/node_modules"
+		touch "$root/$name/package.json"
+	done
+	mkdir -p "$box/tmp"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ROOT="$root" TMPDIR="$box/tmp" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/project.sh"
+mkdir -p "$HOME/.cache/mole"
+PURGE_SEARCH_PATHS=("$ROOT")
+get_optimal_parallel_jobs() { echo 2; }
+scan_purge_targets() {
+	local unit="${4:-$1}"
+	printf '%s/node_modules\n' "$unit" > "$2"
+	: > "$2.targets"; : > "$2.verified"; : > "$2.verified.probes"
+	[[ "$unit" == "$ROOT" ]] && return 124
+	printf '%s\n' "$unit" >> "$HOME/cancel-1666-units"
+	[[ "$unit" == "$ROOT/b" ]] && return 130
+	# The peer is still running when b is cancelled.
+	sleep 1
+	return 0
+}
+safe_remove() { printf 'UNEXPECTED_REMOVE:%s\n' "$1"; }
+export MOLE_DRY_RUN=1
+clean_rc=0
+clean_project_artifacts </dev/null || clean_rc=$?
+printf 'RC=%s\n' "$clean_rc"
+printf 'UNITS=%s\n' "$(paste -sd, "$HOME/cancel-1666-units")"
+# mole.registry.* is the process-wide temp registry that bin/purge.sh removes on exit.
+printf 'LEFT=%s\n' "$(find "$TMPDIR" -type f ! -name 'mole.registry.*' | wc -l | tr -d ' ')"
+EOF
+
+	rm -rf "$box" "$HOME/cancel-1666-units"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"RC=130"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"LEFT=0"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"UNEXPECTED_REMOVE"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"UNITS="*"$root/a"* && "$output" == *"UNITS="*"$root/b"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"$root/c"* && "$output" != *"$root/d"* ]] || { echo "$output"; return 1; }
+}
+
+@test "purge reports container children left unscanned at the root cap by path (#1666)" {
+	local root="$HOME/cap-1666"
+	local name
+	for name in a b c; do
+		mkdir -p "$root/$name/node_modules"
+		touch "$root/$name/package.json"
+	done
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ROOT="$root" FLOW="$(_purge_unit_flow_script)" \
+		MO_PURGE_SCAN_TIMEOUT_SEC=2 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/project.sh"
+mkdir -p "$HOME/.cache/mole"
+PURGE_SEARCH_PATHS=("$ROOT")
+get_optimal_parallel_jobs() { echo 1; }
+# The root's single scan times out at once. One job and a 2 s budget give its
+# fallback a 2 s cap. Unit a takes 2.5 s, so the cap has expired before b and
+# c can start.
+scan_purge_targets() {
+	local unit="${4:-$1}"
+	[[ "$unit" == "$ROOT" ]] && return 124
+	printf '%s %s\n' "${unit##*/}" "$MO_PURGE_SCAN_TIMEOUT_SEC" >> "$HOME/cap-1666-units"
+	sleep 2.5
+	printf '%s/node_modules\n' "$unit" > "$2"
+}
+eval "$FLOW"
+printf 'UNITS=%s\n' "$(paste -sd, "$HOME/cap-1666-units")"
+EOF
+
+	rm -rf "$root" "$HOME/cap-1666-units"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"REMOVE:$root/a/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"REMOVE:$root/b/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"REMOVE:$root/c/node_modules"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"UNITS=a 2" ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Skipped 2 project scan roots because scanning did not complete"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"~/cap-1666/b"*"(status 124)"*"~/cap-1666/c"*"(status 124)"* ]] || { echo "$output"; return 1; }
+	local listed
+	listed=$(printf '%s\n' "$output" | grep -c '(status ' || true)
+	[[ "$listed" == 2 ]] || { echo "$output"; return 1; }
+}
+
+@test "purge stops running scan units when a later root listing is interrupted (#1666)" {
+	local box="$HOME/listing-signal-1666"
+	mkdir -p "$box/first/a/node_modules" "$box/second/b/node_modules" "$box/tmp"
+	touch "$box/first/a/package.json" "$box/second/b/package.json"
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" BOX="$box" TMPDIR="$box/tmp" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/project.sh"
+mkdir -p "$HOME/.cache/mole"
+PURGE_SEARCH_PATHS=("$BOX/first" "$BOX/second")
+get_optimal_parallel_jobs() { echo 2; }
+scan_purge_targets() {
+	[[ "${4:-$1}" == "$1" ]] && return 124
+	printf '%s/node_modules\n' "${4:-$1}" > "$2"
+	: > "$2.verified"
+	sleep 3
+	touch "$BOX/unit-finished"
+}
+_purge_list_scan_units() {
+	if [[ "$1" == "$BOX/second" ]]; then
+		sleep 0.3
+		return 130
+	fi
+	_PURGE_SCAN_UNITS=("$1/a")
+}
+rc=0
+clean_project_artifacts </dev/null || rc=$?
+printf 'RC=%s\n' "$rc"
+sleep 3.5
+printf 'FINISHED=%s\n' "$([[ -e "$BOX/unit-finished" ]] && echo yes || echo no)"
+printf 'LEFT=%s\n' "$(find "$TMPDIR" -type f ! -name 'mole.registry.*' | wc -l | tr -d ' ')"
+EOF
+
+	rm -rf "$box"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"RC=130"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"FINISHED=no"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"LEFT=0"* ]] || { echo "$output"; return 1; }
+}
+
+@test "purge prints at most ten skipped child paths and keeps the full count (#1666)" {
+	local root="$HOME/many-skipped-1666"
+	local i
+	for i in 01 02 03 04 05 06 07 08 09 10 11 12 13; do
+		mkdir -p "$root/p$i/node_modules"
+		touch "$root/p$i/package.json"
+	done
+
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ROOT="$root" FLOW="$(_purge_unit_flow_script)" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/project.sh"
+mkdir -p "$HOME/.cache/mole"
+PURGE_SEARCH_PATHS=("$ROOT")
+scan_purge_targets() { : > "$2"; return 124; }
+eval "$FLOW"
+EOF
+
+	rm -rf "$root"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"Skipped 13 project scan roots because scanning did not complete"* ]] || { echo "$output"; return 1; }
+	local listed
+	listed=$(printf '%s\n' "$output" | grep -c '(status 124)' || true)
+	[[ "$listed" == 10 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"~/many-skipped-1666/p10"*"(status 124)"* ]] || { echo "$output"; return 1; }
+	[[ "$output" != *"~/many-skipped-1666/p11"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"and 3 more"* ]] || { echo "$output"; return 1; }
 }

@@ -268,12 +268,13 @@ EOF
     done
 }
 
-@test "protected Finder metadata skips its scan and preserves later cleanup" {
+@test "protected Finder metadata skips both external scans" {
     run_external_finder_scan_with 124 false true
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == *"RC=0 CANCEL=0 FILES=1"* ]] || return 1
-    [[ "$output" == *"REMOVE:"*"/External/._later"* ]] || return 1
+    [[ "$output" == *"RC=0 CANCEL=0 FILES=0"* ]] || return 1
+    [[ "$output" != *"REMOVE:"* && "$output" != *"PREVIEW:"* ]] || return 1
     [[ "$output" != *"/External/.DS_Store"* ]] || return 1
+    [[ "$output" != *"/External/._later"* ]] || return 1
 }
 
 @test "cloud safety cancellation crosses the timeout worker and stops later sections" {
@@ -383,7 +384,7 @@ EOF
     local plain_output
     plain_output=$(printf '%s' "$output" | sed -E $'s/\033\\[[0-9;]*m//g')
     [[ "$output" == *"Cleanup complete"* ]] || return 1
-    [[ "$plain_output" == *"Tracked cleanup: At least 10.74GB | Items cleaned: 42"* ]] || return 1
+    [[ "$plain_output" == *"Tracked cleanup: 10.74GB+ | Items cleaned: 42"* ]] || return 1
     [[ "$output" == *"RECORDED=1/2"* ]] || return 1
     [[ "$output" == *"Free space:"* ]] || return 1
     [[ "$output" != *"size-check budget"* && "$output" != *"removal budget"* ]] || return 1

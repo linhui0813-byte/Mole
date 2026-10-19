@@ -367,7 +367,7 @@ start_uninstall_metadata_refresh() {
             if [[ "${MO_DEBUG:-}" == "1" ]]; then
                 local ts
                 ts=$(date "+%Y-%m-%d %H:%M:%S" 2> /dev/null || echo "?")
-                echo "[$ts] DEBUG: [metadata-refresh] $*" >> "${HOME}/.config/mole/mole_debug_session.log" 2> /dev/null || true
+                echo "[$ts] DEBUG: [metadata-refresh] $*" >> "$DEBUG_LOG_FILE" 2> /dev/null || true
             fi
         }
 
@@ -414,7 +414,7 @@ start_uninstall_metadata_refresh() {
                 local metadata_date
                 metadata_date=$(run_with_timeout 0.2 mdls -name kMDItemLastUsedDate -raw "$app_path" 2> /dev/null || echo "") # 0.2s: per-app probe in tight scan loop, see lib/core/timeouts.sh
                 if [[ "$metadata_date" != "(null)" && -n "$metadata_date" ]]; then
-                    last_used_epoch=$(date -j -f "%Y-%m-%d %H:%M:%S %z" "$metadata_date" "+%s" 2> /dev/null || echo "0")
+                    last_used_epoch=$("$_DATE_CMD" -j -f "%Y-%m-%d %H:%M:%S %z" "$metadata_date" "+%s" 2> /dev/null || echo "0")
                 fi
 
                 if [[ ! "$last_used_epoch" =~ ^[0-9]+$ || $last_used_epoch -le 0 || $last_used_epoch -lt $MOLE_UNINSTALL_EPOCH_FLOOR ]]; then
@@ -683,7 +683,9 @@ uninstall_print_app_paths_with_mtime() {
     [[ -d "$app_dir" ]] || return 0
 
     # shellcheck disable=SC2016 # The child shell expands the batch arguments.
-    command find "$app_dir" -maxdepth 3 -iname "*.app" -exec /bin/bash -c '
+    # A hidden folder holds updater staging copies (/Applications/.x-update/app/X.app),
+    # not installs; a hidden .app itself is still listed.
+    command find "$app_dir" -mindepth 1 -maxdepth 3 \( -type d -name '.*' ! -iname '*.app' -prune \) -o -iname "*.app" -exec /bin/bash -c '
         stat_cmd="$1"
         include_info="$2"
         shift 2
@@ -1690,6 +1692,43 @@ match_apps_by_name() {
     selected_apps=()
     local -a matched_indices=()
 
+    # Lowercase every display name and bundle directory name in one tr pass,
+    # indexed like apps_data. Forking echo|tr and basename per app, per term,
+    # per round cost seconds with a few hundred apps. tr keeps the locale's
+    # case mapping (É to é under UTF-8), which mole_ascii_lowercase would not.
+    # Fields come from one `read` line each, so they hold no newline and the
+    # 2N output lines stay aligned with the input.
+    local -a app_names_lower=() app_dirs_lower=()
+    if [[ ${#apps_data[@]} -gt 0 ]]; then
+        local lower_app lower_dir lower_line lower_i=0
+        local -a lower_input=() lower_output=()
+        for lower_app in "${apps_data[@]}"; do
+            IFS='|' read -r epoch app_path app_name bundle_id size last_used size_kb <<< "$lower_app"
+            lower_dir="${app_path##*/}"
+            lower_input+=("$app_name" "${lower_dir%.[aA][pP][pP]}")
+        done
+        while IFS= read -r lower_line; do
+            lower_output+=("$lower_line")
+        done < <(printf '%s\n' "${lower_input[@]}" | /usr/bin/tr '[:upper:]' '[:lower:]' 2> /dev/null)
+        # tr stops at the first byte that is not valid in the locale, which
+        # would leave every later app unmatched. Redo the names one by one
+        # then, folding only ASCII for a name tr cannot read.
+        if [[ ${#lower_output[@]} -ne ${#lower_input[@]} ]]; then
+            local lower_folded
+            lower_output=()
+            for lower_line in "${lower_input[@]}"; do
+                lower_folded=$(printf '%s\n' "$lower_line" | /usr/bin/tr '[:upper:]' '[:lower:]' 2> /dev/null) ||
+                    lower_folded=$(printf '%s\n' "$lower_line" | LC_ALL=C /usr/bin/tr '[:upper:]' '[:lower:]')
+                lower_output+=("$lower_folded")
+            done
+        fi
+        while [[ $lower_i -lt ${#apps_data[@]} ]]; do
+            app_names_lower+=("${lower_output[$((lower_i * 2))]-}")
+            app_dirs_lower+=("${lower_output[$((lower_i * 2 + 1))]-}")
+            lower_i=$((lower_i + 1))
+        done
+    fi
+
     # `mo uninstall Tor Browser` arrives as two words. Matching each word
     # alone sent "Tor" into a substring hit on WebSTORm while the app the
     # user actually named sat in the list (#1365). When the words joined
@@ -1700,21 +1739,17 @@ match_apps_by_name() {
     # rather than silently collapsing into the third.
     if [[ ${#search_terms[@]} -gt 1 ]]; then
         local every_word_exact=true
-        local word word_lower word_app word_hit
+        local word word_lower word_hit word_idx
         for word in "${search_terms[@]}"; do
-            word_lower=$(echo "$word" | tr '[:upper:]' '[:lower:]')
+            word_lower=$(echo "$word" | /usr/bin/tr '[:upper:]' '[:lower:]')
             word_hit=false
-            for word_app in "${apps_data[@]}"; do
-                IFS='|' read -r epoch app_path app_name bundle_id size last_used size_kb <<< "$word_app"
-                local word_name_lower word_dir_lower
-                word_name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
-                word_dir_lower=$(basename "$app_path")
-                word_dir_lower="${word_dir_lower%.[aA][pP][pP]}"
-                word_dir_lower=$(printf '%s' "$word_dir_lower" | tr '[:upper:]' '[:lower:]')
-                if [[ "$word_name_lower" == "$word_lower" || "$word_dir_lower" == "$word_lower" ]]; then
+            word_idx=0
+            while [[ $word_idx -lt ${#apps_data[@]} ]]; do
+                if [[ "${app_names_lower[$word_idx]}" == "$word_lower" || "${app_dirs_lower[$word_idx]}" == "$word_lower" ]]; then
                     word_hit=true
                     break
                 fi
+                word_idx=$((word_idx + 1))
             done
             if [[ "$word_hit" == "false" ]]; then
                 every_word_exact=false
@@ -1722,27 +1757,21 @@ match_apps_by_name() {
             fi
         done
         if [[ "$every_word_exact" == "false" ]]; then
-            local joined_lower
-            joined_lower=$(echo "$*" | tr '[:upper:]' '[:lower:]')
-            local joined_app
+            local joined_lower joined_app joined_idx=0
+            joined_lower=$(echo "$*" | /usr/bin/tr '[:upper:]' '[:lower:]')
             for joined_app in "${apps_data[@]}"; do
-                IFS='|' read -r epoch app_path app_name bundle_id size last_used size_kb <<< "$joined_app"
-                local joined_name_lower joined_dir_lower
-                joined_name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
-                joined_dir_lower=$(basename "$app_path")
-                joined_dir_lower="${joined_dir_lower%.[aA][pP][pP]}"
-                joined_dir_lower=$(printf '%s' "$joined_dir_lower" | tr '[:upper:]' '[:lower:]')
-                if [[ "$joined_name_lower" == "$joined_lower" || "$joined_dir_lower" == "$joined_lower" ]]; then
+                if [[ "${app_names_lower[$joined_idx]}" == "$joined_lower" || "${app_dirs_lower[$joined_idx]}" == "$joined_lower" ]]; then
                     selected_apps=("$joined_app")
                     return 0
                 fi
+                joined_idx=$((joined_idx + 1))
             done
         fi
     fi
 
     for search_term in "${search_terms[@]}"; do
         local search_lower
-        search_lower=$(echo "$search_term" | tr '[:upper:]' '[:lower:]')
+        search_lower=$(echo "$search_term" | /usr/bin/tr '[:upper:]' '[:lower:]')
         # Escape glob characters to prevent pattern injection
         search_lower=${search_lower//\\/\\\\}
         search_lower=${search_lower//\*/\\*}
@@ -1751,15 +1780,9 @@ match_apps_by_name() {
         local found=false
         local idx=0
         for app_data in "${apps_data[@]}"; do
-            IFS='|' read -r epoch app_path app_name bundle_id size last_used size_kb <<< "$app_data"
-            local name_lower
-            name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
+            local name_lower="${app_names_lower[$idx]}"
             # Also try matching against the .app directory base name
-            local dir_name
-            dir_name=$(basename "$app_path")
-            dir_name="${dir_name%.[aA][pP][pP]}"
-            local dir_lower
-            dir_lower=$(echo "$dir_name" | tr '[:upper:]' '[:lower:]')
+            local dir_lower="${app_dirs_lower[$idx]}"
 
             if [[ "$name_lower" == "$search_lower" || "$dir_lower" == "$search_lower" ]]; then
                 # Exact match - prefer this
@@ -1783,14 +1806,8 @@ match_apps_by_name() {
         if [[ "$found" == "false" ]]; then
             idx=0
             for app_data in "${apps_data[@]}"; do
-                IFS='|' read -r epoch app_path app_name bundle_id size last_used size_kb <<< "$app_data"
-                local name_lower
-                name_lower=$(echo "$app_name" | tr '[:upper:]' '[:lower:]')
-                local dir_name
-                dir_name=$(basename "$app_path")
-                dir_name="${dir_name%.[aA][pP][pP]}"
-                local dir_lower
-                dir_lower=$(echo "$dir_name" | tr '[:upper:]' '[:lower:]')
+                local name_lower="${app_names_lower[$idx]}"
+                local dir_lower="${app_dirs_lower[$idx]}"
 
                 if [[ "$name_lower" == *"$search_lower"* || "$dir_lower" == *"$search_lower"* ]]; then
                     local already=false
@@ -1854,10 +1871,24 @@ uninstall_list_apps() {
     # instead of one probe per app. It is scoped to this listing pass only.
     local _MOLE_BREW_BATCH_LIST_READY=0 _MOLE_BREW_BATCH_LIST="" _MOLE_BREW_BATCH_LIST_RC=0
     local _MOLE_BREW_BATCH_ROOM_READY=0 _MOLE_BREW_BATCH_ROOM_FILE="" _MOLE_BREW_BATCH_ROOM_RC=0
+    local _MOLE_BREW_BATCH_INFO_READY=0 _MOLE_BREW_BATCH_INFO_DIR=""
     local brew_inventory_dir="" brew_prep_rc=0
     if is_homebrew_available && brew_inventory_dir=$(create_temp_dir); then
         _MOLE_BREW_BATCH_ROOM_FILE="$brew_inventory_dir/caskroom"
         _mole_brew_prepare_batch_inventory || brew_prep_rc=$?
+        if [[ $brew_prep_rc -lt 128 ]]; then
+            local -a brew_app_paths=()
+            local brew_app_row brew_app_path
+            for brew_app_row in "${apps_data[@]+"${apps_data[@]}"}"; do
+                IFS='|' read -r _ brew_app_path _ <<< "$brew_app_row"
+                [[ -n "$brew_app_path" ]] && brew_app_paths+=("$brew_app_path")
+            done
+            _MOLE_BREW_BATCH_INFO_DIR="$brew_inventory_dir/info"
+            mkdir -p "$_MOLE_BREW_BATCH_INFO_DIR" || _MOLE_BREW_BATCH_INFO_DIR=""
+            if [[ -n "$_MOLE_BREW_BATCH_INFO_DIR" && ${#brew_app_paths[@]} -gt 0 ]]; then
+                _mole_brew_prefetch_cask_info "${brew_app_paths[@]}" || brew_prep_rc=$?
+            fi
+        fi
         if [[ $brew_prep_rc -ge 128 ]]; then
             rm -rf -- "$brew_inventory_dir" # SAFE: private read-only Homebrew inventory directory created above
             return "$brew_prep_rc"
@@ -1965,11 +1996,12 @@ uninstall_list_apps() {
 main() {
     # Set current command for operation logging
     export MOLE_CURRENT_COMMAND="uninstall"
-    log_operation_session_start "uninstall"
 
     # Default to Trash routing so an accidental uninstall is recoverable.
     # The caller can opt back into rm -rf with --permanent. See #723.
     export MOLE_DELETE_MODE="${MOLE_DELETE_MODE:-trash}"
+    # Only the --with-data flag preselects personal data, never the environment.
+    MOLE_UNINSTALL_WITH_DATA=0
 
     # Parse flags and collect app name arguments
     local -a app_name_args=()
@@ -1988,6 +2020,9 @@ main() {
                 ;;
             "--permanent")
                 export MOLE_DELETE_MODE="permanent"
+                ;;
+            "--with-data")
+                MOLE_UNINSTALL_WITH_DATA=1
                 ;;
             "--list")
                 list_mode=1
@@ -2015,6 +2050,10 @@ main() {
         uninstall_list_apps
         return $?
     fi
+
+    # Opened only after flags are parsed: --dry-run must reach the marker, and
+    # --help, --list and a rejected flag change nothing worth a session.
+    log_operation_session_start "uninstall"
 
     hide_cursor
     if [[ "${MOLE_DRY_RUN:-0}" == "1" ]]; then
@@ -2055,23 +2094,20 @@ main() {
         local index=1
         for selected_app in "${selected_apps[@]}"; do
             IFS='|' read -r _ app_path app_name _ size last_used _ <<< "$selected_app"
+            local safe_name
+            safe_name=$(mole_terminal_safe_text "$app_name")
             local size_display
             size_display=$(uninstall_normalize_size_display "$size" "$app_path")
             local last_display
             last_display=$(uninstall_normalize_last_used_display "$last_used")
-            printf "%d. %s  %s  |  Last: %s\n" "$index" "$app_name" "$size_display" "$last_display"
+            printf "%d. %s  %s  |  Last: %s\n" "$index" "$safe_name" "$size_display" "$last_display"
             ((index++))
         done
 
         printf '\n'
-        printf "Proceed with uninstallation? [y/N] "
-        local confirm
-        read -r confirm
-        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-            echo "Aborted."
-            return 0
-        fi
-
+        # One confirmation, not two: batch_uninstall_applications renders the
+        # full preview and asks there, after sizing and leftover discovery. A
+        # y/N prompt here runs before that scan, so it cannot serve as review.
         batch_uninstall_applications
         return 0
     fi

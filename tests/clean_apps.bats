@@ -510,7 +510,7 @@ source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/apps.sh"
 
 mkdir -p "$HOME/Library/Caches/com.example.LiveApp"
-touch -t "$(date -v-31d +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.example.LiveApp"
+touch -t "$(/bin/date -v-31d +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.example.LiveApp"
 
 scan_installed_apps() {
     : > "$1"
@@ -554,7 +554,7 @@ source "$PROJECT_ROOT/lib/clean/apps.sh"
 mkdir -p "$HOME/Applications/LiveApp.app" \
     "$HOME/Applications/Partial.app/Contents" \
     "$HOME/Library/Caches/com.example.LiveApp"
-touch -t "$(date -v-31d +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.example.LiveApp"
+touch -t "$(/bin/date -v-31d +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.example.LiveApp"
 rm -f "$HOME/.cache/mole/installed_apps_cache"
 
 cat > "$HOME/Applications/Partial.app/Contents/Info.plist" <<'PLIST'
@@ -625,7 +625,7 @@ source "$PROJECT_ROOT/lib/clean/apps.sh"
 
 mkdir -p "$HOME/Applications/Broken.app/Contents" \
     "$HOME/Library/Caches/com.example.LiveApp"
-touch -t "$(date -v-31d +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.example.LiveApp"
+touch -t "$(/bin/date -v-31d +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.example.LiveApp"
 rm -f "$HOME/.cache/mole/installed_apps_cache"
 
 stub_dir="$HOME/stub-bin-errexit-scan"
@@ -686,7 +686,7 @@ source "$PROJECT_ROOT/lib/clean/apps.sh"
 bad_name=$'Bad\\033[2J-\033[2J.app'
 mkdir -p "$HOME/Applications/$bad_name/Contents" \
     "$HOME/Library/Caches/com.example.LiveApp"
-touch -t "$(date -v-31d +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.example.LiveApp"
+touch -t "$(/bin/date -v-31d +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.example.LiveApp"
 
 stub_dir="$HOME/stub-bin-control-name"
 mkdir -p "$stub_dir"
@@ -725,7 +725,7 @@ EOF
 @test "is_bundle_orphaned returns true for old uninstalled bundle" {
     # Spotlight has no app for this bundle id; the real index is never read.
     mole_test_fake_command mdfind
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ORPHAN_AGE_THRESHOLD=30 /bin/bash --noprofile --norc <<'EOF'
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/apps.sh"
@@ -741,7 +741,7 @@ EOF
 }
 
 @test "is_bundle_orphaned keeps the app when mdfind times out (#1584)" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ORPHAN_AGE_THRESHOLD=30 /bin/bash --noprofile --norc <<'EOF'
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/apps.sh"
@@ -776,7 +776,7 @@ EOF
 }
 
 @test "is_bundle_orphaned still cancels on interrupt (#1584)" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" ORPHAN_AGE_THRESHOLD=30 /bin/bash --noprofile --norc <<'EOF'
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/apps.sh"
@@ -981,7 +981,7 @@ mkdir -p "$HOME/Library/Saved Application State/com.test.orphan.savedState"
 # Create a file with some content so directory size > 0
 echo "test data" > "$HOME/Library/Saved Application State/com.test.orphan.savedState/data.plist"
 # Set modification time to 31 days ago (older than 30-day threshold)
-touch -t "$(date -v-31d +%Y%m%d%H%M.%S 2>/dev/null || date -d '31 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Saved Application State/com.test.orphan.savedState" 2>/dev/null || true
+touch -t "$(/bin/date -v-31d +%Y%m%d%H%M.%S 2>/dev/null || date -d '31 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Saved Application State/com.test.orphan.savedState" 2>/dev/null || true
 
 # Disable spinner for test
 start_section_spinner() { :; }
@@ -1032,8 +1032,8 @@ mkdir -p "$HOME/Library/Caches/com.test.orphan2"
 echo "data1" > "$HOME/Library/Caches/com.test.orphan1/data"
 echo "data2" > "$HOME/Library/Caches/com.test.orphan2/data"
 # Set modification time to 31 days ago
-touch -t "$(date -v-31d +%Y%m%d%H%M.%S 2>/dev/null || date -d '31 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.test.orphan1" 2>/dev/null || true
-touch -t "$(date -v-31d +%Y%m%d%H%M.%S 2>/dev/null || date -d '31 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.test.orphan2" 2>/dev/null || true
+touch -t "$(/bin/date -v-31d +%Y%m%d%H%M.%S 2>/dev/null || date -d '31 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.test.orphan1" 2>/dev/null || true
+touch -t "$(/bin/date -v-31d +%Y%m%d%H%M.%S 2>/dev/null || date -d '31 days ago' +%Y%m%d%H%M.%S)" "$HOME/Library/Caches/com.test.orphan2" 2>/dev/null || true
 
 # Mock safe_clean to fail on first item, succeed on second
 safe_clean() {
@@ -2567,6 +2567,144 @@ EOF
     [[ "$output" != *"skipped 1 protected"* ]] || return 1
 }
 
+@test "clean_orphaned_system_services never nominates a half-removed Symantec or Broadcom agent" {
+    # A half-removed endpoint agent leaves launchd plists whose program is gone
+    # beside daemons that still run. The vendor's own uninstaller is the way to
+    # finish that, so these are never offered as orphans. A genuinely orphaned
+    # service in the same scan must still be found, which proves the scan ran.
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=0 MOLE_TEST_NO_AUTH=0 DRY_RUN=false MOLE_DRY_RUN=0 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/apps.sh"
+
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+debug_log() { :; }
+
+tmp_dir="$(mktemp -d)"
+symantec_plist="$tmp_dir/com.symantec.mes.daemon.plist"
+broadcom_plist="$tmp_dir/com.broadcom.mes.agent.plist"
+orphan_plist="$tmp_dir/com.example.gone.daemon.plist"
+/usr/libexec/PlistBuddy -c "Add :Program string $tmp_dir/missing-symantec" "$symantec_plist" > /dev/null 2>&1 || true
+/usr/libexec/PlistBuddy -c "Add :Program string $tmp_dir/missing-broadcom" "$broadcom_plist" > /dev/null 2>&1 || true
+/usr/libexec/PlistBuddy -c "Add :Program string $tmp_dir/missing-binary" "$orphan_plist" > /dev/null 2>&1 || true
+
+safe_sudo_remove() {
+  echo "removed:$1"
+  return 0
+}
+
+sudo() {
+  if [[ "$1" == "-n" && "$2" == "true" ]]; then
+    return 0
+  fi
+  [[ "${1:-}" == "-n" ]] && shift
+  if [[ "$1" == "test" ]]; then
+    return 1
+  fi
+  if [[ "$1" == "find" ]]; then
+    case "$2" in
+      /Library/LaunchDaemons) printf '%s\0' "$symantec_plist" "$broadcom_plist" "$orphan_plist" ;;
+      *) : ;;
+    esac
+    return 0
+  fi
+  if [[ "$1" == "du" ]]; then
+    echo "4 ${3:-}"
+    return 0
+  fi
+  if [[ "$1" == "launchctl" ]]; then
+    return 0
+  fi
+  command "$@"
+}
+
+clean_orphaned_system_services
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Orphaned services · cleaned 1"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"com.example.gone.daemon.plist"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"com.symantec.mes.daemon.plist"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"com.broadcom.mes.agent.plist"* ]] || { echo "$output"; return 1; }
+}
+
+@test "clean_orphaned_system_services never nominates AutoUpdate, MDM, security or VPN services" {
+    # Microsoft AutoUpdate serves products no app root proves, and management,
+    # security and VPN daemons keep running after their app looks gone. Mole
+    # Mac never offers them; a genuine orphan in the same scan still is.
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=0 MOLE_TEST_NO_AUTH=0 DRY_RUN=false MOLE_DRY_RUN=0 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/apps.sh"
+
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+debug_log() { :; }
+
+tmp_dir="$(mktemp -d)"
+plists=()
+for id in com.microsoft.autoupdate.helper com.west2online.ClashXPro.ProxyConfigHelper \
+    com.jamf.management.daemon io.tailscale.ipn.macsys.network-extension com.example.gone.daemon; do
+    /usr/libexec/PlistBuddy -c "Add :Program string $tmp_dir/missing-$id" "$tmp_dir/$id.plist" > /dev/null 2>&1 || true
+    plists+=("$tmp_dir/$id.plist")
+done
+# Helper binaries listed straight from PrivilegedHelperTools.
+helpers=("$tmp_dir/com.microsoft.autoupdate.helper" "$tmp_dir/io.tailscale.ipn.macsys.helper")
+touch "${helpers[@]}"
+
+safe_sudo_remove() {
+  echo "removed:$1"
+  return 0
+}
+
+sudo() {
+  if [[ "$1" == "-n" && "$2" == "true" ]]; then
+    return 0
+  fi
+  [[ "${1:-}" == "-n" ]] && shift
+  if [[ "$1" == "test" ]]; then
+    # The protection decides before any binary probe, so the installed
+    # helper branch (whose app no root proves) is never reached.
+    echo "probe:${3:-}" >> "$tmp_dir/probes"
+    return 1
+  fi
+  if [[ "$1" == "find" ]]; then
+    case "$2" in
+      /Library/LaunchDaemons) printf '%s\0' "${plists[@]}" ;;
+      /Library/PrivilegedHelperTools) printf '%s\0' "${helpers[@]}" ;;
+      *) : ;;
+    esac
+    return 0
+  fi
+  if [[ "$1" == "du" ]]; then
+    echo "4 ${3:-}"
+    return 0
+  fi
+  if [[ "$1" == "launchctl" ]]; then
+    return 0
+  fi
+  command "$@"
+}
+
+clean_orphaned_system_services
+if grep -v 'missing-com.example.gone' "$tmp_dir/probes" 2> /dev/null; then
+  echo "probed a protected service"
+  exit 1
+fi
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Orphaned services · cleaned 1"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"com.example.gone.daemon.plist"* ]] || { echo "$output"; return 1; }
+    local kept
+    for kept in com.microsoft.autoupdate.helper ClashXPro com.jamf.management io.tailscale; do
+        [[ "$output" != *"$kept"* ]] || { echo "nominated $kept: $output"; return 1; }
+    done
+}
+
 @test "clean_orphaned_system_services keeps daemons whose binary is root-only readable (#1188)" {
     # Intego-style self-protecting software (antivirus, endpoint agents) makes
     # its install tree root-only readable, so the unprivileged -e probe misses
@@ -3225,6 +3363,45 @@ grep -Fxq "com.example.upper" "$HOME/installed.txt" || { echo "MISSING_UPPER"; e
 grep -Fxq "com.example.wrapped-upper" "$HOME/installed.txt" || { echo "MISSING_WRAPPED_UPPER"; exit 1; }
 EOF
 
+	[ "$status" -eq 0 ] || {
+		echo "$output"
+		return 1
+	}
+}
+
+@test "installed-app scan reads a PlayCover launcher alias through its bundle and still fails closed on a look-alike" {
+	# The alias has no Contents/, only a copy of the bundle's Info.plist and
+	# links back into the PlayCover container. Before this it failed the scan
+	# closed and skipped App leftovers for every PlayCover user. Only the strict
+	# alias shape counts; a directory that merely resembles it stays unreadable.
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=1 /bin/bash --noprofile --norc << 'EOF'
+set -uo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/apps.sh"
+rm -f "$HOME/.cache/mole/installed_apps_cache"
+apps="$HOME/Applications"
+bundle="$HOME/Library/Containers/io.playcover.PlayCover/Applications/com.example.game.app"
+rm -rf "$apps" "$HOME/Library/Containers/io.playcover.PlayCover"
+mkdir -p "$apps/Good.app/Contents" "$apps/PlayCover/Game.app" "$bundle"
+plist='<?xml version="1.0"?><!DOCTYPE plist><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>%s</string></dict></plist>'
+printf "$plist" com.example.good > "$apps/Good.app/Contents/Info.plist"
+printf "$plist" com.example.game > "$bundle/Info.plist"
+cp "$bundle/Info.plist" "$apps/PlayCover/Game.app/Info.plist"
+: > "$bundle/Assets.car"
+ln -s "$bundle/Assets.car" "$apps/PlayCover/Game.app/Assets.car"
+debug_log() { :; }
+scan_installed_apps "$HOME/installed.txt" || { echo "SCAN_FAILED"; exit 1; }
+grep -Fxq "com.example.good" "$HOME/installed.txt" || { echo "MISSING_GOOD"; exit 1; }
+grep -Fxq "com.example.game" "$HOME/installed.txt" || { echo "MISSING_GAME"; exit 1; }
+
+# A flat directory outside the PlayCover launcher folder is not that alias.
+mkdir -p "$apps/Lookalike.app"
+printf "$plist" com.example.lookalike > "$apps/Lookalike.app/Info.plist"
+rm -f "$HOME/.cache/mole/installed_apps_cache"
+if scan_installed_apps "$HOME/installed2.txt"; then
+	echo "LOOKALIKE_NOT_FAILED"; exit 1
+fi
+EOF
 	[ "$status" -eq 0 ] || {
 		echo "$output"
 		return 1

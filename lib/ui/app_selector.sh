@@ -9,6 +9,11 @@ set -euo pipefail
 format_app_display() {
     local display_name="$1" size="$2" last_used="$3"
 
+    # Display names come from app bundles and can carry terminal control bytes.
+    # This row is a rendering site only: apps_data keeps the stored name, and
+    # matching, sizes and removal plans are untouched.
+    display_name=$(mole_terminal_safe_text "$display_name")
+
     # Use common function from ui.sh to format last used time
     local compact_last_used
     compact_last_used=$(format_last_used_summary "$last_used")
@@ -209,7 +214,6 @@ select_apps_for_uninstall() {
 
     # Clean env leakage for safety
     unset MOLE_MENU_META_EPOCHS MOLE_MENU_META_SIZEKB MOLE_MENU_FILTER_NAMES MOLE_MENU_IGNORE_INITIAL_ENTER
-    # leave MOLE_MENU_SORT_DEFAULT untouched if user set it globally
 
     if [[ $exit_code -ne 0 ]]; then
         return 1

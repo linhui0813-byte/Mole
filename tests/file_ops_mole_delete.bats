@@ -688,7 +688,7 @@ EOF
     [[ ! -e "$victim" ]] || return 1
     [[ -d "$existing" ]] || return 1
     [[ -n "$(find "$fake_home/.Trash" -mindepth 1 -maxdepth 1 -name 'com.microsoft.Word.*' -print -quit)" ]] || return 1
-    [ "$(stat -f '%Lp' "$fake_home/.Trash")" = "700" ]
+    [ "$(/usr/bin/stat -f '%Lp' "$fake_home/.Trash")" = "700" ]
     [[ "$(grep -c '^trash:' "$trace" 2> /dev/null || true)" -eq 0 ]] || return 1
     [[ "$(grep -c '^osascript:' "$trace" 2> /dev/null || true)" -eq 0 ]]
 }
@@ -997,6 +997,60 @@ EOF
     local status_col
     status_col=$(awk -F'\t' 'END { print $4 }' "$MOLE_DELETE_LOG")
     [ "$status_col" = "rejected" ]
+}
+
+@test "validation refusals leave a SKIPPED row with a fixed reason in operations.log" {
+    local victim="$SANDBOX/system-link"
+    ln -s "/System" "$victim"
+    local oplog_home="$SANDBOX/oplog-home"
+    mkdir -p "$oplog_home"
+
+    run env HOME="$oplog_home" /bin/bash --noprofile --norc <<EOF
+$(prelude)
+export MOLE_CURRENT_COMMAND=uninstall
+mole_delete "$victim" || true
+export MOLE_CURRENT_COMMAND=clean
+safe_remove "$victim" true || true
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ -L "$victim" ]] || return 1
+    local oplog="$oplog_home/Library/Logs/mole/operations.log"
+    grep -Fq "] [uninstall] SKIPPED $victim (protected)" "$oplog" || { cat "$oplog"; return 1; }
+    grep -Fq "] [clean] SKIPPED $victim (protected)" "$oplog" || { cat "$oplog"; return 1; }
+}
+
+@test "an unwritable operations.log warns once instead of failing silently" {
+    local oplog_home="$SANDBOX/readonly-oplog-home"
+    mkdir -p "$oplog_home/Library/Logs/mole"
+    : > "$oplog_home/Library/Logs/mole/operations.log"
+    chmod 0444 "$oplog_home/Library/Logs/mole/operations.log"
+
+    run env HOME="$oplog_home" /bin/bash --noprofile --norc <<EOF
+$(prelude)
+log_operation clean REMOVED /tmp/first 1KB
+log_operation clean REMOVED /tmp/second 1KB
+log_operation_session_start clean
+log_operation_session_end clean 2 2
+EOF
+
+    chmod 0644 "$oplog_home/Library/Logs/mole/operations.log"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local warn_count
+    warn_count=$(printf '%s\n' "$output" | grep -c "audit log unavailable" || true)
+    [ "$warn_count" = "1" ] || { echo "$output"; return 1; }
+    [[ ! -s "$oplog_home/Library/Logs/mole/operations.log" ]] || return 1
+}
+
+@test "a test without its own HOME never runs against the account home" {
+    local account account_home=""
+    account="$(id -un)"
+    eval "account_home=~$account"
+    [[ -n "$account_home" && "$HOME" != "$account_home" ]] || {
+        echo "HOME is the account home: $HOME"
+        return 1
+    }
+    [[ "$HOME" == "$BATS_FILE_TMPDIR/"* ]] || return 1
 }
 
 @test "mole_delete dry-run does not touch the filesystem but still logs" {
@@ -1451,7 +1505,7 @@ EOF
     [ "$status" -eq 0 ]
     # Warning visible exactly once.
     local warn_count
-    warn_count=$(printf '%s\n' "$output" | grep -c "deletions audit log unavailable" || true)
+    warn_count=$(printf '%s\n' "$output" | grep -c "audit log unavailable" || true)
     [ "$warn_count" = "1" ]
 }
 
@@ -1786,7 +1840,7 @@ mv() {
 }
 _mole_move_to_trash_batch "$SANDBOX/targets/item-1" "$SANDBOX/targets/item-2" || exit 1
 [[ ${#_MOLE_TRASH_BATCH_MOVED_PATHS[@]} -eq 2 ]] || exit 1
-[[ $(stat -f%Lp "$HOME/.Trash") == 700 ]] || exit 1
+[[ $(/usr/bin/stat -f%Lp "$HOME/.Trash") == 700 ]] || exit 1
 printf 'destination-rechecked\n'
 EOF
     [ "$status" -eq 0 ]
@@ -1820,4 +1874,27 @@ printf 'destination-swap-refused\n'
 EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"destination-swap-refused"* ]]
+}
+
+@test "MOLE_TEST_TRASH_DIR is honored only while a test mode flag is set" {
+	local sandbox="$SANDBOX/gated-trash"
+	local test_trash="$sandbox/test-trash"
+	local victim="$SANDBOX/gated_victim"
+	mkdir -p "$test_trash"
+	: > "$victim"
+
+	run /bin/bash --noprofile --norc <<EOF
+$(prelude)
+unset MOLE_TEST_NO_AUTH MOLE_TEST_MODE
+export MOLE_DELETE_MODE=trash
+export MOLE_TEST_TRASH_DIR="$test_trash"
+_mole_path_requires_direct_trash() { return 0; }
+_mole_move_path_to_user_trash() { printf 'REAL_TRASH_PATH\n'; return 0; }
+mole_delete "$victim"
+EOF
+
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"REAL_TRASH_PATH"* ]] || { echo "$output"; return 1; }
+	[[ -e "$victim" ]] || return 1
+	[[ -z "$(ls -A "$test_trash")" ]] || return 1
 }

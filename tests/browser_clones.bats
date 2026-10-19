@@ -55,6 +55,23 @@ teardown() { mole_test_teardown_home; }
     [ -d "$CLONE" ]
 }
 
+@test "browser clone cleanup reaches Helium and retains it while Helium runs" {
+    local helium="$CLONE_ROOT/net.imput.helium.code_sign_clone/code_sign_clone.2VaD4t"
+    mkdir -p "$helium/Helium.app.bundle/Contents/MacOS"
+    printf 'fixture executable' >"$helium/Helium.app.bundle/Contents/MacOS/Helium"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string net.imput.helium' "$helium/Helium.app.bundle/Contents/Info.plist" >/dev/null
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleExecutable string Helium' "$helium/Helium.app.bundle/Contents/Info.plist"
+    for PROCESS_TABLE in '/sbin/launchd
+/Applications/Helium.app/Contents/MacOS/Helium' '/sbin/launchd
+Helium Helper (Renderer)'; do
+        clean_browser_code_sign_clones
+    done
+    [ ! -s "$CALLS" ]
+    PROCESS_TABLE=/sbin/launchd clean_browser_code_sign_clones
+    grep -qx "$helium" "$CALLS"
+    [ "$code_sign_cleaned" -eq 2 ]
+}
+
 @test "browser clone cleanup retains running browser helpers and unknown process probes" {
     for PROCESS_TABLE in '/sbin/launchd
 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome' '/sbin/launchd

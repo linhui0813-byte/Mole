@@ -167,6 +167,7 @@ enable_touchid() {
             else
                 log_success "Touch ID enabled, via sudo_local, try: sudo ls"
             fi
+            log_operation "touchid" "REBUILT" "$PAM_SUDO_LOCAL_FILE" "touchid enabled"
             return 0
         else
             log_error "Failed to write to sudo_local"
@@ -213,6 +214,7 @@ enable_touchid() {
     # Apply the changes
     if secure_install_pam "$temp_file" "$PAM_SUDO_FILE" 2> /dev/null; then
         log_success "Touch ID enabled, try: sudo ls"
+        log_operation "touchid" "REBUILT" "$PAM_SUDO_FILE" "touchid enabled"
         return 0
     else
         log_error "Failed to enable Touch ID"
@@ -255,6 +257,7 @@ disable_touchid() {
             fi
             echo -e "${GREEN}${ICON_SUCCESS} Touch ID disabled, removed from sudo_local${NC}"
             echo ""
+            log_operation "touchid" "REBUILT" "$PAM_SUDO_LOCAL_FILE" "touchid disabled"
             return 0
         else
             log_error "Failed to disable Touch ID from sudo_local"
@@ -279,6 +282,7 @@ disable_touchid() {
         if secure_install_pam "$temp_file" "$PAM_SUDO_FILE" 2> /dev/null; then
             echo -e "${GREEN}${ICON_SUCCESS} Touch ID disabled${NC}"
             echo ""
+            log_operation "touchid" "REBUILT" "$PAM_SUDO_FILE" "touchid disabled"
             return 0
         else
             log_error "Failed to disable Touch ID"

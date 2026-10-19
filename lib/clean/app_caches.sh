@@ -151,7 +151,7 @@ clean_xcode_derived_data() {
                 break
             fi
             local size_rc=0 stop_rc=0
-            dir_size_kb=$(get_path_size_kb "$dir" 2> /dev/null) || size_rc=$?
+            dir_size_kb=$(get_path_size_kb "$dir" "" readable 2> /dev/null) || size_rc=$?
             mole_item_size_continues "$size_rc" || stop_rc=$?
             if [[ $stop_rc -ne 0 ]]; then
                 stop_section_spinner
@@ -215,7 +215,7 @@ clean_xcode_derived_data() {
 
         local dir_size_kb=0
         local size_rc=0 stop_rc=0
-        dir_size_kb=$(get_path_size_kb "$dir" 2> /dev/null) || size_rc=$?
+        dir_size_kb=$(get_path_size_kb "$dir" "" readable 2> /dev/null) || size_rc=$?
         mole_item_size_continues "$size_rc" || stop_rc=$?
         if [[ $stop_rc -ne 0 ]]; then
             stop_section_spinner
@@ -490,12 +490,43 @@ _feishu_service_worker_delete_guard_allows() {
     mole_clean_process_guard feishu_or_lark_running "Feishu or Lark started"
 }
 
+# Feishu's disk caches: the plain build's ~/Library/Caches/LarkShell and the
+# sandboxed build's container Caches. The owner must still be stopped and the
+# entry must still sit directly under the root inspected.
+_feishu_disk_cache_delete_guard_allows() {
+    local path="$1"
+    _feishu_service_worker_delete_guard_allows || return $?
+
+    local feishu_data="$HOME/Library/Containers/com.bytedance.macos.feishu/Data"
+    local cache_root="${path%/*}"
+    case "$cache_root" in
+        "$HOME/Library/Caches/LarkShell")
+            _messaging_container_bind_candidate "$path" "$cache_root" "$HOME/Library/Caches"
+            ;;
+        "$feishu_data/Library/Caches")
+            _messaging_container_bind_candidate "$path" "$cache_root" "$feishu_data"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Newer builds add a second engine, `iron/users/<user>/profile_main`, whose
+# CacheStorage held 3.7GB of a 3.76GB profile on a work Mac (2026-10-19); only
+# that leaf is taken there, since profile_main also keeps login state. The
+# sandboxed build (com.bytedance.macos.feishu) keeps both trees inside its
+# container. Mole Mac parity: CacheScanner.larkProfileCachePairs.
 clean_feishu_service_worker_caches() {
+    local feishu_sandbox="$HOME/Library/Containers/com.bytedance.macos.feishu/Data/Library/Application Support/LarkShell"
     local -a sw_roots=(
         "$HOME/Library/Application Support/LarkShell/aha/users"
         "$HOME/Library/Application Support/LarkInternational/aha/users"
+        "$feishu_sandbox/aha/users"
+        "$HOME/Library/Application Support/LarkShell/iron/users"
+        "$HOME/Library/Application Support/LarkInternational/iron/users"
+        "$feishu_sandbox/iron/users"
     )
-    local -a root_labels=("Feishu" "Lark")
+    local -a root_labels=("Feishu" "Lark" "Feishu" "Feishu" "Lark" "Feishu")
+    local -a root_profiles=(profile_explorer profile_explorer profile_explorer profile_main profile_main profile_main)
     local -a cache_paths=()
     local -a cache_labels=()
     local root_index sw_root app_label physical_root _profile cache_path physical_cache
@@ -508,7 +539,7 @@ clean_feishu_service_worker_caches() {
             debug_log "Refusing symlinked ${app_label} profile root: $sw_root -> $physical_root"
             continue
         fi
-        for _profile in "$sw_root"/*/profile_explorer; do
+        for _profile in "$sw_root"/*/"${root_profiles[$root_index]}"; do
             [[ -d "$_profile" ]] || continue
             cache_path="${_profile%/}/Service Worker/CacheStorage"
             [[ -d "$cache_path" ]] || continue
@@ -642,6 +673,10 @@ clean_notion_service_worker_caches() {
 #   WeChat .wxapplet/WMPF                         161 MB
 #                                          total ~1.4 GB reclaimed
 #
+# Added later from a work Mac (2026-10-19), WeChat 4.x:
+#   WeChat app_data/radium/web/profiles/*/Cache and
+#          Service Worker/CacheStorage            671 MB
+#
 # Non-targets, never removed because they are user data or account state:
 #   WeChat Documents/xwechat_files/**       chat databases and received files
 #   WeChat Documents/app_data/radium/users  per-account webview state
@@ -719,6 +754,15 @@ _wechat_container_delete_guard_allows() {
     local cache_root="${path%/*}"
     case "$cache_root" in
         "$wechat_data/Documents/app_data/log" | "$wechat_data/.wxapplet/WMPF") ;;
+        "$wechat_data/Documents/app_data/radium/web/profiles/"*)
+            local relative="${cache_root#"$wechat_data/Documents/app_data/radium/web/profiles/"}"
+            local profile="${relative%%/*}"
+            [[ -n "$profile" && "$profile" != "$relative" ]] || return 1
+            case "${relative#*/}" in
+                "Cache" | "Service Worker/CacheStorage") ;;
+                *) return 1 ;;
+            esac
+            ;;
         *) return 1 ;;
     esac
     _messaging_container_bind_candidate "$path" "$cache_root" "$wechat_data"
@@ -802,6 +846,20 @@ clean_wechat_container_caches() {
     if [[ -d "$wechat_data" ]]; then
         wechat_targets+=("$wechat_data/Documents/app_data/log" "WeChat logs")
         wechat_targets+=("$wechat_data/.wxapplet/WMPF" "WeChat mini program cache")
+        # The built-in browser keeps one Chromium profile per tab group; only
+        # its HTTP and Service Worker caches go, never IndexedDB or WebStorage.
+        local web_profile physical_web_profile
+        for web_profile in "$wechat_data/Documents/app_data/radium/web/profiles"/*/; do
+            web_profile="${web_profile%/}"
+            [[ -d "$web_profile" ]] || continue
+            physical_web_profile=$(cd -P "$web_profile" 2> /dev/null && pwd -P) || continue
+            if [[ "$physical_web_profile" != "$web_profile" ]]; then
+                debug_log "Refusing symlinked WeChat web profile: $web_profile -> $physical_web_profile"
+                continue
+            fi
+            wechat_targets+=("$web_profile/Cache" "WeChat web cache")
+            wechat_targets+=("$web_profile/Service Worker/CacheStorage" "WeChat service worker cache")
+        done
         _clean_messaging_container_roots "WeChat" \
             _wechat_container_process_guard_allows \
             _wechat_container_delete_guard_allows \
@@ -856,6 +914,11 @@ clean_communication_apps() {
     safe_clean ~/Library/Caches/com.tencent.WeWorkMac/* "WeCom cache"
     safe_clean ~/Library/Caches/com.tencent.qq/* "QQ cache"
     safe_clean ~/Library/Caches/com.feishu.*/* "Feishu cache"
+    _clean_messaging_container_roots "Feishu/Lark" \
+        _feishu_service_worker_delete_guard_allows \
+        _feishu_disk_cache_delete_guard_allows \
+        "$HOME/Library/Caches/LarkShell" "Feishu cache" \
+        "$HOME/Library/Containers/com.bytedance.macos.feishu/Data/Library/Caches" "Feishu cache"
     clean_feishu_service_worker_caches
     clean_notion_service_worker_caches
     if [[ -d ~/Library/Application\ Support/Microsoft/Teams ]]; then
@@ -1620,6 +1683,51 @@ clean_3d_tools() {
     clean_autodesk_fusion_old_bundles
 }
 # Productivity apps.
+# Futu NiuNiu (cn.futu.niuniu.nx) downloads each in-app update as one DMG
+# into LiveUpdate/mac_qtnn and never removes it: a 582 MB package from July
+# sat beside an app updated in October (2026-10-19). Only that folder's
+# children, never the rest of the container; the sandbox is unreadable without
+# Full Disk Access, so nothing is listed then. The guard is re-asked at every
+# sink because an update can start downloading while Mole runs.
+futu_running() {
+    mole_pgrep_any \
+        -x "FTNN" \
+        -f '/Contents/MacOS/FTNN( |$)'
+}
+
+_futu_update_delete_guard_allows() {
+    mole_clean_process_guard futu_running "Futu started"
+}
+
+clean_futu_update_downloads() {
+    local root="$HOME/Library/Containers/cn.futu.niuniu.nx/Data/Library/Application Support/LiveUpdate/mac_qtnn"
+    mole_cleanup_targets_exist "$root"/* || return 0
+    local physical_root
+    physical_root=$(cd -P "$root" 2> /dev/null && pwd -P) || return 0
+    if [[ "$physical_root" != "$root" ]]; then
+        debug_log "Refusing symlinked Futu update folder: $root -> $physical_root"
+        return 0
+    fi
+
+    local _MOLE_CLEAN_GUARD_REASON=""
+    if ! _futu_update_delete_guard_allows; then
+        mole_report_guard_stop "Futu update downloads" mole_defer_cleanup_family "Futu"
+        return 0
+    fi
+    if ! declare -f safe_clean_guarded > /dev/null 2>&1; then
+        safe_clean "$root"/* "Futu update downloads"
+        return $?
+    fi
+
+    local guarded_rc=0
+    safe_clean_guarded _futu_update_delete_guard_allows "$root"/* "Futu update downloads" || guarded_rc=$?
+    if [[ $guarded_rc -eq 75 ]]; then
+        mole_report_guard_stop "Futu update downloads" mole_defer_cleanup_family "Futu"
+        return 0
+    fi
+    return "$guarded_rc"
+}
+
 clean_productivity_apps() {
     safe_clean ~/Library/Caches/com.tw93.MiaoYan/* "MiaoYan cache"
     safe_clean ~/Library/Caches/com.klee.desktop/* "Klee cache"
@@ -1633,6 +1741,7 @@ clean_productivity_apps() {
     safe_clean ~/.cache/kaku/* "Kaku cache"
     safe_clean ~/Library/Application\ Support/spacedrive/thumbnails/* "Spacedrive thumbnail cache"
     safe_clean ~/Library/Containers/is.follow/Data/Library/Application\ Support/Folo/Cache/Cache_Data/* "Folo cache"
+    clean_futu_update_downloads
 }
 # Music/media players (protect Spotify offline music).
 clean_media_players() {
@@ -1731,7 +1840,7 @@ clean_neatdm_stale_segments() {
     for seg_dir in "${stale_dirs[@]}"; do
         local size_kb=""
         local size_rc=0
-        size_kb=$(get_path_size_kb "$seg_dir") || size_rc=$?
+        size_kb=$(get_path_size_kb "$seg_dir" "" readable) || size_rc=$?
         mole_item_size_continues "$size_rc" || return $?
         [[ $size_rc -eq 0 && "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
 

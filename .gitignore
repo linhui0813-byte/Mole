@@ -51,6 +51,7 @@ AGENTS.override.md
 .claude/*
 !.claude/agents/
 !.claude/hooks/
+!.claude/rules/
 !.claude/skills/
 !.claude/settings.json
 .claude/settings.local.json

@@ -75,7 +75,7 @@ clean_service_worker_cache() {
     if [[ $find_rc -eq 0 ]]; then
         # shellcheck disable=SC2016
         run_with_timeout "$find_timeout" sh -c \
-            'find "$1" -type d -depth 2 2>/dev/null' _ "$cache_path" \
+            'find "$1" -mindepth 2 -maxdepth 2 -type d 2>/dev/null' _ "$cache_path" \
             > "$candidates_file" || find_rc=$?
     fi
     if [[ $find_rc -ne 0 ]]; then
@@ -355,6 +355,20 @@ _process_project_cache_scan_file() {
     done < "$scan_file"
 }
 
+# `~/Library/CloudStorage` is a File Provider root: its domain folders are
+# virtual, and a walk that descends into a signed-out or slow provider fails
+# with "Operation not permitted" or blocks. A depth-two directory listing
+# decides cheaply whether the root is walkable at all, so the per-root scan
+# budget is not spent on a root that can only fail. Readable cloud roots keep
+# the normal scan; an unreadable one is still counted as a skipped root.
+project_cache_root_is_walkable() {
+    local root="${1%/}"
+    [[ "$root" == "$HOME/Library/CloudStorage" ]] || return 0
+    local probe_timeout="$MOLE_TIMEOUT_QUICK_DETECT_SEC"
+    run_with_timeout "$probe_timeout" "$FIND_BSD" -P "$root" -mindepth 2 -maxdepth 2 \
+        -type d -print -quit < /dev/null > /dev/null 2>&1
+}
+
 # Scan a project root for supported build caches while pruning heavy subtrees.
 scan_project_cache_root() {
     local root="$1"
@@ -371,7 +385,7 @@ scan_project_cache_root() {
     # projects folder they can be half of the directories walked, enough to push
     # the scan past its timeout on a busy disk and skip the whole root.
     local -a find_args=(
-        find -P "$root" -maxdepth 9 -mount
+        "$FIND_BSD" -P "$root" -maxdepth 9 -mount
         "(" -name "Library" -o -name ".Trash" -o -name "node_modules" -o -name ".git" -o -name ".svn" -o -name ".hg" -o -name ".venv" -o -name "venv" -o -name ".pnpm-store" -o -name ".fvm" -o -name "DerivedData" -o -name "Pods" -o -name "miniconda3" -o -name "anaconda3" -o -name "miniforge3" -o -name "mambaforge" -o -name "site-packages" -o -name "target" -o -name ".build" -o -name ".gradle" -o -name "Index.noindex" -o -name "_cacache" ")"
         -prune -o
         -type d
@@ -1077,6 +1091,17 @@ clean_project_caches() {
 
     for root in "${scan_roots[@]}"; do
         [[ $scan_interrupt_status -ge 128 ]] && break
+        local walkable_rc=0
+        project_cache_root_is_walkable "$root" || walkable_rc=$?
+        if [[ $walkable_rc -ge 128 ]]; then
+            scan_interrupt_status=$walkable_rc
+            break
+        fi
+        if [[ $walkable_rc -ne 0 ]]; then
+            debug_log "Project cache root not walkable, skipped: $root"
+            failed_scan_count=$((failed_scan_count + 1))
+            continue
+        fi
         local root_matches_file
         if ! root_matches_file=$(create_temp_file); then
             failed_scan_count=$((failed_scan_count + 1))

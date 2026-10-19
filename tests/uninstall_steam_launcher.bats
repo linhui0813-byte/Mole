@@ -291,7 +291,7 @@ sudo_apps=()
 brew_cask_apps=()
 total_estimated_size=8
 
-printf '\n' | _batch_preview_and_confirm
+printf '\n' | MOLE_TEST_MODE=1 _batch_preview_and_confirm
 EOF
 
     [ "$status" -eq 0 ] || return 1

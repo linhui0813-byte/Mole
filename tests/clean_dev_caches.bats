@@ -37,6 +37,68 @@ SCRIPT
     chmod +x "$HOME/bin/gh"
 }
 
+assert_owner_cleanup_requires_confirmed_root() {
+    local owner_tool="$1" owner_entry="$2"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="/usr/bin:/bin" \
+        MOLE_TEST_NO_AUTH=1 OWNER_TOOL="$owner_tool" OWNER_ENTRY="$owner_entry" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+DRY_RUN=false
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+safe_clean() { :; }
+clean_pnpm_stores() { :; }
+clean_corepack_cache() { :; }
+clean_conda_metadata_caches() { :; }
+run_with_timeout() { shift; "$@"; }
+owner_stub() {
+    case "$*" in
+        --version) return 0 ;;
+        'cache dir' | 'cache path' | 'config get cache')
+            case "$probe_mode" in
+                failed) printf '%s\n' "$HOME/protected-owner"; return 1 ;;
+                timeout) return 124 ;;
+                signal) return 130 ;;
+                relative) echo relative-cache ;;
+                multiline) printf '%s\nextra\n' "$HOME/protected-owner" ;;
+                empty) return 0 ;;
+                *) printf '%s\n' "$HOME/protected-owner" ;;
+            esac ;;
+        'cache prune' | 'cache clean --force' | 'cache purge' | 'cache clear')
+            echo owner >> "$HOME/owner-root.trace" ;;
+        *) return 1 ;;
+    esac
+}
+eval "$OWNER_TOOL() { owner_stub \"\$@\"; }"
+if [[ "$OWNER_TOOL" == pip3 ]]; then clean_uv_cache() { :; }; fi
+unset MISE_CACHE_DIR
+export UV_CACHE_DIR="$HOME/protected-owner"
+for probe_mode in failed timeout signal relative multiline empty whitelisted known; do
+    MOLE_CLEAN_CANCEL_STATUS=0
+    WHITELIST_PATTERNS=("$HOME/protected-owner")
+    [[ "$probe_mode" != known && "$probe_mode" != failed ]] || WHITELIST_PATTERNS=()
+    : > "$HOME/owner-root.trace"
+    rc=0
+    "$OWNER_ENTRY" || rc=$?
+    if [[ "$probe_mode" == signal ]]; then
+        [[ "$rc" == 130 ]] || exit 1
+    else
+        [[ "$rc" == 0 ]] || exit 1
+    fi
+    if [[ "$probe_mode" == known ]]; then
+        [[ "$(cat "$HOME/owner-root.trace")" == owner ]] || exit 1
+    else
+        [[ ! -s "$HOME/owner-root.trace" ]] || { echo "UNEXPECTED:$probe_mode"; exit 1; }
+    fi
+done
+echo ROOT_GUARD_OK
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *ROOT_GUARD_OK* ]] || return 1
+}
+
 @test "clean_github_cli_cache uses gh owner command for the default cache" {
     local trace="$HOME/gh-default.trace"
     mkdir -p "$HOME/.cache/gh"
@@ -1378,7 +1440,7 @@ EOF
     [[ "$output" != *"docker called"* ]]
 }
 
-@test "codex_desktop_running recognizes current and legacy app aliases (#1305)" {
+@test "codex_desktop_process_state recognizes current and legacy app aliases (#1305)" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
@@ -1390,13 +1452,13 @@ pgrep() {
 }
 
 for matched_query in "-x Codex" "-f /Codex.app/" "-x ChatGPT" "-f /ChatGPT.app/"; do
-    codex_desktop_running || exit 1
+    codex_desktop_process_state || exit 1
 done
 
 matched_query="-x unrelated"
-if codex_desktop_running; then
-    exit 1
-fi
+state=0
+codex_desktop_process_state || state=$?
+[[ "$state" -eq 1 ]] || exit 1
 printf 'CODEX_DESKTOP_ALIASES_OK\n'
 EOF
 
@@ -3371,7 +3433,7 @@ EOF
 
 @test "clean_dev_other_langs keeps the NuGet global packages folder" {
     # ~/.nuget/packages is the restore target itself, the .NET counterpart of
-    # ~/.m2/repository, which clean_large_files only reports for review.
+    # ~/.m2/repository, which check_large_file_candidates only reports for review.
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
@@ -4130,6 +4192,33 @@ EOF
         "$HOME/Library/Logs/mole/mole.log"
 }
 
+@test "clean_tool_cache logs owner cleanups and whitelist skips in operations.log" {
+    local oplog_home="$HOME/tool-cache-oplog"
+    mkdir -p "$oplog_home"
+    run env HOME="$oplog_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+unset MO_NO_OPLOG
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+note_activity() { :; }
+DRY_RUN=false
+MOLE_CURRENT_COMMAND=clean
+MOLE_CLEAN_CANCEL_STATUS=0
+clean_tool_cache "ok cache" "$HOME/.cache/ok" true
+clean_tool_cache "failing cache" "$HOME/.cache/failing" false
+clean_tool_cache "noop cache" "$HOME/.cache/noop" :
+is_path_whitelisted() { [[ "$1" == "$HOME/.cache/kept" ]]; }
+clean_tool_cache "kept cache" "$HOME/.cache/kept" true
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local oplog="$oplog_home/Library/Logs/mole/operations.log"
+    grep -Fq "[clean] REMOVED $oplog_home/.cache/ok (owner command: ok cache)" "$oplog" || { cat "$oplog"; return 1; }
+    grep -Fq "[clean] SKIPPED $oplog_home/.cache/kept (whitelist)" "$oplog" || { cat "$oplog"; return 1; }
+    ! grep -Fq ".cache/failing" "$oplog" || { cat "$oplog"; return 1; }
+    ! grep -Fq ".cache/noop" "$oplog" || { cat "$oplog"; return 1; }
+}
+
 @test "clean_tool_cache treats non-signal high owner statuses as failures (#1695)" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -4388,4 +4477,214 @@ for scripted_rc in 124 130 143; do
 done
 EOF
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "clean_dev_nix collects only unreachable store paths under a timeout" {
+    local trace="$HOME/nix-real.trace"
+    rm -f "$trace"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TRACE="$trace" MOLE_TIMEOUT_PKG_CLEANUP_SEC=77 \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+DRY_RUN=false
+is_path_whitelisted() { return 1; }
+run_with_timeout() { printf 'TIMEOUT:%s:%s\n' "$1" "${*:2}" >> "$TRACE"; shift; "$@"; }
+nix-store() { printf 'NIX_STORE:%s\n' "$*" >> "$TRACE"; }
+nix-collect-garbage() { printf 'UNEXPECTED_GENERATION_DELETE:%s\n' "$*" >> "$TRACE"; return 1; }
+clean_dev_nix
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'TIMEOUT:77:nix-store --gc' "$trace" || { cat "$trace"; return 1; }
+    grep -qx 'NIX_STORE:--gc' "$trace" || return 1
+    if grep -q 'UNEXPECTED_GENERATION_DELETE' "$trace"; then
+        return 1
+    fi
+    [[ "$output" == *"Nix store garbage"* ]]
+}
+
+@test "clean_dev_nix dry run runs no Nix command" {
+    local trace="$HOME/nix-dry.trace"
+    rm -f "$trace"
+    : > "$trace"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TRACE="$trace" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+DRY_RUN=true
+is_path_whitelisted() { return 1; }
+run_with_timeout() { printf 'TIMEOUT:%s\n' "$*" >> "$TRACE"; shift; "$@"; }
+nix-store() { printf 'NIX_STORE:%s\n' "$*" >> "$TRACE"; }
+nix-collect-garbage() { printf 'NIX_COLLECT_GARBAGE:%s\n' "$*" >> "$TRACE"; return 1; }
+clean_dev_nix
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -s "$trace" ] || { cat "$trace"; return 1; }
+    [[ "$output" == *"Nix store garbage · would clean"* ]]
+}
+
+@test "clean_dev_npm runs npm cache clean under the owner-command timeout" {
+    local trace="$HOME/npm-owner.trace"
+    rm -f "$trace"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TRACE="$trace" MOLE_TIMEOUT_PKG_CLEANUP_SEC=77 \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+DRY_RUN=false
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+safe_clean() { :; }
+note_activity() { :; }
+is_path_whitelisted() { return 1; }
+run_with_timeout() { printf 'TIMEOUT:%s:%s\n' "$1" "${*:2}" >> "$TRACE"; shift; "$@"; }
+npm() {
+    if [[ "$1" == "config" ]]; then
+        echo "$HOME/.npm"
+        return 0
+    fi
+    printf 'NPM:%s\n' "$*" >> "$TRACE"
+}
+clean_dev_npm
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'TIMEOUT:77:npm cache clean --force' "$trace" || { cat "$trace"; return 1; }
+    grep -qx 'NPM:cache clean --force' "$trace"
+}
+
+@test "clean_dev_npm checks bun version under the quick-detect timeout" {
+    local trace="$HOME/bun-version.trace"
+    : > "$trace"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TRACE="$trace" MOLE_TIMEOUT_QUICK_DETECT_SEC=12 \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+DRY_RUN=false
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+clean_tool_cache() { :; }
+safe_clean() { :; }
+note_activity() { :; }
+is_path_whitelisted() { return 1; }
+clean_pnpm_stores() { return 0; }
+clean_corepack_cache() { return 0; }
+run_with_timeout() { printf 'TIMEOUT:%s:%s\n' "$1" "${*:2}" >> "$TRACE"; shift; "$@"; }
+npm() { return 1; }
+bun() {
+    if [[ "$1" == "--version" ]]; then
+        printf 'BUN:%s\n' "$*" >> "$TRACE"
+        return 0
+    fi
+    return 1
+}
+export -f npm bun
+clean_dev_npm
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'TIMEOUT:12:bun --version' "$trace" || { cat "$trace"; return 1; }
+    grep -qx 'BUN:--version' "$trace"
+}
+
+@test "clean_dev_python checks pip3 version under the quick-detect timeout" {
+    local trace="$HOME/pip3-version.trace"
+    : > "$trace"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TRACE="$trace" MOLE_TIMEOUT_QUICK_DETECT_SEC=15 \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+DRY_RUN=false
+clean_tool_cache() { :; }
+safe_clean() { :; }
+clean_uv_cache() { return 0; }
+clean_pyinstaller_bincache() { return 0; }
+clean_conda_metadata_caches() { return 0; }
+run_with_timeout() { printf 'TIMEOUT:%s:%s\n' "$1" "${*:2}" >> "$TRACE"; shift; "$@"; }
+pip3() {
+    if [[ "$1" == "--version" ]]; then
+        printf 'PIP3:%s\n' "$*" >> "$TRACE"
+        return 0
+    fi
+    return 1
+}
+export -f pip3
+clean_dev_python
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qx 'TIMEOUT:15:pip3 --version' "$trace" || { cat "$trace"; return 1; }
+    grep -qx 'PIP3:--version' "$trace"
+}
+
+
+@test "uv owner cleanup requires a confirmed cache root" {
+    assert_owner_cleanup_requires_confirmed_root uv clean_uv_cache
+}
+
+@test "npm owner cleanup requires a confirmed cache root" {
+    assert_owner_cleanup_requires_confirmed_root npm clean_dev_npm
+}
+
+@test "pip3 owner cleanup requires a confirmed cache root" {
+    assert_owner_cleanup_requires_confirmed_root pip3 clean_dev_python
+}
+
+@test "mise owner cleanup requires a confirmed cache root" {
+    assert_owner_cleanup_requires_confirmed_root mise clean_dev_mise
+}
+
+@test "conda owner cleanup protects every configured package cache root" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+run_with_timeout() { shift; "$@"; }
+note_activity() { :; }
+conda() {
+    case "$*" in
+        --version) return 0 ;;
+        'info --json')
+            case "$probe_mode" in
+                failed) return 1 ;;
+                timeout) return 124 ;;
+                signal) return 130 ;;
+                malformed) echo '{' ;;
+                missing) echo '{}' ;;
+                empty) echo '{"pkgs_dirs":[]}' ;;
+                itemtype) echo '{"pkgs_dirs":["/first",1]}' ;;
+                newline) printf '{"pkgs_dirs":["/first\\n"]}\n' ;;
+                single) printf '{"pkgs_dirs":["%s/first-cache"]}\n' "$HOME" ;;
+                wrongtype) echo '{"pkgs_dirs":"/unexpected"}' ;;
+                relative) echo '{"pkgs_dirs":["/first","relative"]}' ;;
+                *) printf '{"platform":"osx-arm64","active_prefix":null,"root_writable":true,"pkgs_dirs":["%s/first-cache","%s/custom-cache"],"envs":[]}\n' "$HOME" "$HOME" ;;
+            esac ;;
+        'clean --yes --index-cache --tarballs --logfiles') echo owner >> "$HOME/conda-root.trace" ;;
+        *) return 1 ;;
+    esac
+}
+for DRY_RUN in false true; do
+    for probe_mode in protected child failed timeout signal malformed missing empty itemtype newline wrongtype relative single known; do
+        WHITELIST_PATTERNS=()
+        [[ "$probe_mode" != protected ]] || WHITELIST_PATTERNS=("$HOME/custom-cache")
+        [[ "$probe_mode" != child ]] || WHITELIST_PATTERNS=("$HOME/custom-cache/keep")
+        : > "$HOME/conda-root.trace"
+        rc=0
+        clean_conda_metadata_caches || rc=$?
+        if [[ "$probe_mode" == signal ]]; then
+            [[ "$rc" == 130 ]] || exit 1
+        else
+            [[ "$rc" == 0 ]] || exit 1
+        fi
+        if [[ ( "$probe_mode" == known || "$probe_mode" == single ) && "$DRY_RUN" == false ]]; then
+            [[ "$(cat "$HOME/conda-root.trace")" == owner ]] || exit 1
+        else
+            [[ ! -s "$HOME/conda-root.trace" ]] || { echo "UNEXPECTED:$probe_mode"; exit 1; }
+        fi
+    done
+done
+echo CONDA_ROOT_GUARD_OK
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *CONDA_ROOT_GUARD_OK* ]] || return 1
 }

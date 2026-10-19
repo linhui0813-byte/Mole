@@ -128,12 +128,24 @@ stat() {
             interrupted) return 130 ;;
             *) printf '0:42\n0:42\n' ;;
         esac
+    elif [[ "$1" == -f && "$2" == '%d' ]]; then
+        # Every fixture entry stands for a mounted disk, which reports its
+        # own device, except the folder cases, which keep the real answer.
+        case "$SCAN_CASE" in
+            folder | folder-sibling) /usr/bin/stat "$@" ;;
+            folder-unknown) return 1 ;;
+            folder-interrupted) return 130 ;;
+            *) printf '43\n42\n' ;;
+        esac
     else
         /usr/bin/stat "$@"
     fi
 }
+# Mole calls BSD stat through STAT_BSD; point it at the fixture stub.
+STAT_BSD=stat
 case "$SCAN_CASE" in
     mounted) survivor="$snapshots/Survivor.app" ;;
+    folder-sibling) survivor="$volumes/External/Applications/Survivor.app" ;;
     lookalike) survivor="$volumes/com.apple.TimeMachine.localsnapshots-copy/Survivor.app" ;;
     sibling) survivor="$volumes/External/Applications/Survivor.app" ;;
     # Sorts after the skipped share, so the scan must continue past it.
@@ -147,6 +159,13 @@ if [[ -n "$survivor" ]]; then
 fi
 if [[ "$SCAN_CASE" != mounted ]]; then chmod 000 "$snapshots"; fi
 if [[ "$SCAN_CASE" == ordinary ]]; then mkdir -p "$volumes/Ordinary"; chmod 000 "$volumes/Ordinary"; fi
+case "$SCAN_CASE" in
+    # Time Machine's leftover network-backup folder: searchable, not listable.
+    folder | folder-sibling | folder-unknown | folder-interrupted)
+        mkdir -p "$volumes/Ordinary"
+        chmod 111 "$volumes/Ordinary"
+        ;;
+esac
 case "$SCAN_CASE" in
     stale-share | stale-share-sibling | reachable-share | mount-timeout | mount-failed | mount-interrupted | probe-timeout | probe-interrupted)
         mkdir -p "$volumes/Share"
@@ -222,6 +241,8 @@ stat() {
         /usr/bin/stat "$@"
     fi
 }
+# Mole calls BSD stat through STAT_BSD; point it at the fixture stub.
+STAT_BSD=stat
 
 export MO_DEBUG=1
 mkdir -p "$HOME/selected/Chosen.app/Contents" "$HOME/Library/Preferences"
@@ -505,7 +526,12 @@ touch "$diag_dir/Foobar.diag"
 touch "$diag_dir/Foobar Helper.diag"
 touch "$diag_dir/Foobar_2026-01-01-120001_host.ips"
 
+basename() { printf 'basename\n' >> "$HOME/diag-basename.trace"; command basename "$@"; }
+rm -f "$HOME/diag-basename.trace"
 result=$(get_diagnostic_report_paths_for_app "$app_dir" "Foo" "$diag_dir")
+# Report names come from parameter expansion, not one basename per file.
+[[ ! -e "$HOME/diag-basename.trace" ]] || exit 1
+[[ "$(printf '%s\n' "$result" | wc -l | tr -d ' ')" -eq 4 ]] || exit 1
 [[ "$result" == *"Foo.crash"* ]] || exit 1
 [[ "$result" == *"Foo.diag"* ]] || exit 1
 [[ "$result" == *"Foo Helper.diag"* ]] || exit 1
@@ -634,7 +660,7 @@ total_items=0
 total_size_cleaned=0
 
 mole_test_select_all_uninstall_data
-printf 'd\n' | batch_uninstall_applications
+printf 'd\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
 
 [[ ! -d "$app_bundle" ]] || exit 1
 [[ ! -d "$HOME/Library/Application Support/TestApp" ]] || exit 1
@@ -646,6 +672,152 @@ EOF
 
     [ "$status" -eq 0 ] || {
         printf 'exit status: %s\n%s\n' "$status" "$output"
+        return 1
+    }
+}
+
+@test "batch uninstall of Steam keeps the game library even with every data row selected" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/inventory-fixture.XXXXXX")
+    local steam="$fixture_home/Library/Application Support/Steam"
+    mkdir -p "$fixture_home/Applications/Steam.app" "$steam/steamapps/common/Game"
+    touch "$steam/steamapps/common/Game/game.bin"
+    mkdir -p "$fixture_home/Library/Caches/com.valvesoftware.steam"
+    # A second personal-data row keeps the D selector open after the fix.
+    mkdir -p "$fixture_home/Library/Application Support/com.valvesoftware.steam"
+
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
+brew() { :; }
+export MOLE_DELETE_MODE=trash
+export MOLE_TEST_TRASH_DIR="$HOME/test-trash" MOLE_TEST_NO_AUTH=1
+request_sudo_access() { return 0; }
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+enter_alt_screen() { :; }
+leave_alt_screen() { :; }
+hide_cursor() { :; }
+show_cursor() { :; }
+remove_apps_from_dock() { :; }
+pgrep() { return 1; }
+pkill() { return 0; }
+sudo() { return 0; }
+
+selected_apps=("0|$HOME/Applications/Steam.app|Steam|com.valvesoftware.steam|0|Never")
+files_cleaned=0
+total_items=0
+total_size_cleaned=0
+mole_test_select_all_uninstall_data
+printf 'd\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
+
+[[ ! -d "$HOME/Applications/Steam.app" ]] || { echo "app kept"; exit 1; }
+[[ ! -d "$HOME/Library/Caches/com.valvesoftware.steam" ]] || { echo "cache kept"; exit 1; }
+[[ ! -d "$HOME/Library/Application Support/com.valvesoftware.steam" ]] || { echo "selected data kept"; exit 1; }
+[[ -f "$HOME/Library/Application Support/Steam/steamapps/common/Game/game.bin" ]] || { echo "library removed"; exit 1; }
+EOF
+
+    [ "$status" -eq 0 ] || {
+        printf 'exit status: %s\n%s\n' "$status" "$output"
+        return 1
+    }
+    [[ "$output" != *"Application Support/Steam"$'\n'* && "$output" != *"Application Support/Steam"$'\e'* ]] || {
+        printf '%s\n' "$output"
+        return 1
+    }
+}
+
+# --with-data (#1746) only changes the starting selection of the data review.
+run_with_data_batch() {
+    local mode="$1"
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/with-data-fixture.XXXXXX")
+    mkdir -p "$fixture_home/Applications/Demo.app" \
+        "$fixture_home/Library/Caches/com.example.demo" \
+        "$fixture_home/Library/Application Support/Demo" \
+        "$fixture_home/Library/Group Containers/group.com.example.demo"
+    touch "$fixture_home/Library/Application Support/Demo/notes.db"
+
+    run env HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" WITH_DATA_MODE="$mode" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
+brew() { :; }
+export MOLE_DELETE_MODE=trash
+export MOLE_TEST_TRASH_DIR="$HOME/test-trash" MOLE_TEST_NO_AUTH=1
+request_sudo_access() { return 0; }
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+enter_alt_screen() { :; }
+leave_alt_screen() { :; }
+hide_cursor() { :; }
+show_cursor() { :; }
+remove_apps_from_dock() { :; }
+drain_pending_input() { :; }
+pgrep() { return 1; }
+pkill() { return 0; }
+sudo() { return 0; }
+# The data list opens with the flag's selection; this user clears it.
+paginated_multi_select() {
+    [[ -n "${MOLE_PRESELECTED_INDICES:-}" ]] || return 9
+    MOLE_SELECTION_RESULT=""
+    return 0
+}
+
+selected_apps=("0|$HOME/Applications/Demo.app|Demo|com.example.demo|0|Never")
+files_cleaned=0
+total_items=0
+total_size_cleaned=0
+MOLE_UNINSTALL_WITH_DATA=1
+if [[ "$WITH_DATA_MODE" == enter ]]; then input=$'\n'; else input=$'d\n'; fi
+printf '%s' "$input" | MOLE_TEST_MODE=1 batch_uninstall_applications
+
+data="$HOME/Library/Application Support/Demo"
+[[ ! -d "$HOME/Applications/Demo.app" ]] || { echo "app kept"; exit 1; }
+[[ ! -d "$HOME/Library/Caches/com.example.demo" ]] || { echo "cache kept"; exit 1; }
+[[ -d "$HOME/Library/Group Containers/group.com.example.demo" ]] || { echo "group container removed"; exit 1; }
+if [[ "$WITH_DATA_MODE" == enter ]]; then
+    [[ ! -e "$data" ]] || { echo "preselected data kept"; exit 1; }
+else
+    [[ -f "$data/notes.db" ]] || { echo "deselected data removed"; exit 1; }
+fi
+EOF
+}
+
+@test "uninstall --with-data preselects personal data and Enter removes it" {
+    run_with_data_batch enter
+    [ "$status" -eq 0 ] || {
+        printf 'exit status: %s\n%s\n' "$status" "$output"
+        return 1
+    }
+    [[ "$output" == *"Personal data to remove:"* ]] || { printf '%s\n' "$output"; return 1; }
+    [[ "$output" == *", including personal data"* ]] || { printf '%s\n' "$output"; return 1; }
+    # The App Group container is never preselected; it stays in the kept list.
+    [[ "$output" == *"Personal data kept:"*"Group Containers/group.com.example.demo"* ]] || {
+        printf '%s\n' "$output"
+        return 1
+    }
+}
+
+@test "uninstall --with-data keeps data the user deselects in the D list" {
+    run_with_data_batch deselect
+    [ "$status" -eq 0 ] || {
+        printf 'exit status: %s\n%s\n' "$status" "$output"
+        return 1
+    }
+    # The first preview offered the data; the confirmed one no longer does.
+    local confirmed="${output##*Files to be removed:}"
+    [[ "$output" == *"Personal data to remove:"* ]] || { printf '%s\n' "$output"; return 1; }
+    [[ "$confirmed" != *"Personal data to remove:"* ]] || { printf '%s\n' "$output"; return 1; }
+    [[ "$confirmed" != *"including personal data"* ]] || { printf '%s\n' "$output"; return 1; }
+    [[ "$confirmed" == *"Personal data kept:"*"Application Support/Demo"* ]] || {
+        printf '%s\n' "$output"
         return 1
     }
 }
@@ -687,7 +859,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
 EOF
 
     [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
@@ -738,7 +910,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
 EOF
 
     [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
@@ -789,7 +961,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications 2>&1
 EOF
 
     [ "$status" -eq 0 ] || {
@@ -800,6 +972,67 @@ EOF
     [[ "$output" != *"UNEXPECTED_"* ]] || return 1
     [[ "$(grep -c "^DELETE:$HOME/Applications/Managed.app$" "$trace" 2> /dev/null || true)" -eq 1 ]] || return 1
     [[ "$(grep -c "Preferences" "$trace" 2> /dev/null || true)" -eq 0 ]]
+}
+
+@test "same-bundle scan names the first unreadable path and keeps the generic wording when none is known (#1735)" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -uo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+root="$HOME/vols-1735"
+rm -rf "$root"; mkdir -p "$root/Readable/Good.app" "$root/Backups of mole-test"
+chmod 000 "$root/Backups of mole-test"
+out="$HOME/scan-1735.out"
+_MOLE_UNINSTALL_SCAN_UNREADABLE=""
+rc=0
+_uninstall_materialize_complete_find0 "$out" "$((SECONDS + 30))" "$root" -mindepth 1 -maxdepth 2 -iname '*.app' || rc=$?
+chmod 755 "$root/Backups of mole-test"
+echo "RC=$rc"
+echo "UNREADABLE=${_MOLE_UNINSTALL_SCAN_UNREADABLE}"
+tr '\0' '\n' < "$out"
+# A fully readable tree leaves it empty.
+rm -rf "$root/Backups of mole-test"
+_MOLE_UNINSTALL_SCAN_UNREADABLE=""
+rc=0
+_uninstall_materialize_complete_find0 "$out" "$((SECONDS + 30))" "$root" -mindepth 1 -maxdepth 2 -iname '*.app' || rc=$?
+echo "CLEAN_RC=$rc CLEAN_UNREADABLE=[${_MOLE_UNINSTALL_SCAN_UNREADABLE}]"
+EOF
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"RC=$MOLE_UNINSTALL_SCAN_PARTIAL"* || "$output" == *"RC=3"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"UNREADABLE=$HOME/vols-1735/Backups of mole-test"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Good.app"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"CLEAN_RC=0 CLEAN_UNREADABLE=[]"* ]] || { echo "$output"; return 1; }
+}
+
+@test "same-bundle scan names the unreadable path verbatim with GNU find first in PATH" {
+	local stub_bin="$HOME/gnu-find-1735"
+	mkdir -p "$stub_bin"
+	# GNU findutils quotes the path in its errors, which the BSD-format parser
+	# would carry into the preview as part of the name.
+	cat > "$stub_bin/find" << 'STUB'
+#!/bin/bash
+printf "find: \xe2\x80\x98%s/Backups of mole-test\xe2\x80\x99: Permission denied\n" "$1" >&2
+exit 1
+STUB
+	chmod +x "$stub_bin/find"
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$stub_bin:$PATH" /bin/bash --noprofile --norc << 'EOF'
+set -uo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+root="$HOME/vols-gnu-1735"
+rm -rf "$root"; mkdir -p "$root/Readable/Good.app" "$root/Backups of mole-test"
+chmod 000 "$root/Backups of mole-test"
+_MOLE_UNINSTALL_SCAN_UNREADABLE=""
+rc=0
+_uninstall_materialize_complete_find0 "$HOME/scan-gnu-1735.out" "$((SECONDS + 30))" "$root" -mindepth 1 -maxdepth 2 -iname '*.app' || rc=$?
+chmod 755 "$root/Backups of mole-test"
+echo "UNREADABLE=[${_MOLE_UNINSTALL_SCAN_UNREADABLE}]"
+tr '\0' '\n' < "$HOME/scan-gnu-1735.out"
+EOF
+	rm -rf "$stub_bin"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"UNREADABLE=[$HOME/vols-gnu-1735/Backups of mole-test]"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"Good.app"* ]] || { echo "$output"; return 1; }
 }
 
 @test "batch uninstall shows a partial same-bundle scan in the preview, not on the scan spinner" {
@@ -840,7 +1073,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications 2>&1
 EOF
 
     [ "$status" -eq 0 ] || {
@@ -853,6 +1086,65 @@ EOF
     header_line=$(printf '%s\n' "$output" | grep -n 'Files to be removed' | head -1 | cut -d: -f1)
     app_line=$(printf '%s\n' "$output" | grep -n ' Managed .*0B' | head -1 | cut -d: -f1)
     note_line=$(printf '%s\n' "$output" | grep -n 'Shared leftovers kept (some paths unreadable)' | head -1 | cut -d: -f1)
+    [[ -n "$header_line" && -n "$app_line" && -n "$note_line" ]] || { echo "$output"; return 1; }
+    [[ $app_line -gt $header_line && $note_line -eq $((app_line + 1)) ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"UNEXPECTED_"* ]] || return 1
+    [[ "$(grep -c "^DELETE:$HOME/Applications/Managed.app$" "$trace" 2> /dev/null || true)" -eq 1 ]] || return 1
+    [[ "$(grep -c "Preferences" "$trace" 2> /dev/null || true)" -eq 0 ]]
+}
+
+@test "batch uninstall names the unreadable path of a partial same-bundle scan in the preview (#1735)" {
+    mkdir -p "$HOME/Applications/Managed.app" "$HOME/Library/Preferences"
+    local pref="$HOME/Library/Preferences/com.example.Managed.plist"
+    printf 'pref' > "$pref"
+    local trace="$HOME/managed-deletes.log"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+brew() { :; }
+
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+pgrep() { return 1; }
+find_app_files() { printf '%s\n' "$HOME/Library/Preferences/com.example.Managed.plist"; }
+find_app_system_files() { return 0; }
+ensure_sudo_session() { return 1; }
+# TCC hides one directory from the same-bundle scan, as on macOS 26.
+uninstall_live_bundle_has_other_install() {
+	_MOLE_UNINSTALL_LIVE_SIBLING_FINGERPRINT=""
+	_MOLE_UNINSTALL_LIVE_SIBLING_PATHS=()
+	_MOLE_UNINSTALL_SCAN_UNREADABLE='/Volumes/Backups of mole-test\new'
+	return "$MOLE_UNINSTALL_SCAN_PARTIAL"
+}
+stop_launch_services() { :; }
+unregister_app_bundle() { :; }
+remove_login_item() { echo "UNEXPECTED_LOGIN_ITEM"; }
+force_kill_app() { echo "UNEXPECTED_KILL"; return 0; }
+mole_delete() {
+	printf 'DELETE:%s\n' "$1" >> "$HOME/managed-deletes.log"
+	return 0
+}
+
+selected_apps=("0|$HOME/Applications/Managed.app|Managed|com.example.Managed|0|Never")
+files_cleaned=0
+total_items=0
+total_size_cleaned=0
+
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications 2>&1
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    # The note belongs to this app's preview block. Printed during the scan,
+    # it landed on the scan spinner line, before the preview header.
+    local header_line app_line note_line
+    header_line=$(printf '%s\n' "$output" | grep -n 'Files to be removed' | head -1 | cut -d: -f1)
+    app_line=$(printf '%s\n' "$output" | grep -n ' Managed .*0B' | head -1 | cut -d: -f1)
+    note_line=$(printf '%s\n' "$output" | grep -nF 'Shared leftovers kept (cannot read /Volumes/Backups of mole-test\new)' | head -1 | cut -d: -f1)
     [[ -n "$header_line" && -n "$app_line" && -n "$note_line" ]] || { echo "$output"; return 1; }
     [[ $app_line -gt $header_line && $note_line -eq $((app_line + 1)) ]] || { echo "$output"; return 1; }
     [[ "$output" != *"UNEXPECTED_"* ]] || return 1
@@ -899,7 +1191,7 @@ total_items=0
 total_size_cleaned=0
 
 batch_rc=0
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1 || batch_rc=$?
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > /dev/null 2>&1 || batch_rc=$?
 echo "BATCH_RC=$batch_rc"
 EOF
 
@@ -973,7 +1265,7 @@ total_items=0
 total_size_cleaned=0
 
 batch_rc=0
-printf '\n' | batch_uninstall_applications 2>&1 || batch_rc=$?
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications 2>&1 || batch_rc=$?
 echo "BATCH_RC=$batch_rc"
 EOF
 
@@ -1022,7 +1314,7 @@ total_items=0
 total_size_cleaned=0
 
 rc=0
-batch_uninstall_applications || rc=$?
+MOLE_TEST_MODE=1 batch_uninstall_applications || rc=$?
 [[ $rc -eq 1 ]] || { echo "WRONG_RC:$rc"; exit 1; }
 [[ -d "$HOME/Applications/RootOwned.app" ]] || { echo "WRONG: bundle removed"; exit 1; }
 [[ -d "$HOME/Library/Application Support/RootOwned" ]] || { echo "WRONG: app data removed"; exit 1; }
@@ -1068,7 +1360,7 @@ total_items=0
 total_size_cleaned=0
 
 rc=0
-batch_uninstall_applications || rc=$?
+MOLE_TEST_MODE=1 batch_uninstall_applications || rc=$?
 [[ $rc -eq 1 ]] || { echo "WRONG_RC:$rc"; exit 1; }
 [[ -L "$HOME/Applications/Fake.app" ]] || { echo "WRONG: symlink removed"; exit 1; }
 [[ ! -e "$HOME/foreign-cask-side-effects.log" ]] || { echo "WRONG: discovery ran"; exit 1; }
@@ -1374,6 +1666,22 @@ EOF
     assert_time_machine_volume_scan ordinary 3
 }
 
+@test "an unreadable folder that is not a mounted volume does not make sibling discovery incomplete (#1735)" {
+    assert_time_machine_volume_scan folder 1
+}
+
+@test "skipping an unmounted unreadable folder still finds a sibling on another volume" {
+    assert_time_machine_volume_scan folder-sibling 0
+}
+
+@test "unknown device metadata keeps an unreadable folder in sibling discovery" {
+    assert_time_machine_volume_scan folder-unknown 3
+}
+
+@test "a device probe interruption cancels sibling discovery" {
+    assert_time_machine_volume_scan folder-interrupted 130
+}
+
 @test "an unreachable network share does not make sibling discovery incomplete" {
     assert_time_machine_volume_scan stale-share 1
 }
@@ -1557,6 +1865,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+FIND_BSD=find  # route the scan through the stub
 pkg_receipt_nonstandard_app_paths() { :; }
 
 selected_apps=("0|$APP_ROOT/Selected.app|Selected|com.example.partial|0|Never")
@@ -2031,7 +2340,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
 
 # The selected bundle and its name-keyed leftovers are gone.
 [[ ! -d "$HOME/Applications/Shared-beta.app" ]] || { echo "WRONG: beta bundle preserved"; exit 1; }
@@ -2123,7 +2432,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > /dev/null 2>&1
 
 [[ ! -d "$HOME/Applications/SharedName-beta.app" ]] || { echo "WRONG: beta bundle preserved"; exit 1; }
 [[ ! -d "$HOME/Library/Caches/SharedName-beta" ]] || { echo "WRONG: beta's own cache preserved"; exit 1; }
@@ -2144,7 +2453,7 @@ apps_data=(
 )
 selected_apps=("0|$HOME/Applications/SharedName.app|SharedName|com.example.sharedname|0|Never")
 
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > /dev/null 2>&1
 
 [[ ! -d "$HOME/Applications/SharedName.app" ]] || { echo "WRONG: selected bundle preserved"; exit 1; }
 [[ -d "$HOME/OtherApps/SharedName.app" ]] || { echo "WRONG: survivor removed (case 2)"; exit 1; }
@@ -2165,7 +2474,7 @@ apps_data=(
 )
 selected_apps=("0|$HOME/Applications/XcodeClone-beta.app|XcodeClone|com.example.xcodeclone|0|Never")
 
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > /dev/null 2>&1
 
 [[ ! -d "$HOME/Applications/XcodeClone-beta.app" ]] || { echo "WRONG: beta bundle preserved (case 3)"; exit 1; }
 [[ -d "$HOME/Applications/XcodeClone.app" ]] || { echo "WRONG: survivor removed (case 3)"; exit 1; }
@@ -2190,7 +2499,7 @@ apps_data=(
 )
 selected_apps=("0|$HOME/Applications/RevBase.app|RevBase|com.example.revbase|0|Never")
 
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > /dev/null 2>&1
 
 [[ ! -d "$HOME/Applications/RevBase.app" ]] || { echo "WRONG: selected base bundle preserved (case 4)"; exit 1; }
 [[ -d "$HOME/Applications/RevBase-beta.app" ]] || { echo "WRONG: suffixed survivor removed (case 4)"; exit 1; }
@@ -2212,7 +2521,7 @@ touch "$HOME/Library/Logs/DiagnosticReports/SoloApp-2026-07-03-101010.ips"
 apps_data=("0|$HOME/Applications/SoloApp.app|SoloApp|com.example.soloapp|0|Never|0")
 selected_apps=("0|$HOME/Applications/SoloApp.app|SoloApp|com.example.soloapp|0|Never")
 
-printf '\n' | batch_uninstall_applications > /dev/null 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > /dev/null 2>&1
 
 [[ ! -d "$HOME/Applications/SoloApp.app" ]] || { echo "WRONG: solo bundle preserved (case 5)"; exit 1; }
 grep -q "KILL:SoloApp" "$HOME/kill.log" 2> /dev/null || { echo "WRONG: termination skipped without sibling guard (case 5)"; exit 1; }
@@ -2244,7 +2553,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-if batch_uninstall_applications; then
+if MOLE_TEST_MODE=1 batch_uninstall_applications; then
 	exit 1
 fi
 EOF
@@ -2300,7 +2609,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\n' | batch_uninstall_applications > "$HOME/output.log" 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > "$HOME/output.log" 2>&1
 
 grep -q "Review only: ~/system/com.example.review.helper" "$HOME/output.log"
 # The summary states the count, not the paths: they were already listed above
@@ -2460,7 +2769,7 @@ total_items=0
 total_size_cleaned=0
 
 output_file="$HOME/dry_run_uninstall.log"
-printf '\n' | batch_uninstall_applications > "$output_file" 2>&1
+printf '\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > "$output_file" 2>&1
 output=$(cat "$output_file")
 
 [[ -d "$app_bundle" ]] || { echo "WRONG: dry-run removed app bundle"; cat "$output_file"; exit 1; }
@@ -2711,6 +3020,83 @@ EOF
         }
 }
 
+@test "an unrenamed Electron executable names no app for crash reports or kills" {
+    # Every unrenamed Electron app ships its binary as Electron, so neither its
+    # crash-report prefix nor a name-based kill may treat it as this app.
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+app_path="$HOME/Applications/WorkBuddy.app"
+mkdir -p "$app_path/Contents"
+cat > "$app_path/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>Electron</string>
+  <key>CFBundleIdentifier</key><string>com.example.workbuddy</string>
+</dict></plist>
+PLIST
+reports="$HOME/Library/Logs/DiagnosticReports"
+mkdir -p "$reports"
+touch "$reports/Electron-2026-10-15-101010.ips" "$reports/WorkBuddy-2026-10-15-101010.ips"
+found=$(get_diagnostic_report_paths_for_app "$app_path" "WorkBuddy" "$reports")
+[[ "$found" == *"WorkBuddy-2026-10-15-101010.ips"* ]] || { echo "missed own report: $found"; exit 1; }
+[[ "$found" != *"Electron-"* ]] || { echo "took another app's Electron report: $found"; exit 1; }
+pgrep() { echo "pgrep $*" >> "$HOME/kill-trace"; return 0; }
+pkill() { echo "pkill $*" >> "$HOME/kill-trace"; return 0; }
+force_kill_app "WorkBuddy" "$app_path"
+[[ ! -e "$HOME/kill-trace" ]] || { cat "$HOME/kill-trace"; exit 1; }
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "force_kill_app quits an unrenamed Electron app only by its bundle id" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=0 MOLE_TEST_NO_AUTH=0 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+app_path="$HOME/Applications/WorkBuddy.app"
+mkdir -p "$app_path/Contents"
+cat > "$app_path/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>Electron</string>
+  <key>CFBundleIdentifier</key><string>com.example.workbuddy</string>
+</dict></plist>
+PLIST
+pgrep() { echo "pgrep $*" >> "$HOME/name-trace"; return 0; }
+pkill() { echo "pkill $*" >> "$HOME/name-trace"; return 0; }
+run_with_timeout() { shift; "$@"; }
+sleep() { :; }
+# Each scenario lists the answers to successive "is running" queries.
+osascript() {
+    local answer
+    if [[ "$2" == *"to quit"* ]]; then
+        echo "quit" >> "$HOME/trace"
+        return 0
+    fi
+    [[ "$2" == 'application id "com.example.workbuddy" is running' ]] || return 1
+    answer=$(head -1 "$HOME/answers")
+    /usr/bin/sed -i '' '1d' "$HOME/answers" 2> /dev/null || true
+    [[ "$answer" == signal ]] && return 130
+    echo "$answer"
+}
+scenario() {
+    printf '%s\n' "$@" > "$HOME/answers"
+    : > "$HOME/trace"
+    local rc=0
+    force_kill_app "WorkBuddy" "$app_path" || rc=$?
+    echo "$rc"
+}
+[[ $(scenario false) == 0 ]] || exit 1
+[[ ! -s "$HOME/trace" ]] || { echo "quit a stopped app"; exit 1; }
+[[ $(scenario true true false) == 0 ]] || exit 1
+[[ $(cat "$HOME/trace") == quit ]] || { echo "expected one quit"; exit 1; }
+[[ $(scenario $(for i in $(seq 1 30); do echo true; done)) == 1 ]] || { echo "kept running not reported"; exit 1; }
+[[ $(scenario signal) == 130 ]] || { echo "signal not propagated"; exit 1; }
+[[ ! -e "$HOME/name-trace" ]] || { cat "$HOME/name-trace"; exit 1; }
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "force_kill_app refuses to operate on system process names" {
     # Defensive guard: a third-party .app could set CFBundleExecutable to a
     # system process name (Finder, Dock, loginwindow, etc.). Even though the
@@ -2829,7 +3215,7 @@ total_size_cleaned=0
 # (which would silently corrupt the next bash command into 127).
 output_file="$HOME/batch_output.log"
 mole_test_select_all_uninstall_data
-printf 'd\n' | batch_uninstall_applications > "$output_file" 2>&1
+printf 'd\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > "$output_file" 2>&1
 output=$(cat "$output_file")
 
 # Bundle and leftovers must be gone even though kill failed.
@@ -2961,7 +3347,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 
-printf '\nq' | batch_uninstall_applications
+printf '\nq' | MOLE_TEST_MODE=1 batch_uninstall_applications
 EOF
 
     [[ -s "$fixture_home/inventory.trace" ]] || { echo "$output"; return 1; }
@@ -3584,12 +3970,14 @@ EOF
     [ -f "$iso/.local/bin/mole" ]
 }
 
-@test "remove_mole deletes manual binaries and caches" {
+@test "remove_mole deletes manual binaries and caches but keeps the operation logs" {
     mkdir -p "$HOME/.local/bin"
     cp "$PROJECT_ROOT/mole" "$HOME/.local/bin/mole"
     cp "$PROJECT_ROOT/mo" "$HOME/.local/bin/mo"
     mkdir -p "$HOME/.config/mole" "$HOME/.cache/mole" "$HOME/Library/Logs/mole"
     echo "protected-entry" > "$HOME/.config/mole/whitelist"
+    echo "[2026-10-16 09:00:00] [clean] REMOVED /tmp/x (1KB)" > "$HOME/Library/Logs/mole/operations.log"
+    printf '2026-10-16T09:00:00+0800\ttrash\t1\tok\t/tmp/x\n' > "$HOME/Library/Logs/mole/deletions.log"
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="/usr/bin:/bin" MOLE_TEST_MODE=1 /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -3631,7 +4019,11 @@ EOF
     [ ! -f "$HOME/.local/bin/mo" ] || return 1
     [ ! -d "$HOME/.config/mole" ] || return 1
     [ ! -d "$HOME/.cache/mole" ] || return 1
-    [ ! -d "$HOME/Library/Logs/mole" ] || return 1
+    # The audit logs are the only record of what Mole removed, and Mole Mac
+    # reads the same folder; removing the CLI must not erase them.
+    grep -Fq "REMOVED /tmp/x" "$HOME/Library/Logs/mole/operations.log" || return 1
+    grep -Fq "/tmp/x" "$HOME/Library/Logs/mole/deletions.log" || return 1
+    [[ "$output" == *"Library/Logs/mole (kept, operation history)"* ]] || return 1
     # Config is user-authored state and must survive in the Trash (#1346).
     [ -f "$HOME/.Trash/mole-config/whitelist" ] || return 1
 }
@@ -3863,6 +4255,8 @@ EOF
     [ -d "$HOME/.config/mole" ]
     [ -d "$HOME/.cache/mole" ]
     [ -d "$HOME/Library/Logs/mole" ]
+    [[ "$output" == *"Library/Logs/mole (kept, operation history)"* ]] || return 1
+    [[ "$output" != *"Would remove: $HOME/Library/Logs/mole"* ]] || return 1
 }
 
 @test "remove_mole test mode ignores PATH installs outside test HOME" {
@@ -4077,6 +4471,111 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"count=1"* ]]
+}
+
+@test "match_apps_by_name runs tr a fixed number of times regardless of app count" {
+    local shim="$HOME/tr-shim"
+    mkdir -p "$shim"
+    cat > "$shim/tr" <<'SHIM'
+#!/bin/bash
+printf 'tr\n' >> "$TR_TRACE"
+exec /usr/bin/tr "$@"
+SHIM
+    cat > "$shim/basename" <<'SHIM'
+#!/bin/bash
+printf 'basename\n' >> "$TR_TRACE"
+exec /usr/bin/basename "$@"
+SHIM
+    chmod +x "$shim/tr" "$shim/basename"
+
+    run env PATH="$shim:$PATH" TR_TRACE="$HOME/tr.trace" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+selected_apps=()
+apps_data=()
+for i in $(seq 1 60); do
+    apps_data+=("1000|$HOME/Applications/App$i.app|App $i|com.example.app$i|1 MB|1000000|1024")
+done
+apps_data+=("1000|$HOME/Applications/Tor Browser.app|Tor Browser|org.torproject|1 MB|1000000|1024")
+source "$PROJECT_ROOT/tests/test_match_apps_helper.sh"
+match_apps_by_name "nothing-here"
+match_apps_by_name "Tor" "Browser"
+echo "count=${#selected_apps[@]}"
+echo "match=${selected_apps[0]}"
+EOF
+
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+    [[ "$output" == *"count=1"* ]] || return 1
+    [[ "$output" == *"|Tor Browser|"* ]] || return 1
+    # One batch pass per call plus one per query term and joined query.
+    local tr_calls basename_calls
+    tr_calls=$(grep -c '^tr$' "$HOME/tr.trace" || true)
+    basename_calls=$(grep -c '^basename$' "$HOME/tr.trace" || true)
+    [[ "$tr_calls" -le 6 ]] || { echo "tr ran $tr_calls times"; return 1; }
+    [[ "$basename_calls" -eq 0 ]] || { echo "basename ran $basename_calls times"; return 1; }
+}
+
+@test "match_apps_by_name keeps locale case folding for non-ASCII names" {
+    run env LC_ALL=en_US.UTF-8 /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+selected_apps=()
+apps_data=(
+	"1000|$HOME/Applications/Écrivain.app|Écrivain|com.example.ecrivain|1 MB|1000000|1024"
+	"1001|$HOME/Applications/Other.app|Other|com.example.other|1 MB|1000001|1024"
+)
+source "$PROJECT_ROOT/tests/test_match_apps_helper.sh"
+match_apps_by_name "écrivain"
+echo "count=${#selected_apps[@]}"
+echo "match=${selected_apps[0]-}"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"count=1"* ]] || { printf '%s\n' "$output"; return 1; }
+    [[ "$output" == *"|Écrivain|"* ]]
+}
+
+@test "match_apps_by_name folds non-ASCII case with a byte-only tr first in PATH" {
+    local stub_bin="$HOME/gnu-tr-bin"
+    mkdir -p "$stub_bin"
+    # GNU tr maps case byte by byte, so É never became é and the search missed.
+    printf '#!/bin/bash\nLC_ALL=C exec /usr/bin/tr "$@"\n' > "$stub_bin/tr"
+    chmod +x "$stub_bin/tr"
+    run env LC_ALL=en_US.UTF-8 PATH="$stub_bin:$PATH" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+selected_apps=()
+apps_data=(
+	"1000|$HOME/Applications/Écrivain.app|Écrivain|com.example.ecrivain|1 MB|1000000|1024"
+	"1001|$HOME/Applications/Other.app|Other|com.example.other|1 MB|1000001|1024"
+)
+source "$PROJECT_ROOT/tests/test_match_apps_helper.sh"
+match_apps_by_name "écrivain"
+echo "count=${#selected_apps[@]}"
+EOF
+    rm -rf "$stub_bin"
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+    [[ "$output" == *"count=1"* ]] || { printf '%s\n' "$output"; return 1; }
+}
+
+@test "match_apps_by_name keeps matching apps listed after a name tr cannot read" {
+    run env LC_ALL=en_US.UTF-8 /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+selected_apps=()
+bad=$(printf 'Bad\377Name')
+apps_data=(
+	"1000|$HOME/Applications/$bad.app|$bad|com.example.bad|1 MB|1000000|1024"
+	"1001|$HOME/Applications/Écrivain.app|Écrivain|com.example.ecrivain|1 MB|1000001|1024"
+)
+source "$PROJECT_ROOT/tests/test_match_apps_helper.sh"
+match_apps_by_name "écrivain" 2>&1
+echo "count=${#selected_apps[@]}"
+echo "match=${selected_apps[0]-}"
+EOF
+
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+    # One unreadable name used to cut the batched tr short and leave every
+    # later app unmatched.
+    [[ "$output" == *"count=1"* ]] || { printf '%s\n' "$output"; return 1; }
+    [[ "$output" == *"|Écrivain|"* ]] || { printf '%s\n' "$output"; return 1; }
+    [[ "$output" != *"Illegal byte sequence"* ]] || { printf '%s\n' "$output"; return 1; }
 }
 
 @test "main clears pending input before app selection after scan (#726)" {
@@ -4825,7 +5324,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 rc=0
-batch_uninstall_applications || rc=$?
+MOLE_TEST_MODE=1 batch_uninstall_applications || rc=$?
 printf 'RC=%s\n' "$rc"
 [[ $rc -eq 124 ]]
 INNER
@@ -4837,7 +5336,7 @@ INNER
     [[ "$output" != *"UNEXPECTED_DELETE"* ]]
 }
 
-@test "batch scan keeps the app plan when related-file sizing times out" {
+@test "uninstall data review keeps the app plan when selected-file sizing times out" {
     # Related size is display-only (#1383). A stalled du on leftovers must not
     # abort the batch; the leftover paths stay in the plan with size 0.
     run env HOME="$HOME/batch-related-size-timeout" PROJECT_ROOT="$PROJECT_ROOT" \
@@ -4885,8 +5384,15 @@ app_details=()
 total_estimated_size=0
 rc=0
 _batch_scan_app_details || rc=$?
+[[ $rc -eq 0 ]] || exit 1
+_review_original_details=("${app_details[@]}")
+_review_auto_files=() _review_personal_files=() _review_app_sizes=()
+_review_personal_paths=() _review_selected_paths=()
+_uninstall_prepare_data_review || rc=$?
 printf 'RC=%s DETAILS=%s\n' "$rc" "${#app_details[@]}"
-[[ $rc -eq 0 && ${#app_details[@]} -eq 1 ]]
+[[ $rc -eq 0 && ${#app_details[@]} -eq 1 && $total_estimated_size -eq 1 ]] || exit 1
+IFS='|' read -r _ _ _ _ encoded _ <<< "${app_details[0]}"
+[[ "$(decode_file_list "$encoded" TimedOut)" == "$related_path" ]] || exit 1
 INNER
 
     [ "$status" -eq 0 ] || return 1
@@ -5022,6 +5528,60 @@ INNER
     rm -f "$apps_cache"
     [ "$status" -eq 0 ]
     [[ "$output" == *"delete_mode=permanent"* ]]
+}
+
+run_uninstall_main_with_data_probe() {
+    local apps_cache
+    apps_cache="$(mktemp "${BATS_TEST_TMPDIR:-$BATS_RUN_TMPDIR:-$HOME}/tmp-with-data.XXXXXX")"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 \
+        APPS_CACHE_FILE="$apps_cache" MOLE_UNINSTALL_WITH_DATA=1 \
+        /bin/bash --noprofile --norc -s -- "$@" << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/uninstall.sh"
+
+log_operation_session_start() { :; }
+show_uninstall_help() { :; }
+hide_cursor() { :; }
+show_cursor() { :; }
+clear_screen() { :; }
+start_uninstall_interactive_screen() { :; }
+stop_uninstall_interactive_screen() { :; }
+scan_applications() { printf '%s\n' "$APPS_CACHE_FILE"; }
+load_applications() { return 0; }
+drain_pending_input() { :; }
+select_apps_for_uninstall() {
+    printf 'with_data=%s delete_mode=%s\n' "${MOLE_UNINSTALL_WITH_DATA:-unset}" "${MOLE_DELETE_MODE:-unset}"
+    _MOLE_MENU_USER_QUIT=1
+    return 1
+}
+
+main "$@"
+INNER
+
+    rm -f "$apps_cache"
+}
+
+@test "uninstall main sets MOLE_UNINSTALL_WITH_DATA only with --with-data" {
+    run_uninstall_main_with_data_probe --with-data
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"with_data=1 delete_mode=trash"* ]] || return 1
+
+    # An inherited environment value never preselects data on its own.
+    run_uninstall_main_with_data_probe
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"with_data=0 delete_mode=trash"* ]] || return 1
+
+    run_uninstall_main_with_data_probe --with-data --permanent
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"with_data=1 delete_mode=permanent"* ]] || return 1
+}
+
+@test "uninstall main still rejects unknown flags next to --with-data" {
+    run_uninstall_main_with_data_probe --with-datas
+    [ "$status" -eq 1 ] || return 1
+    [[ "$output" == *"Unknown uninstall option: --with-datas"* ]] || return 1
+    [[ "$output" != *"with_data="* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -5491,7 +6051,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 rc=0
-batch_uninstall_applications || rc=$?
+MOLE_TEST_MODE=1 batch_uninstall_applications || rc=$?
 printf 'RC=%s\n' "$rc"
 [[ $rc -eq 1 ]]
 INNER
@@ -5556,7 +6116,7 @@ files_cleaned=0
 total_items=0
 total_size_cleaned=0
 mole_test_select_all_uninstall_data
-printf 'd\n' | batch_uninstall_applications > "$HOME/output.log" 2>&1
+printf 'd\n' | MOLE_TEST_MODE=1 batch_uninstall_applications > "$HOME/output.log" 2>&1
 [[ "$(cat "$HOME/sized-plan")" == "$HOME/eligible-leftover" ]] || exit 1
 [[ "$(cat "$HOME/executed-plan")" == "$HOME/eligible-leftover" ]] || exit 1
 [[ -d "$HOME/Library/Logs/com.openai.codex" ]] || exit 1
@@ -5583,7 +6143,7 @@ source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
 source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
 mole_test_isolate_uninstall_inventory
-export MOLE_TEST_TRASH_DIR="$HOME/Trash"
+export MOLE_TEST_TRASH_DIR="$HOME/Trash" MOLE_TEST_NO_AUTH=1
 brew() { :; }
 request_sudo_access() { :; }
 start_inline_spinner() { :; }
@@ -5604,7 +6164,7 @@ unregister_app_bundle() { :; }
 selected_apps=("0|$HOME/Applications/OwnedApp.app|OwnedApp|com.example.owned|0|Never")
 files_cleaned=0 total_items=0 total_size_cleaned=0
 mole_test_select_all_uninstall_data
-printf 'd\n' | batch_uninstall_applications
+printf 'd\n' | MOLE_TEST_MODE=1 batch_uninstall_applications
 if [[ "$MOLE_DRY_RUN" == 1 ]]; then
     [[ -d "$HOME/Applications/OwnedApp.app" ]] || exit 1
 else
@@ -5638,7 +6198,7 @@ mkdir -p "$HOME"
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
 export MOLE_UNINSTALL_MODE=1 MOLE_DELETE_MODE=trash
-export MOLE_TEST_TRASH_DIR="$HOME/Trash" MOLE_DELETE_LOG="$HOME/deletions.log"
+export MOLE_TEST_TRASH_DIR="$HOME/Trash" MOLE_DELETE_LOG="$HOME/deletions.log" MOLE_TEST_NO_AUTH=1
 app="$HOME/Applications/AgentOwned.app"
 changed="$HOME/Library/LaunchAgents/com.thirdparty.changed.plist"
 intact="$HOME/Library/LaunchAgents/com.thirdparty.intact.plist"
@@ -5694,7 +6254,7 @@ set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
 export MOLE_UNINSTALL_MODE=1 MOLE_DELETE_MODE=trash
-export MOLE_TEST_TRASH_DIR="$HOME/Trash"
+export MOLE_TEST_TRASH_DIR="$HOME/Trash" MOLE_TEST_NO_AUTH=1
 mkdir -p "$HOME/Applications/First.app" "$HOME/Applications/Second.app" "$HOME/Library/Caches/com.example.Shared"
 shared="$HOME/Library/Caches/com.example.Shared"
 stop_launch_services() { :; }
@@ -5743,7 +6303,7 @@ mkdir -p "$HOME"
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
 export MOLE_UNINSTALL_MODE=1 MOLE_DELETE_MODE=trash
-export MOLE_TEST_TRASH_DIR="$HOME/Trash"
+export MOLE_TEST_TRASH_DIR="$HOME/Trash" MOLE_TEST_NO_AUTH=1
 app="$HOME/Applications/Live.app"
 cache="$HOME/Library/Caches/com.example.Live"
 mkdir -p "$app" "$cache"
@@ -6047,6 +6607,7 @@ EOF_ROOT
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+FIND_BSD=find  # route the scan through the stub
 mkdir -p "$HOME/bin" "$HOME/Volumes"
 cat > "$HOME/bin/find" <<'FIND'
 #!/bin/bash
@@ -6253,7 +6814,7 @@ selected_apps=(one two)
 ) &
 sender=$!
 rc=0
-batch_uninstall_applications || rc=$?
+MOLE_TEST_MODE=1 batch_uninstall_applications || rc=$?
 wait "$sender" || exit 1
 [[ $rc == 130 ]] || exit 1
 printf 'allocation-interrupted\n'
@@ -6326,4 +6887,361 @@ SCRIPT
         [ ! -e "$HOME/discovery-called" ] || return 1
         [ ! -e "$HOME/auth-called" ] || return 1
     done
+}
+
+@test "by-name uninstall shows the batch preview once instead of a pre-scan prompt" {
+    run env NO_COLOR=1 HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TERM="xterm-256color" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/uninstall.sh"
+log_operation_session_start() { :; }
+hide_cursor() { :; }
+show_cursor() { :; }
+clear_screen() { :; }
+uninstall_abort() { printf 'ABORT:%s\n' "$*"; }
+scan_applications() { printf 'fixture\n' > "$HOME/apps.list"; printf '%s\n' "$HOME/apps.list"; }
+load_applications() { apps_data=(); return 0; }
+match_apps_by_name() { selected_apps=("1700000000|/Applications/Test.app|Test|com.example.Test|1MB|Today|1024"); }
+batch_uninstall_applications() { printf 'BATCH_CALLED\n'; }
+main TestApp < /dev/null
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"Matched 1 app(s)"* ]] || return 1
+    [[ "$output" == *"BATCH_CALLED"* ]] || return 1
+    [[ "$output" != *"Proceed with uninstallation"* ]]
+}
+
+@test "by-name matched list renders control characters as placeholders" {
+    run env NO_COLOR=1 HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TERM="xterm-256color" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/uninstall.sh"
+log_operation_session_start() { :; }
+hide_cursor() { :; }
+show_cursor() { :; }
+clear_screen() { :; }
+uninstall_abort() { printf 'ABORT:%s\n' "$*"; }
+scan_applications() { printf 'fixture\n' > "$HOME/apps.list"; printf '%s\n' "$HOME/apps.list"; }
+load_applications() { apps_data=(); return 0; }
+evil_name=$(printf 'Evil\033[2JApp\007')
+match_apps_by_name() {
+    selected_apps=("1700000000|/Applications/Evil.app|$evil_name|com.example.evil|1MB|Today|1024")
+}
+batch_uninstall_applications() { printf 'BATCH_CALLED\n'; }
+main TestApp < /dev/null
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"Evil"* ]] || return 1
+    [[ "$output" == *"BATCH_CALLED"* ]] || return 1
+    [[ "$output" != *$'\033'* ]] || {
+        printf 'raw escape reached the matched list: %s\n' "$output"
+        return 1
+    }
+    [[ "$output" != *$'\007'* ]]
+}
+
+@test "app selector renders control characters in display names inert" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TERM="xterm-256color" /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/ui/app_selector.sh"
+
+evil_name=$(printf 'Evil\033]2;owned\007App')
+apps_data=("1700000000|/Applications/Evil.app|$evil_name|com.example.evil|1MB|Today|1024")
+selected_apps=()
+drain_pending_input() { :; }
+captured=""
+paginated_multi_select() { captured="$2"; MOLE_SELECTION_RESULT=""; return 1; }
+tput() { echo 100; }
+
+select_apps_for_uninstall || true
+[[ "$captured" == *"Evil"* ]] || { printf 'missing name: %q\n' "$captured"; exit 1; }
+if [[ "$captured" == *$'\033'* || "$captured" == *$'\007'* ]]; then
+    printf 'raw control byte reached the selector: %q\n' "$captured"
+    exit 1
+fi
+INNER
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+}
+
+@test "remove_mole clears shell completion integration and follows rc symlinks" {
+    mkdir -p "$HOME/.local/bin" "$HOME/dotfiles" "$HOME/.config/fish/completions"
+    cp "$PROJECT_ROOT/mole" "$HOME/.local/bin/mole"
+    cp "$PROJECT_ROOT/mo" "$HOME/.local/bin/mo"
+    cat > "$HOME/.zshrc" << 'RC'
+# user zsh setting
+# Mole shell completion
+if output="$(mole completion zsh 2>/dev/null)"; then eval "$output"; fi
+export PATH="$HOME/.local/bin:$PATH"
+RC
+    cat > "$HOME/dotfiles/bashrc" << 'RC'
+# user bash setting
+# Mole shell completion
+if output="$(mole completion bash 2>/dev/null)"; then eval "$output"; fi
+RC
+    ln -s dotfiles/bashrc "$HOME/.bashrc"
+    cat > "$HOME/.config/fish/config.fish" << 'RC'
+# user fish setting
+# Mole shell completion
+set -l output (mole completion fish 2>/dev/null); and echo "$output" | source
+RC
+    printf '# generated\n# Mole completions for mole\n' > "$HOME/.config/fish/completions/mole.fish"
+    printf '# generated\nsource %s\n' "$HOME/.config/fish/completions/mole.fish" > "$HOME/.config/fish/completions/mo.fish"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=1 MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/remove.sh"
+drain_pending_input() { :; }
+remove_mole false < <(printf '\n')
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    ! grep -Fq 'Mole shell completion' "$HOME/.zshrc" || return 1
+    grep -Fq '# user zsh setting' "$HOME/.zshrc" || return 1
+    grep -Fq "export PATH=\"\$HOME/.local/bin:\$PATH\"" "$HOME/.zshrc" || return 1
+    [ -L "$HOME/.bashrc" ] || return 1
+    ! grep -Fq 'Mole shell completion' "$HOME/dotfiles/bashrc" || return 1
+    grep -Fq '# user bash setting' "$HOME/dotfiles/bashrc" || return 1
+    ! grep -Fq 'Mole shell completion' "$HOME/.config/fish/config.fish" || return 1
+    ! grep -Fq 'completion fish' "$HOME/.config/fish/config.fish" || return 1
+    grep -Fq '# user fish setting' "$HOME/.config/fish/config.fish" || return 1
+    [ ! -e "$HOME/.config/fish/completions/mole.fish" ] || return 1
+    [ ! -e "$HOME/.config/fish/completions/mo.fish" ] || return 1
+    [[ "$output" == *"Removed shell completion"* ]] || return 1
+}
+
+@test "remove_mole preserves multi-level rc links and unrelated completion tools" {
+    mkdir -p "$HOME/.local/bin" "$HOME/dotfiles" "$HOME/.config/fish/completions" "$HOME/.cache/mole" "$HOME/Library/Logs/mole"
+    rm -f "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"
+    cp "$PROJECT_ROOT/mole" "$HOME/.local/bin/mole"
+    cp "$PROJECT_ROOT/mo" "$HOME/.local/bin/mo"
+    cat > "$HOME/dotfiles/real-zshrc" << 'RC'
+# user setting
+# Mole shell completion
+if output="$(mole completion zsh 2>/dev/null)"; then eval "$output"; fi
+gizmo completion zsh
+RC
+    ln -s "$HOME/dotfiles/real-zshrc" "$HOME/dotfiles/link-zshrc"
+    ln -s dotfiles/link-zshrc "$HOME/.zshrc"
+    printf '# Mole shell completion\n' > "$HOME/.config/fish/completions/mole.fish"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=1 MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/remove.sh"
+drain_pending_input() { :; }
+remove_mole false < <(printf '\n')
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [ -L "$HOME/.zshrc" ] || return 1
+    [ -L "$HOME/dotfiles/link-zshrc" ] || return 1
+    ! grep -Fq 'Mole shell completion' "$HOME/dotfiles/real-zshrc" || return 1
+    grep -Fq 'gizmo completion zsh' "$HOME/dotfiles/real-zshrc" || return 1
+    ! grep -Fq 'Mole shell completion' "$HOME/.config/fish/completions/mole.fish" 2> /dev/null || return 1
+    [ ! -e "$HOME/.config/fish/completions/mole.fish" ] || return 1
+    grep -Fq "REMOVED $HOME/.zshrc (shell completion)" "$HOME/Library/Logs/mole/operations.log" || return 1
+    grep -Fq "REMOVED $HOME/.config/fish/completions/mole.fish (fish completion)" "$HOME/Library/Logs/mole/operations.log" || return 1
+    grep -Fq "REMOVED $HOME/.cache/mole (cache)" "$HOME/Library/Logs/mole/operations.log" || return 1
+    grep -Fq "REMOVED $HOME/.local/bin/mole (launcher)" "$HOME/Library/Logs/mole/operations.log" || return 1
+    grep -Fq "REMOVED $HOME/.local/bin/mo (launcher)" "$HOME/Library/Logs/mole/operations.log" || return 1
+}
+
+@test "remove_mole dry run lists shell completion without deleting it" {
+    mkdir -p "$HOME/.local/bin" "$HOME/.config/fish/completions"
+    rm -f "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"
+    cp "$PROJECT_ROOT/mole" "$HOME/.local/bin/mole"
+    cat > "$HOME/.zshrc" << 'RC'
+# Mole shell completion
+if output="$(mole completion zsh 2>/dev/null)"; then eval "$output"; fi
+RC
+    printf '# generated\n' > "$HOME/.config/fish/completions/mole.fish"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=1 MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/remove.sh"
+remove_mole true
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    grep -Fq '# Mole shell completion' "$HOME/.zshrc" || return 1
+    [ -e "$HOME/.config/fish/completions/mole.fish" ] || return 1
+    [[ "$output" == *"shell completion"* ]] || return 1
+    [ -f "$HOME/.local/bin/mole" ] || return 1
+}
+
+@test "remove_mole names each shell completion file it cannot clean and exits nonzero" {
+    mkdir -p "$HOME/.local/bin"
+    rm -f "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"
+    cp "$PROJECT_ROOT/mole" "$HOME/.local/bin/mole"
+    cat > "$HOME/.zshrc" << 'RC'
+# Mole shell completion
+if output="$(mole completion zsh 2>/dev/null)"; then eval "$output"; fi
+RC
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=1 MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/remove.sh"
+drain_pending_input() { :; }
+mv() {
+    local target="${*: -1}"
+    if [[ "$target" == *".zshrc" ]]; then
+        return 1
+    fi
+    command mv "$@"
+}
+remove_mole false < <(printf '\n')
+EOF
+
+    [ "$status" -eq 1 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"Could not remove shell completion from $HOME/.zshrc"* ]] || return 1
+    grep -Fq '# Mole shell completion' "$HOME/.zshrc" || return 1
+}
+
+@test "batch preview display names are terminal-safe" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+evil_name=$(printf 'Evil\033]2;owned\007App')
+safe_name=$(_uninstall_display_text "$evil_name")
+[[ "$safe_name" == *"Evil"* && "$safe_name" == *"App"* ]] || exit 1
+if [[ "$safe_name" == *$'\033'* || "$safe_name" == *$'\007'* ]]; then
+    printf 'raw control byte reached the batch preview: %q\n' "$safe_name"
+    exit 1
+fi
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+}
+
+@test "batch preview and summaries render app names through the terminal-safe helper" {
+    # shellcheck disable=SC2016
+    grep -Fq 'display_app_name=$(_uninstall_display_text "$app_name")' "$PROJECT_ROOT/lib/uninstall/batch.sh" || return 1
+    # shellcheck disable=SC2016
+    grep -Fq 'Uninstalling $(_uninstall_display_text "$app_name")' "$PROJECT_ROOT/lib/uninstall/batch.sh" || return 1
+    # shellcheck disable=SC2016
+    grep -Fq 'running_list+="$(_uninstall_display_text "${running_at_uninstall_apps[idx]}")"' "$PROJECT_ROOT/lib/uninstall/batch.sh" || return 1
+    # shellcheck disable=SC2016
+    grep -Fq 'bg_list+="$(_uninstall_display_text "${background_items_warning_apps[idx]}")"' "$PROJECT_ROOT/lib/uninstall/batch.sh"
+}
+
+@test "batch uninstall without a terminal exits nonzero and removes nothing" {
+    local fixture_home
+    fixture_home=$(mktemp -d "$HOME/no-tty-fixture.XXXXXX")
+    HOME="$fixture_home" create_app_artifacts
+
+    run env -u MOLE_TEST_MODE HOME="$fixture_home" PROJECT_ROOT="$PROJECT_ROOT" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+source "$PROJECT_ROOT/tests/helpers/uninstall.bash"
+mole_test_isolate_uninstall_inventory
+brew() { :; }
+request_sudo_access() { return 0; }
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+enter_alt_screen() { :; }
+leave_alt_screen() { :; }
+hide_cursor() { :; }
+show_cursor() { :; }
+remove_apps_from_dock() { :; }
+pgrep() { return 1; }
+pkill() { return 0; }
+sudo() { return 0; }
+app_bundle="$HOME/Applications/TestApp.app"
+selected_apps=("0|$app_bundle|TestApp|com.example.TestApp|0|Never")
+rc=0
+MOLE_TEST_MODE=0 batch_uninstall_applications < /dev/null || rc=$?
+printf 'RC=%s\n' "$rc"
+exit "$rc"
+EOF
+
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"RC=1"* ]] || { echo "$output"; return 1; }
+    [ -d "$fixture_home/Applications/TestApp.app" ] || return 1
+    [ -d "$fixture_home/Library/Application Support/TestApp" ] || return 1
+}
+
+@test "completion removal preserves quoted and mixed commands byte for byte" {
+    cat > "$HOME/expected-user-lines" <<'RC'
+export NOTE="mo completion zsh"
+alias setup='mo completion zsh; echo keep'
+if command -v mole; then source <(mole completion zsh); export KEEP=yes; fi
+# Run mole completion zsh to inspect the script
+RC
+    cat "$HOME/expected-user-lines" > "$HOME/.zshrc"
+    cat >> "$HOME/.zshrc" <<'RC'
+# Mole shell completion
+if output="$(mole completion zsh 2>/dev/null)"; then eval "$output"; fi
+eval "$(mo completion bash)"
+source <(mole completion zsh)
+set -l output (mo completion fish 2>/dev/null); and echo "$output" | source
+mo completion fish | source
+RC
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 \
+        /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/remove.sh"
+_remove_completion_integration
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    cmp "$HOME/expected-user-lines" "$HOME/.zshrc" || return 1
+}
+
+@test "remove_mole without a terminal exits nonzero and removes nothing" {
+    local iso="$BATS_TEST_TMPDIR/no-tty-remove"
+    mkdir -p "$iso/.local/bin" "$iso/.config/mole" "$iso/.cache/mole"
+    cp "$PROJECT_ROOT/mole" "$iso/.local/bin/mole"
+    cp "$PROJECT_ROOT/mo" "$iso/.local/bin/mo"
+
+    run env -u MOLE_TEST_MODE HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/remove.sh"
+drain_pending_input() { :; }
+remove_mole false < /dev/null
+EOF
+
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"interactive terminal"* ]] || { echo "$output"; return 1; }
+    [ -f "$iso/.local/bin/mole" ] || return 1
+    [ -f "$iso/.local/bin/mo" ] || return 1
+    [ -d "$iso/.config/mole" ] || return 1
+    [ -d "$iso/.cache/mole" ] || return 1
 }

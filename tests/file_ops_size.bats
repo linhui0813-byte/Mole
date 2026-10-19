@@ -323,7 +323,8 @@ done
 SCRIPT
 
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$output" == "0:0:0:0 1:0:1:0 124:0:1:0 130:130:0:130 " ]]
+    # Only a timeout marks the total partial; a vanished item (1) does not.
+    [[ "$output" == "0:0:0:0 1:0:0:0 124:0:1:0 130:130:0:130 " ]]
 }
 
 @test "mole_add_cleaned_row adds one category and ignores non-numeric input" {
@@ -342,4 +343,67 @@ SCRIPT
 
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == "FILES=6 KB=13 ITEMS=4" ]]
+}
+
+@test "cleanup sizing counts the readable bytes of a folder with an unlistable child" {
+    local root="$SANDBOX/partly-readable"
+    mkdir -p "$root/locked"
+    head -c 409600 /dev/zero > "$root/data.bin"
+    chmod 000 "$root/locked"
+    local expected
+    expected=$(du -skP "$root" 2> /dev/null | awk '{print $1}' || true)
+
+    run /bin/bash --noprofile --norc <<EOF
+$(prelude)
+strict_rc=0
+strict=\$(get_path_size_kb "$root") || strict_rc=\$?
+echo "STRICT=[\$strict] rc=\$strict_rc"
+readable_rc=0
+readable=\$(get_path_size_kb "$root" "" readable) || readable_rc=\$?
+echo "READABLE=\$readable rc=\$readable_rc"
+source "$PROJECT_ROOT/bin/clean.sh"
+echo "CLEANUP=\$(get_cleanup_path_size_kb "$root")"
+EOF
+    chmod 755 "$root/locked"
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # Uninstall keeps the strict contract (#1404).
+    [[ "$output" == *"STRICT=[] rc=1"* ]] || { echo "$output"; return 1; }
+    # A folder Mole cannot list cannot be removed either, so the readable
+    # bytes are what a cleanup frees; dropping them counted the item as 0.
+    [[ "$output" == *"READABLE=$expected rc=0"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"CLEANUP=$expected"* ]] || { echo "$output"; return 1; }
+    [ "$expected" -ge 400 ]
+}
+
+@test "only a sizing timeout marks the cleanup total as a lower bound" {
+    run /bin/bash --noprofile --norc <<EOF
+$(prelude)
+MOLE_CLEAN_SIZING_TIMEOUTS=0
+mole_item_size_continues 1
+echo "AFTER_FAILURE=\$MOLE_CLEAN_SIZING_TIMEOUTS"
+mole_item_size_continues 124
+echo "AFTER_TIMEOUT=\$MOLE_CLEAN_SIZING_TIMEOUTS"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    # A vanished item leaves nothing to free and must not add a lower-bound mark.
+    [[ "$output" == *"AFTER_FAILURE=0"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"AFTER_TIMEOUT=1"* ]]
+}
+
+@test "a sizing timeout names the item in the debug log" {
+    mkdir -p "$SANDBOX/slow-dir"
+    run /bin/bash --noprofile --norc <<EOF
+$(prelude)
+run_with_timeout() { return 124; }
+debug_log() { echo "DEBUG: \$*"; }
+rc=0
+get_path_size_kb "$SANDBOX/slow-dir" 7 readable || rc=\$?
+echo "RC=\$rc"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"RC=124"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"DEBUG: Size check timed out after 7s: $SANDBOX/slow-dir"* ]] || { echo "$output"; return 1; }
 }

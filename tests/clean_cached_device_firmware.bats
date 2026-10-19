@@ -462,7 +462,10 @@ EOF
 
 
 @test "firmware guard detects a real open file and permits it after close" {
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false /bin/bash <<'EOF'
+    # Real lsof under a loaded parallel suite can outlive the 2 s probe budget,
+    # and a timed-out probe keeps the file by design. This case is about what
+    # lsof reports, not the budget, so give it room.
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false MOLE_TIMEOUT_QUICK_DETECT_SEC=30 /bin/bash <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/user.sh"

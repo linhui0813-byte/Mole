@@ -3,15 +3,47 @@
 
 _uninstall_disposable_leftover() {
     case "$1" in
+        # Data that only lives under Caches: Spotify offline music, Raycast
+        # clipboard-history images, Mullvad Browser's profile root.
         "$HOME/Library/Caches/com.spotify.client" | "$HOME/Library/Caches/com.spotify.client/"*) return 1 ;;
+        "$HOME/Library/Caches/com.raycast.macos" | "$HOME/Library/Caches/com.raycast.macos/"*) return 1 ;;
+        "$HOME/Library/Caches/MullvadBrowser" | "$HOME/Library/Caches/MullvadBrowser/"*) return 1 ;;
         "$HOME/Library/Caches/"* | "$HOME/Library/Logs/"*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
+# Data that --with-data still leaves unselected; D lists it like any other
+# personal path. Browser profiles hold passwords, history and extensions, and
+# the CLI cannot prove that no other installed app claims an App Group
+# container. Profile roots the uninstall scan can offer (the Chromium vendors'
+# entries also cover their Beta, Dev and Canary channels) and everything below
+# them, compared case-insensitively because APFS folds case.
+_uninstall_data_preselect_holdback() {
+    local path home
+    mole_ascii_lowercase path "$1"
+    mole_ascii_lowercase home "$HOME"
+    case "$path" in
+        "$home/library/group containers/"*) return 0 ;;
+    esac
+    local support="$home/library/application support"
+    case "$path" in
+        "$support/google/chrome"* | "$support/bravesoftware"* | \
+            "$support/microsoft edge"* | "$support/com.operasoftware.opera"* | \
+            "$support/chromium" | "$support/chromium/"* | \
+            "$support/vivaldi" | "$support/vivaldi/"* | \
+            "$support/arc" | "$support/arc/"* | \
+            "$support/firefox" | "$support/firefox/"* | \
+            "$support/zen" | "$support/zen/"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 # shellcheck disable=SC2154  # Arrays belong to the calling batch preview scope.
 _uninstall_prepare_data_review() {
-    local detail name app id total encoded remainder files path automatic personal i=0 rc=0
+    local detail name app id total encoded remainder files path automatic personal i=0
     for detail in "${_review_original_details[@]}"; do
         IFS='|' read -r name app id total encoded remainder <<< "$detail"
         files=$(decode_file_list "$encoded" "$name")
@@ -29,18 +61,20 @@ _uninstall_prepare_data_review() {
                 personal=$(append_line "$personal" "$path")
                 if ! mole_identity_in_list "$path" "${_review_personal_paths[@]+"${_review_personal_paths[@]}"}"; then
                     _review_personal_paths+=("$path")
+                    # --with-data starts from every path selected; D can still
+                    # deselect any of them before Enter.
+                    if [[ "${MOLE_UNINSTALL_WITH_DATA:-0}" == "1" ]] &&
+                        ! _uninstall_data_preselect_holdback "$path"; then
+                        _review_selected_paths+=("$path")
+                    fi
                 fi
             fi
         done <<< "$files"
         _review_auto_files[i]="$automatic"
         _review_personal_files[i]="$personal"
-        # Fresh, bounded bundle size; unknown is never invented as reclaimable.
-        local app_kb=0
-        rc=0
-        app_kb=$(get_path_size_kb "$app") || rc=$?
-        mole_rc_signal "$rc" && return "$rc"
-        [[ $rc -eq 0 && "$app_kb" =~ ^[0-9]+$ ]] || app_kb=0
-        _review_app_sizes[i]="$app_kb"
+        # The scan already measured this bundle for the current review.
+        # No persisted size or previous invocation is reused.
+        _review_app_sizes[i]="$total"
         i=$((i + 1))
     done
     _uninstall_apply_data_selection
@@ -99,6 +133,7 @@ _uninstall_choose_personal_data() {
     fi
     # Unlike app selection, Enter on an empty data selection must keep everything.
     local _MOLE_MENU_KEEP_EMPTY=true
+    local _MOLE_MENU_SELECT_ALL=true
     paginated_multi_select "Personal data to remove" "${labels[@]}" || rc=$?
     mole_rc_timeout_or_signal "$rc" && return "$rc"
     if [[ $rc -ne 0 ]]; then

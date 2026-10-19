@@ -25,11 +25,13 @@
         default = inputs.self.packages.${system}.mole;
       }) darwinPackages;
 
-      checks =
-        builtins.mapAttrs (system: _pkgs: {
+      checks = builtins.mapAttrs (
+        system: _pkgs:
+        inputs.self.packages.${system}
+        // {
           formatting = inputs.self.formatter.${system}.check inputs.self;
-        }) darwinPackages
-        // inputs.self.packages;
+        }
+      ) darwinPackages;
 
       apps = builtins.mapAttrs (system: _pkgs: {
         mole = {

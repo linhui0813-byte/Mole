@@ -1,6 +1,6 @@
 # Mole Security Audit
 
-This document describes the security-relevant behavior of the current `main` branch, updated for V1.59.1 on 2026-10-10. It is intended as a public description of Mole's safety boundaries, destructive-operation controls, release integrity signals, and known limitations.
+This document describes the security-relevant behavior of the current `main` branch, updated for V1.61.0 on 2026-10-16. It is intended as a public description of Mole's safety boundaries, destructive-operation controls, release integrity signals, and known limitations.
 
 ## Executive Summary
 
@@ -81,7 +81,7 @@ Some subpaths under otherwise protected roots are explicitly allowlisted for bou
 - `/private/var/folders`
 - `/private/var/db/diagnostics`
 - `/private/var/db/DiagnosticPipeline`
-- `/private/var/db/powerlog`
+- `/private/var/db/powerlog`, except the live `Current*` database of every `PerfPowerTelemetry` store and its `-wal` / `-shm` files
 - `/private/var/db/reportmemoryexception`
 
 This design keeps cleanup scoped to known-safe maintenance targets instead of broad root-level deletion patterns.
@@ -112,7 +112,7 @@ Some subpaths under protected roots are explicitly allowlisted:
 - `/private/var/folders`
 - `/private/var/db/diagnostics`
 - `/private/var/db/DiagnosticPipeline`
-- `/private/var/db/powerlog`
+- `/private/var/db/powerlog`, except the live `Current*` database of every `PerfPowerTelemetry` store and its `-wal` / `-shm` files
 - `/private/var/db/reportmemoryexception`
 
 ### Protected Categories

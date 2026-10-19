@@ -44,6 +44,36 @@ is_clamshell_mode() {
     return 1 # Lid is open
 }
 
+# Run a command with terminal echo off and restore the original mode on every
+# exit, Ctrl-C included. A subshell owns the restore, so it never depends on
+# the caller's traps. Typed input stays buffered for the next reader.
+_mole_tty_quiet() (
+    # No `local`: the EXIT trap runs after the function scope ends, and the
+    # subshell already keeps these names away from the caller.
+    _quiet_tty="$1"
+    shift
+    _quiet_saved=$({ stty -g < "$_quiet_tty"; } 2> /dev/null) || _quiet_saved=""
+    if [[ -n "$_quiet_saved" ]]; then
+        trap 'stty "$_quiet_saved" < "$_quiet_tty" 2> /dev/null || true' EXIT
+        trap 'exit 130' INT TERM HUP
+        stty -echo < "$_quiet_tty" 2> /dev/null || true
+    fi
+    "$@"
+)
+
+# Poll a background Touch ID sudo for up to 5 seconds: 0 once it exited,
+# 1 when it is still waiting.
+_mole_touchid_poll() {
+    local sudo_pid="$1"
+    local elapsed=0
+    while ((elapsed < 50)); do
+        kill -0 "$sudo_pid" 2> /dev/null || return 0
+        sleep 0.1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
 _request_password() {
     local tty_path="$1"
 
@@ -160,25 +190,20 @@ request_sudo_access() {
     sudo -v < /dev/null > /dev/null 2>&1 &
     local sudo_pid=$!
 
-    # Wait for sudo to complete or timeout (5 seconds)
-    local elapsed=0
-    local timeout=50 # 50 * 0.1s = 5 seconds
-    while ((elapsed < timeout)); do
-        if ! kill -0 "$sudo_pid" 2> /dev/null; then
-            # Process exited
-            wait "$sudo_pid" 2> /dev/null
-            local exit_code=$?
-            if [[ $exit_code -eq 0 ]] && sudo -n true 2> /dev/null; then
-                # Touch ID succeeded - clear the prompt line
-                safe_clear_lines 1 "$tty_path"
-                return 0
-            fi
-            # Touch ID failed or cancelled
-            break
+    # Wait for sudo to complete or timeout (5 seconds). People often type the
+    # password instead of touching the sensor; keep it off the screen while
+    # it waits for the password prompt that reads it.
+    local poll_rc=0
+    _mole_tty_quiet "$tty_path" _mole_touchid_poll "$sudo_pid" || poll_rc=$?
+    if [[ $poll_rc -eq 0 ]]; then
+        local exit_code=0
+        wait "$sudo_pid" 2> /dev/null || exit_code=$?
+        if [[ $exit_code -eq 0 ]] && sudo -n true 2> /dev/null; then
+            # Touch ID succeeded - clear the prompt line
+            safe_clear_lines 1 "$tty_path"
+            return 0
         fi
-        sleep 0.1
-        elapsed=$((elapsed + 1))
-    done
+    fi
 
     # Touch ID failed/cancelled - clean up thoroughly before password input
 
@@ -193,7 +218,7 @@ request_sudo_access() {
 
     # IMPORTANT: Wait longer for macOS to fully close Touch ID UI and SecurityAgent
     # Without this delay, subsequent sudo calls may re-trigger Touch ID
-    sleep 1
+    _mole_tty_quiet "$tty_path" sleep 1 || true
 
     # Clear any leftover prompts on the screen
     safe_clear_line "$tty_path"
@@ -312,7 +337,14 @@ adopt_sudo_session() {
         MOLE_SUDO_ESTABLISHED="false"
     fi
 
-    if ! sudo -n -v 2> /dev/null; then
+    local adoption_rc=0
+    if [[ -t 0 ]] && declare -F mole_tty_is_foreground > /dev/null && mole_tty_is_foreground; then
+        # Validate command access before cleanup can hide a deferred prompt.
+        has_sudo_session || adoption_rc=$?
+    else
+        sudo -n -v 2> /dev/null || adoption_rc=$?
+    fi
+    if [[ $adoption_rc -ne 0 ]]; then
         MOLE_SUDO_ESTABLISHED="false"
         return 1
     fi

@@ -16,7 +16,7 @@
   <img src="./docs/img/big-mole.png" alt="Mole cleanup results" width="1000" />
 </p>
 
-> 💡 This repo is the free open-source CLI (`mo`). Prefer a native app? [Mole for Mac](https://mole.fit/) is a separate download with review-before-delete cleanup, tested leftovers for 800+ apps, maintenance, disk drill-downs, live status, and fan controls on supported Macs. `brew install mole` installs the CLI only.
+> 💡 This repo is the free open-source CLI (`mo`). Prefer a native app? [Mole for Mac](https://mole.fit/) is a separate download with review-before-delete cleanup, tested leftovers for 800+ apps, maintenance, disk drill-downs, live status, and fan controls on supported Macs. On Windows, the native app is [Mole for Windows](https://mole.fit/windows). `brew install mole` installs the CLI only.
 
 ## Features
 
@@ -49,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/tw93/mole/main/install.sh | bash
 iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
 ```
 
-Mole is only distributed through Homebrew, this GitHub repository, and [mole.fit](https://mole.fit/) for the Mac app. Sites offering a "Mole-based" app or asking you to paste an encoded command into Terminal are not affiliated with Mole.
+Mole is only distributed through Homebrew, this GitHub repository, and [mole.fit](https://mole.fit/) for the Mac and Windows apps. Sites offering a "Mole-based" app or asking you to paste an encoded command into Terminal are not affiliated with Mole.
 
 **Run**
 
@@ -62,6 +62,7 @@ mo analyze                   # Visual disk explorer (or 'mo analyse')
 mo status                    # Live system health dashboard
 mo purge                     # Clean project build artifacts
 mo installer                 # Find and remove installer files
+mo slim                      # Remove Intel code from universal apps
 
 mo touchid                   # Configure Touch ID for sudo
 mo completion                # Set up shell tab completion
@@ -80,6 +81,7 @@ mo uninstall --dry-run
 mo optimize --dry-run
 mo purge --dry-run
 mo installer --dry-run
+mo slim --dry-run
 mo history
 mo history --json
 
@@ -131,11 +133,12 @@ For a declarative installation, add `github:tw93/mole/main` as a flake input and
 
 Mole can remove files, so it validates paths, protects shared and system-owned locations, and asks for confirmation when an action needs it. When Mole cannot prove an item is safe to change, it skips or refuses it.
 
-- `clean`, `uninstall`, `purge`, `installer`, and `remove` can delete files, so review them with `--dry-run` first and add `--debug` when needed
+- `clean`, `uninstall`, `purge`, `installer`, `slim`, and `remove` can delete files, so review them with `--dry-run` first and add `--debug` when needed
 - Run Mole without `sudo`; it requests administrator access only when needed
-- `mo analyze` moves selected items to Trash after confirmation
+- `mo uninstall`, `mo analyze`, and `mo slim` route deletions to Trash by default after confirmation; `clean`, `purge`, and `installer` delete permanently. `mo uninstall --permanent` skips Trash
 - Cleanup activity is recorded in `~/Library/Logs/mole/operations.log`; review it with `mo history` or disable it with `MO_NO_OPLOG=1`
 - Protect caches with `mo clean --whitelist`, or maintenance items with `mo optimize --whitelist`
+- If the whitelist file cannot be read, `clean`, `purge`, and `optimize` stop instead of running without it
 
 Review [SECURITY.md](SECURITY.md) and [SECURITY_AUDIT.md](SECURITY_AUDIT.md) for reporting guidance, safety boundaries, and current limitations.
 
@@ -145,7 +148,7 @@ The examples below are shortened. Available items, sizes, and skip reasons depen
 
 ### Clean
 
-`mo clean` reviews known-safe caches, logs, temporary files, developer artifacts, and leftovers from apps that are no longer installed. It empties the Trash by default; to keep it, select Trash in `mo clean --whitelist`, the same menu that protects caches you want to keep. Selections persist in `~/.config/mole/whitelist`. Before adding custom paths, open the menu and press Enter to save the selections, then append one path per line. An existing file replaces the optional defaults; built-in safety protections still apply.
+`mo clean` reviews known-safe caches, logs, temporary files, developer artifacts, and leftovers from apps that are no longer installed. It empties `~/.Trash` by default; to keep it, select Trash in `mo clean --whitelist`, the same menu that protects caches you want to keep. Volume Trashes such as `/Volumes/*/.Trashes` are not emptied with it. Selections persist in `~/.config/mole/whitelist`. Before adding custom paths, open the menu and press Enter to save the selections, then append one path per line. An existing file replaces the optional defaults; built-in safety protections still apply.
 
 ```text
 $ mo clean
@@ -181,7 +184,7 @@ Free space: 223.5GB (+4.5GB)
 
 `mo uninstall` removes an installed app together with related files that Mole can tie back to that app. It keeps shared data when another installed copy still uses it. If the app is already gone, use `mo clean` to look for leftovers.
 
-Personal data, including settings and plugins, is kept by default. Press `D` in the removal preview to select individual data paths. After removal, references in shell, Hook, or MCP configuration are listed by file and line only; Mole does not edit those configurations.
+Personal data, including settings and plugins, is kept by default. Press `D` in the removal preview to select individual data paths. `mo uninstall --with-data` starts with that data selected, except browser profiles and App Group containers; the preview lists it separately and `D` still lets you keep any path. After removal, references in shell, Hook, or MCP configuration are listed by file and line only; Mole does not edit those configurations.
 
 ```text
 $ mo uninstall
@@ -223,30 +226,29 @@ Optimize
 PERFORMANCE DIAGNOSIS
   ✓ No sustained high-CPU bottleneck detected
 
-➤ DNS & Spotlight Check
-  → DNS cache flushed
-  → Spotlight index verified
-
 ➤ Finder Cache Refresh
   → QuickLook thumbnails refreshed
   → Icon services cache rebuilt
+
+➤ Network Cache Refresh
+  → DNS cache refreshed
 
 ➤ Database Optimization
   ◎ Close these apps before database optimization: Safari
 
 ➤ Disk Health
-  → Disk verify skipped (set MOLE_ENABLE_DISK_VERIFY=1 to enable)
+  → Disk verify skipped
 
 ======================================================================
 Optimization Complete
-Applied 3 optimizations
-14 unchanged | 3 skipped | 1 unavailable
+Applied 2 optimizations
+13 unchanged | 3 skipped | 1 unavailable
 ======================================================================
 ```
 
 ### Analyze
 
-`mo analyze` opens a terminal disk explorer. It supports arrow keys and Vim navigation, filtering, multi-selection, Finder preview, and confirmed moves to Trash. External drives are skipped from the default overview; inspect them with `mo analyze /Volumes` or a specific mount path. Use `mo analyze /private/tmp` to review user-owned temporary files without turning them into automatic cleanup targets.
+`mo analyze` opens a terminal disk explorer. It supports arrow keys and Vim navigation, filtering, multi-selection, Finder preview, and confirmed moves to Trash. External drives are skipped from the default overview; inspect them with `mo analyze /Volumes` or a specific mount path. Use `mo analyze /private/tmp` to review user-owned temporary files without turning them into automatic cleanup targets. File-by-file scans count APFS clones that share all blocks once; fast folder estimates can still count shared blocks more than once.
 
 A size ending in `+` contains measured bytes from a partial scan; `unknown` means the size could not be measured. Results cut short by temporary failures such as timeouts do not replace complete cached measurements, and a later refresh can recover the missing data. Folders macOS will not let the terminal read stay partial until access changes. The terminal list keeps the 30 largest entries, so an unreadable entry may fall outside that list; the total still indicates a partial scan. Directory JSON output includes all scanned entries.
 
@@ -425,6 +427,10 @@ Removed 5 installers, freed 3.83GB
 ```
 
 </details>
+
+### Slim
+
+`mo slim` removes the Intel code that universal apps carry on Apple Silicon Macs. It lists the apps you own that are signed with a Developer ID, with the size of each app's Intel code, and changes only the apps you select. Each app is slimmed on a copy, touching only main executables and nested code that carries its own signature; the copy replaces the app only after it keeps its Apple Silicon code and passes code signing and Gatekeeper checks, and the original moves to the Trash. App Store apps, Apple apps, apps set to open using Rosetta, apps owned by another user, and running apps are left alone. It needs no developer tools, and an app update brings the Intel code back.
 
 ## Quick Launchers
 

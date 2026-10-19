@@ -175,6 +175,31 @@ EOF
     [ "$(printf '%s\n' "$result" | awk -v path="$container" '$0 == path { count++ } END { print count + 0 }')" -eq 1 ]
 }
 
+@test "embedded bundle discovery folds extension case without forking tr" {
+    local app="$HOME/Applications/Folding.app"
+    local id
+    for id in Widget.APPEX Service.Xpc Ignored.Bundle; do
+        mkdir -p "$app/Contents/PlugIns/$id/Contents"
+        printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.folding.%s</string></dict></plist>\n' \
+            "${id%%.*}" > "$app/Contents/PlugIns/$id/Contents/Info.plist"
+    done
+
+    run env HOME="$HOME" APP="$app" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+tr() { printf 'tr\n' >> "$HOME/embedded-tr.trace"; command tr "$@"; }
+rm -f "$HOME/embedded-tr.trace"
+_mole_uninstall_embedded_bundle_ids "$APP" "com.example.folding" | LC_ALL=C sort
+[[ ! -e "$HOME/embedded-tr.trace" ]] || echo "tr forked"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"com.example.folding.Widget"* ]] || return 1
+    [[ "$output" == *"com.example.folding.Service"* ]] || return 1
+    [[ "$output" != *"com.example.folding.Ignored"* ]] || return 1
+    [[ "$output" != *"tr forked"* ]]
+}
+
 @test "find_app_files detects vendor-nested Application Support directories" {
     mkdir -p "$HOME/Library/Application Support/Avid/Sibelius"
     mkdir -p "$HOME/Library/Application Support/OtherVendor/Sibelius"
@@ -249,6 +274,24 @@ find_app_files 'invalid_bundle' ''"
 
     [[ "$result" != *"Library/Application Support/Anki2"* ]] || return 1
     [[ "$result" == *"Library/Application Support/AnkiProgramFiles"* ]]
+}
+
+@test "find_app_files detects Claude Desktop third-party provider folders" {
+    mkdir -p "$HOME/Library/Application Support/Claude-3p/claude-code"
+    mkdir -p "$HOME/Library/Logs/Claude-3p"
+    mkdir -p "$HOME/.local/share/claude"
+
+    result=$(find_app_files "com.anthropic.claudefordesktop" "Claude")
+
+    [[ "$result" == *"Library/Application Support/Claude-3p"* ]] || return 1
+    [[ "$result" == *"Library/Logs/Claude-3p"* ]] || return 1
+    [[ "$result" != *".local/share/claude"* ]] || return 1
+
+    other=$(find_app_files "com.example.other" "Other")
+    [[ "$other" != *"Claude-3p"* ]] || return 1
+
+    sibling=$(MOLE_UNINSTALL_SIBLING_SURVIVES=1 find_app_files "com.anthropic.claudefordesktop" "Claude")
+    [[ "$sibling" != *"Claude-3p"* ]]
 }
 
 # Independent CLI dotdir protection, issue #993.
@@ -474,4 +517,32 @@ EOF
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"PGREP:-x MoleProbe"* ]] || return 1
     [[ "$output" != *"PGREP:-x Mole Probe"* ]]
+}
+
+@test "find_app_files finds the crash reporter and Darwin cache folders named by the exact bundle id (#1736)" {
+    local id="com.example.starry.proplus.8.osx"
+    local reporter="$HOME/Library/Caches/com.plausiblelabs.crashreporter.data"
+    mkdir -p "$reporter/$id" "$reporter/com.example.other" "$HOME/darwin-cache/C/$id" "$HOME/darwin-cache/C/com.example.other"
+    echo x > "$reporter/$id/report"
+    echo x > "$HOME/darwin-cache/C/$id/data"
+    mole_darwin_user_cache_root() { printf '%s\n' "$HOME/darwin-cache/C"; }
+
+    result=$(find_app_files "$id" "Starry Night")
+
+    [[ "$result" == *"$reporter/$id"* ]] || return 1
+    [[ "$result" == *"$HOME/darwin-cache/C/$id"* ]] || return 1
+    # Exact id only: a neighbor of the same vendor and the shared roots stay.
+    [[ "$result" != *"com.example.other"* ]] || return 1
+    [[ "$result" != *"$reporter"$'\n'* ]] || return 1
+    [[ "$result" != *"darwin-cache/C"$'\n'* ]] || return 1
+}
+
+@test "find_app_files skips the Darwin cache folder when its root cannot be resolved (#1736)" {
+    local id="com.example.starry.proplus.8.osx"
+    mkdir -p "$HOME/darwin-cache/C/$id"
+    mole_darwin_user_cache_root() { return 1; }
+
+    result=$(find_app_files "$id" "Starry Night")
+
+    [[ "$result" != *"darwin-cache"* ]] || return 1
 }

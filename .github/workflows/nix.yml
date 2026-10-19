@@ -3,7 +3,14 @@ name: Nix
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,6 +36,8 @@ jobs:
       - name: Flake check
         shell: bash
         run: |
+          # shellcheck disable=SC2016 # Nix expands ${system}; the shell must leave it literal.
+          test "$(nix eval --no-write-lock-file --json .#checks --apply 'checks: builtins.all (system: checks.${system} ? formatting) [ "aarch64-darwin" "x86_64-darwin" ]')" = true
           check_log="$RUNNER_TEMP/nix-flake-check.log"
           status=0
           nix flake check --no-write-lock-file --print-build-logs 2>&1 | tee "$check_log" || status=$?

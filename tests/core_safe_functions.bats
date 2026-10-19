@@ -324,6 +324,27 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "validate_path_for_deletion rejects the live database of every power telemetry store" {
+    local root="/private/var/db/powerlog/Library/PerfPowerTelemetry"
+    local xcode_db="$root/XcodeOrganizer/CurrentXcodeOrganizerDB.XCSQL"
+    local path=""
+
+    # A user's operations.log showed the Xcode Organizer store removed as a
+    # 7-day-old file; mtime never proves PerfPowerServices closed it.
+    for path in "$xcode_db" "$xcode_db-wal" "$xcode_db-shm" \
+        "$root/ExtendedPersistence/CurrentExtendedPersistenceDB.EPSQL" \
+        "/private/var/db/powerlog/library/perfpowertelemetry/XcodeOrganizer/CurrentXcodeOrganizerDB.XCSQL"; do
+        run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '$path'"
+        [ "$status" -eq 1 ] || {
+            echo "accepted: $path"
+            return 1
+        }
+    done
+
+    run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; validate_path_for_deletion '$root/XcodeOrganizer/ArchivedXcodeOrganizerDB.XCSQL'"
+    [ "$status" -eq 0 ]
+}
+
 @test "validate_path_for_deletion refuses a live SQLite database family (#1390)" {
     local db="$TEST_DIR/live-sqlite/Cache.db"
     mkdir -p "$(dirname "$db")"
@@ -1396,6 +1417,14 @@ should_protect_path "$wechat/Documents/xwechat_files/account/db_storage/message.
 should_protect_path "$wechat/Documents/app_data/radium/users/account/state.db"
 should_protect_path "$wechat/Documents/app_data/log"
 should_protect_path "$wechat/.wxapplet/WMPF"
+web="$wechat/Documents/app_data/radium/web/profiles/multitab_a1"
+! should_protect_path "$web/Cache/data_0" || exit 1
+! should_protect_path "$web/Service Worker/CacheStorage/index" || exit 1
+should_protect_path "$web/Cache" || exit 1
+should_protect_path "$web/IndexedDB/site.db" || exit 1
+should_protect_path "$web/WebStorage/store" || exit 1
+should_protect_path "$web/Service Worker/ScriptCache/a" || exit 1
+should_protect_path "$wechat/Documents/app_data/radium/web/profiles/Cache/x" || exit 1
 EOF
 
     [ "$status" -eq 0 ]
@@ -2353,7 +2382,7 @@ SCRIPT
     local target_file="$target_dir/old.log"
     mkdir -p "$target_dir"
     touch "$target_file"
-    touch -t "$(date -v-8d '+%Y%m%d%H%M.%S')" "$target_file"
+    touch -t "$(/bin/date -v-8d '+%Y%m%d%H%M.%S')" "$target_file"
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TARGET_DIR="$target_dir" TARGET_FILE="$target_file" \
         MOLE_TEST_MODE=0 MOLE_TEST_NO_AUTH=0 /bin/bash --noprofile --norc <<'SCRIPT'
@@ -2608,6 +2637,7 @@ active_db="/private/var/db/powerlog/Library/PerfPowerTelemetry/BackgroundProcess
 active_dot_alias="${active_db%/*}/./${active_db##*/}"
 active_case_alias="${active_db%/*}/currentbackgroundprocessingdb.bgsql"
 archived_db="/private/var/db/powerlog/Library/PerfPowerTelemetry/BackgroundProcessing/ArchivedBackgroundProcessingDB.BGSQL"
+xcode_db="/private/var/db/powerlog/Library/PerfPowerTelemetry/XcodeOrganizer/CurrentXcodeOrganizerDB.XCSQL"
 
 should_protect_path() { return 1; }
 is_path_whitelisted() { return 1; }
@@ -2626,7 +2656,7 @@ sudo() {
             [[ "${2:-}" == "-d" ]]
             ;;
         find)
-            printf '%s\0' "$active_db" "$active_db-wal" "$active_db-shm" "$active_dot_alias" "$active_case_alias" "$archived_db"
+            printf '%s\0' "$active_db" "$active_db-wal" "$active_db-shm" "$active_dot_alias" "$active_case_alias" "$archived_db" "$xcode_db"
             ;;
         */stat)
             printf '1:2:3\n'
@@ -2656,7 +2686,8 @@ SCRIPT
     [[ "$output" == *"REMOVED /private/var/db/powerlog/Library/PerfPowerTelemetry/BackgroundProcessing/ArchivedBackgroundProcessingDB.BGSQL (batch)"* ]] || return 1
     [[ "$output" != *"CurrentBackgroundProcessingDB.BGSQL"* ]] || return 1
     [[ "$output" != *"currentbackgroundprocessingdb.bgsql"* ]] || return 1
-    [[ "$output" != *"/./CurrentBackgroundProcessingDB.BGSQL"* ]]
+    [[ "$output" != *"/./CurrentBackgroundProcessingDB.BGSQL"* ]] || return 1
+    [[ "$output" != *"CurrentXcodeOrganizerDB.XCSQL"* ]]
 }
 
 @test "safe_sudo_find_delete batches file removals into one xargs rm" {
@@ -3121,7 +3152,7 @@ SCRIPT
     touch "$old_file"
     touch "$new_file"
 
-    touch -t "$(date -v-8d '+%Y%m%d%H%M.%S' 2>/dev/null || date -d '8 days ago' '+%Y%m%d%H%M.%S')" "$old_file" 2>/dev/null || true
+    touch -t "$(/bin/date -v-8d '+%Y%m%d%H%M.%S' 2>/dev/null || date -d '8 days ago' '+%Y%m%d%H%M.%S')" "$old_file" 2>/dev/null || true
 
     run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; safe_find_delete '$TEST_DIR' '*.tmp' 7 'f'"
     [ "$status" -eq 0 ]
@@ -3174,7 +3205,7 @@ SCRIPT
 @test "safe_find_delete works when app protection is not loaded" {
     local old_file="$TEST_DIR/file-ops-only.tmp"
     touch "$old_file"
-    touch -t "$(date -v-8d '+%Y%m%d%H%M.%S' 2>/dev/null || date -d '8 days ago' '+%Y%m%d%H%M.%S')" "$old_file" 2>/dev/null || true
+    touch -t "$(/bin/date -v-8d '+%Y%m%d%H%M.%S' 2>/dev/null || date -d '8 days ago' '+%Y%m%d%H%M.%S')" "$old_file" 2>/dev/null || true
 
     run /bin/bash --noprofile --norc <<EOF
 set -euo pipefail
@@ -3665,4 +3696,26 @@ done
 EOF
     [ "$status" -eq 0 ] || return 1
     [[ -e "$cache_dir/payload" ]] || return 1
+}
+
+@test "_mole_regex_escape matches names literally without undefined ERE escapes" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+name='com.foo-bar App (x)+[y]{1}^$|?*\z'
+escaped=$(_mole_regex_escape "$name")
+# A backslash may only precede an ERE metacharacter; `\-` or `\ ` is undefined
+# and GNU grep warns "stray \" on every match.
+stray=$(printf '%s' "$escaped" | LC_ALL=C sed 's/\\[][(){}.^$*+?|\\]//g' | LC_ALL=C grep -c '\\' || true)
+[[ "$stray" == 0 ]] || { echo "undefined escape left: $escaped"; exit 1; }
+for grep_bin in /usr/bin/grep /opt/homebrew/opt/grep/libexec/gnubin/grep; do
+    [[ -x "$grep_bin" ]] || continue
+    err=$(printf '%s\n' "$name" | LC_ALL=C "$grep_bin" -E -- "^${escaped}\$" 2>&1 > /dev/null) || { echo "$grep_bin missed the literal"; exit 1; }
+    [[ -z "$err" ]] || { echo "$grep_bin warned: $err"; exit 1; }
+    ! printf '%s\n' 'comXfoo-bar App (x)+[y]{1}^$|?*\z' | LC_ALL=C "$grep_bin" -qE -- "^${escaped}\$" 2> /dev/null ||
+        { echo "$grep_bin treated . as a wildcard"; exit 1; }
+done
+EOF
+
+    [[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
 }

@@ -150,9 +150,6 @@ paginated_multi_select() {
     hide_cursor
 
     # Helper functions
-    # shellcheck disable=SC2329
-    print_line() { printf "\r\033[2K%s\n" "$1" >&2; }
-
     render_item() {
         local idx=$1 is_current=$2
         local checkbox="$ICON_EMPTY"

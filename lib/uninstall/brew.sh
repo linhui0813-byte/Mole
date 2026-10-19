@@ -97,6 +97,151 @@ _mole_brew_detection_list() {
     _mole_brew_probe "$MOLE_TIMEOUT_PKG_LIST_SEC" list --cask
 }
 
+# `mo uninstall --list` asks `brew info --cask` about one chunk of candidate
+# tokens at a time instead of once per Homebrew app (0.1-1.4s each). Each
+# token's block is stored in its own file, so an ownership check for one cask
+# never reads another cask's output. A chunk whose output does not split into
+# exactly its tokens' blocks in request order, or that fails, leaves those
+# tokens to the per-token probe; a timed-out chunk marks its tokens unknown,
+# as a timed-out per-token probe would; a signal cancels the listing.
+# Candidates are the tokens the Caskroom-search and brew-list stages could
+# ask about, never a vendor or name guess beyond those stages.
+readonly MOLE_BREW_INFO_CHUNK_SIZE=16
+
+_mole_brew_info_token_is_storable() {
+    [[ "$1" =~ ^[a-z0-9][a-z0-9@._+-]*$ ]]
+}
+
+_mole_brew_prefetch_cask_info() {
+    _MOLE_BREW_BATCH_INFO_READY=0
+    [[ "${_MOLE_BREW_BATCH_LIST_READY:-0}" == 1 && "${_MOLE_BREW_BATCH_LIST_RC:-1}" -eq 0 ]] || return 0
+    [[ -n "${_MOLE_BREW_BATCH_INFO_DIR:-}" && -d "$_MOLE_BREW_BATCH_INFO_DIR" ]] || return 0
+    mkdir -p "$_MOLE_BREW_BATCH_INFO_DIR/ok" "$_MOLE_BREW_BATCH_INFO_DIR/timeout" || return 0
+
+    local -a list_tokens=() list_lower=() bundle_names=() base_names=() lower_names=()
+    local -a room_names=() room_tokens=() candidates=()
+    local line token match app_path bundle i j
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && list_tokens+=("$line")
+    done <<< "$_MOLE_BREW_BATCH_LIST"
+    [[ ${#list_tokens[@]} -gt 0 && $# -gt 0 ]] || return 0
+
+    for app_path in "$@"; do
+        bundle="${app_path##*/}"
+        bundle_names+=("$bundle")
+        base_names+=("${bundle%.[aA][pP][pP]}")
+    done
+    # One tr pass, with the same C-locale mapping the brew-list stage uses.
+    while IFS= read -r line; do
+        lower_names+=("$line")
+    done < <(printf '%s\n' "${base_names[@]}" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+    while IFS= read -r line; do
+        list_lower+=("$line")
+    done < <(printf '%s\n' "${list_tokens[@]}" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+    [[ ${#lower_names[@]} -eq ${#bundle_names[@]} && ${#list_lower[@]} -eq ${#list_tokens[@]} ]] || return 0
+
+    if [[ "${_MOLE_BREW_BATCH_ROOM_READY:-0}" == 1 && "${_MOLE_BREW_BATCH_ROOM_RC:-1}" -eq 0 &&
+        -f "${_MOLE_BREW_BATCH_ROOM_FILE:-}" ]]; then
+        while IFS= read -r -d '' match; do
+            token=$(_extract_cask_token_from_path "$match" 2> /dev/null) || continue
+            room_names+=("${match##*/}")
+            room_tokens+=("$token")
+        done < "$_MOLE_BREW_BATCH_ROOM_FILE"
+    fi
+
+    _mole_brew_add_info_candidate() {
+        local candidate="$1" existing listed=false
+        _mole_brew_info_token_is_storable "$candidate" || return 0
+        for existing in "${list_tokens[@]}"; do
+            [[ "$existing" == "$candidate" ]] && listed=true && break
+        done
+        [[ "$listed" == true ]] || return 0
+        for existing in "${candidates[@]+"${candidates[@]}"}"; do
+            [[ "$existing" == "$candidate" ]] && return 0
+        done
+        candidates+=("$candidate")
+    }
+
+    i=0
+    while [[ $i -lt ${#bundle_names[@]} ]]; do
+        bundle="${bundle_names[$i]}"
+        j=0
+        while [[ $j -lt ${#room_names[@]} ]]; do
+            [[ "${room_names[$j]}" == "$bundle" ]] && _mole_brew_add_info_candidate "${room_tokens[$j]}"
+            j=$((j + 1))
+        done
+        j=0
+        while [[ $j -lt ${#list_lower[@]} ]]; do
+            [[ "${list_lower[$j]}" == "${lower_names[$i]}" ]] && _mole_brew_add_info_candidate "${list_tokens[$j]}"
+            j=$((j + 1))
+        done
+        i=$((i + 1))
+    done
+    unset -f _mole_brew_add_info_candidate
+
+    _MOLE_BREW_BATCH_INFO_READY=1
+    local start=0 total=${#candidates[@]}
+    while [[ $start -lt $total ]]; do
+        local -a chunk=("${candidates[@]:$start:$MOLE_BREW_INFO_CHUNK_SIZE}")
+        start=$((start + MOLE_BREW_INFO_CHUNK_SIZE))
+        local duration="" info_rc=0 info_output=""
+        duration=$(_mole_timeout_with_deadline "$MOLE_TIMEOUT_PKG_LIST_SEC" "${_MOLE_UNINSTALL_DISCOVERY_DEADLINE:-}") || info_rc=$?
+        if [[ $info_rc -eq 0 ]]; then
+            info_output=$(_mole_brew_probe "$duration" info --cask "${chunk[@]}" 2> /dev/null) || info_rc=$?
+        fi
+        [[ $info_rc -lt 128 ]] || return "$info_rc"
+        if mole_rc_timeout "$info_rc"; then
+            for token in "${chunk[@]}"; do
+                : > "$_MOLE_BREW_BATCH_INFO_DIR/timeout/$token" || return 1
+            done
+            continue
+        fi
+        [[ $info_rc -eq 0 ]] || continue
+
+        # Split on each requested token's own header, in request order.
+        local -a slices=()
+        local k=-1 n=${#chunk[@]} split_ok=true next
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ $((k + 1)) -lt $n ]]; then
+                next="${chunk[$((k + 1))]}"
+                if [[ "$line" == "==> $next: "* || "$line" == "==> $next ("* ]]; then
+                    k=$((k + 1))
+                    slices[k]=""
+                fi
+            fi
+            if [[ $k -lt 0 ]]; then
+                split_ok=false
+                break
+            fi
+            slices[k]+="$line"$'\n'
+        done <<< "$info_output"
+        [[ "$split_ok" == true && $((k + 1)) -eq $n ]] || continue
+        k=0
+        while [[ $k -lt $n ]]; do
+            printf '%s' "${slices[$k]}" > "$_MOLE_BREW_BATCH_INFO_DIR/ok/${chunk[$k]}" || return 1
+            k=$((k + 1))
+        done
+    done
+    return 0
+}
+
+# `brew info --cask <token>` for the ownership checks: a prefetched slice
+# when list mode stored one, otherwise a fresh bounded probe.
+_mole_brew_cask_info() {
+    local token="$1"
+    if [[ "${_MOLE_BREW_BATCH_INFO_READY:-0}" == 1 ]] && _mole_brew_info_token_is_storable "$token"; then
+        if [[ -e "$_MOLE_BREW_BATCH_INFO_DIR/timeout/$token" ]]; then
+            return 124
+        fi
+        if [[ -f "$_MOLE_BREW_BATCH_INFO_DIR/ok/$token" ]]; then
+            cat -- "$_MOLE_BREW_BATCH_INFO_DIR/ok/$token"
+            return
+        fi
+    fi
+    _mole_brew_probe "$MOLE_TIMEOUT_PKG_LIST_SEC" info --cask "$token"
+}
+
 # Check whether a cask is still recorded as installed in Homebrew.
 # Exit codes:
 #   0 - cask is installed
@@ -232,8 +377,7 @@ _detect_cask_via_caskroom_search() {
 
         local info_output=""
         local info_rc=0
-        info_output=$(_mole_brew_probe "$MOLE_TIMEOUT_PKG_LIST_SEC" \
-            info --cask "${uniq[0]}" 2> /dev/null) || info_rc=$?
+        info_output=$(_mole_brew_cask_info "${uniq[0]}" 2> /dev/null) || info_rc=$?
         mole_rc_timeout_or_signal "$info_rc" && return "$info_rc"
         if [[ $info_rc -ne 0 ]]; then
             # Third-party short-token lookup can fail even with an installed
@@ -294,8 +438,7 @@ _detect_cask_via_brew_list() {
     # Verify this cask actually owns this app path or app bundle.
     local info_output=""
     local info_rc=0
-    info_output=$(_mole_brew_probe "$MOLE_TIMEOUT_PKG_LIST_SEC" \
-        info --cask "$cask_name" 2> /dev/null) || info_rc=$?
+    info_output=$(_mole_brew_cask_info "$cask_name" 2> /dev/null) || info_rc=$?
     mole_rc_timeout_or_signal "$info_rc" && return "$info_rc"
     [[ $info_rc -eq 0 ]] || return 2
     if grep -qF "$app_path" <<< "$info_output"; then
@@ -443,6 +586,9 @@ brew_uninstall_cask() {
     # Success: uninstall worked and both are gone, or already uninstalled
     if $cask_gone && $app_gone; then
         debug_log "Successfully uninstalled cask '$cask_name'"
+        # Homebrew removed the bundle, so no Mole sink logged it.
+        log_operation "${MOLE_CURRENT_COMMAND:-uninstall}" "REMOVED" \
+            "${app_path:-$cask_name}" "brew uninstall $cask_name"
         return 0
     fi
 

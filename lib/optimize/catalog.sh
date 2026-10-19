@@ -28,9 +28,6 @@ _optimize_catalog_register() {
     MOLE_OPTIMIZE_SAFE_VALUES[index]="$6"
 }
 
-_optimize_catalog_register system_maintenance opt_system_maintenance \
-    "DNS & Spotlight Check" "DNS & Spotlight Check" \
-    "Refresh DNS cache & verify Spotlight status" true
 _optimize_catalog_register cache_refresh opt_cache_refresh \
     "Finder Cache Refresh" "Finder Cache Refresh" \
     "Refresh QuickLook thumbnails & icon services cache" true

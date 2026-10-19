@@ -799,6 +799,59 @@ EOF
     [[ "$output" != *"users/global/"* ]] || return 1
 }
 
+@test "clean_communication_apps reaches the Feishu iron engine and the sandboxed build" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+shell="$HOME/Library/Application Support/LarkShell"
+sandbox="$HOME/Library/Containers/com.bytedance.macos.feishu/Data/Library"
+mkdir -p "$shell/iron/users/b6eb487b/profile_main/Service Worker/CacheStorage"
+mkdir -p "$shell/iron/users/b6eb487b/profile_main/IndexedDB"
+mkdir -p "$shell/iron/users/b6eb487b/profile_explorer/Service Worker/CacheStorage"
+mkdir -p "$sandbox/Application Support/LarkShell/aha/users/b6eb487b/profile_explorer/Service Worker/CacheStorage"
+mkdir -p "$sandbox/Application Support/LarkShell/iron/users/b6eb487b/profile_main/Service Worker/CacheStorage"
+mkdir -p "$HOME/Library/Caches/LarkShell/iron" "$sandbox/Caches/LarkShell"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { :; }
+safe_clean_guarded() { echo "SCG|$1|$2"; }
+mole_cleanup_targets_exist() { return 0; }
+feishu_or_lark_running() { return 1; }
+clean_service_worker_cache() { echo "SW|$1|$2"; }
+clean_communication_apps
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SW|Feishu|$HOME/Library/Application Support/LarkShell/iron/users/b6eb487b/profile_main/Service Worker/CacheStorage"* ]] || return 1
+    [[ "$output" == *"SW|Feishu|$HOME/Library/Containers/com.bytedance.macos.feishu/Data/Library/Application Support/LarkShell/aha/users/b6eb487b/profile_explorer/Service Worker/CacheStorage"* ]] || return 1
+    [[ "$output" == *"SW|Feishu|$HOME/Library/Containers/com.bytedance.macos.feishu/Data/Library/Application Support/LarkShell/iron/users/b6eb487b/profile_main/Service Worker/CacheStorage"* ]] || return 1
+    [[ "$output" != *"iron/users/b6eb487b/profile_explorer"* ]] || return 1
+    [[ "$output" != *"IndexedDB"* ]] || return 1
+    [[ "$output" == *"SCG|_feishu_disk_cache_delete_guard_allows|$HOME/Library/Caches/LarkShell/iron"* ]] || return 1
+    [[ "$output" == *"SCG|_feishu_disk_cache_delete_guard_allows|$HOME/Library/Containers/com.bytedance.macos.feishu/Data/Library/Caches/LarkShell"* ]]
+}
+
+@test "clean_communication_apps leaves Feishu disk caches while Feishu runs" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME/Library/Caches/LarkShell/iron"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { :; }
+safe_clean_guarded() { echo "SCG|$2"; }
+mole_cleanup_targets_exist() { return 0; }
+mole_defer_cleanup_family() { echo "DEFER|$1"; }
+feishu_or_lark_running() { return 0; }
+clean_service_worker_cache() { echo "SW|$2"; }
+clean_communication_apps
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"SCG|$HOME/Library/Caches/LarkShell"* ]] || return 1
+    [[ "$output" == *"DEFER|Feishu/Lark"* ]]
+}
+
 @test "clean_notion_service_worker_caches targets CacheStorage in every Electron partition" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -884,6 +937,101 @@ EOF
     [ "$status" -eq 0 ] || return 1
     [[ "$output" != *"outside"* ]] || return 1
     [[ "$output" != *"SW|"* ]]
+}
+
+@test "clean_futu_update_downloads cleans the update folder only while Futu is closed" {
+    local base="$HOME/iso-futu"
+    local state
+    for state in idle running unknown sink-flip symlink; do
+        run env HOME="$base-$state" PROJECT_ROOT="$PROJECT_ROOT" STATE="$state" \
+            /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+container="$HOME/Library/Containers/cn.futu.niuniu.nx/Data/Library/Application Support"
+if [[ "$STATE" == "symlink" ]]; then
+    mkdir -p "$container/LiveUpdate" "$HOME/outside"
+    echo dmg > "$HOME/outside/private.dmg"
+    ln -s "$HOME/outside" "$container/LiveUpdate/mac_qtnn"
+else
+    mkdir -p "$container/LiveUpdate/mac_qtnn"
+    echo dmg > "$container/LiveUpdate/mac_qtnn/FTNN_15.40.dmg"
+fi
+mkdir -p "$container/Futu"
+echo keep > "$container/Futu/account.db"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+futu_running() {
+    case "$STATE" in
+        running) return 0 ;;
+        unknown) return 2 ;;
+        *) return 1 ;;
+    esac
+}
+note_activity() { :; }
+mole_defer_cleanup_family() { echo "DEFER:$1"; }
+safe_clean() { echo "UNGUARDED:$*"; }
+safe_clean_guarded() {
+    local guard="$1"
+    shift
+    [[ "$STATE" == "sink-flip" ]] && return 75
+    "$guard" || return 75
+    echo "CLEAN:$guard:$*"
+}
+clean_futu_update_downloads
+EOF
+        [ "$status" -eq 0 ] || return 1
+        [[ "$output" != *"UNGUARDED"* ]] || return 1
+        [[ "$output" != *"account.db"* ]] || return 1
+        case "$state" in
+            idle)
+                [[ "$output" == *"CLEAN:_futu_update_delete_guard_allows:$base-idle/Library/Containers/cn.futu.niuniu.nx/Data/Library/Application Support/LiveUpdate/mac_qtnn/FTNN_15.40.dmg Futu update downloads"* ]] || return 1
+                ;;
+            running | sink-flip)
+                [[ "$output" == *"DEFER:Futu"* ]] || return 1
+                [[ "$output" != *"CLEAN:"* ]] || return 1
+                ;;
+            unknown)
+                [[ "$output" == *"Futu update downloads · stopped (process state unknown)"* ]] || return 1
+                [[ "$output" != *"CLEAN:"* ]] || return 1
+                ;;
+            symlink)
+                [[ "$output" != *"CLEAN:"* ]] || return 1
+                [[ "$output" != *"DEFER:"* ]] || return 1
+                ;;
+        esac
+    done
+}
+
+@test "futu_running sees the app and its helpers but not look-alike names" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+pgrep() {
+    local selector="$1" pattern="$2" line
+    for line in "${PROC_LINES[@]}"; do
+        if [[ "$selector" == "-x" ]]; then
+            [[ "${line##*/}" == "$pattern" ]] && return 0
+        elif printf '%s\n' "$line" | grep -Eq -- "$pattern"; then
+            return 0
+        fi
+    done
+    return 1
+}
+probe() {
+    PROC_LINES=("$@")
+    local rc=0
+    futu_running || rc=$?
+    echo "$rc"
+}
+echo "main=$(probe '/Applications/富途牛牛.app/Contents/MacOS/FTNN')"
+echo "helper=$(probe '/Applications/富途牛牛.app/Contents/Frameworks/FTNN Helper (GPU).app/Contents/MacOS/FTNN Helper (GPU) --type=gpu-process')"
+echo "other=$(probe '/Applications/Other.app/Contents/MacOS/FTNNX' '/usr/bin/vim notes-about-FTNN.txt')"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"main=0"* ]] || return 1
+    [[ "$output" == *"helper=0"* ]] || return 1
+    [[ "$output" == *"other=1"* ]]
 }
 
 @test "clean_notion_service_worker_caches refuses a symlinked cache child" {
@@ -1532,7 +1680,7 @@ EOF
     mkdir -p "$neatdm_dir/12345"
     touch "$neatdm_dir/12345/seg.x0"
     # Set mtime to 31 days ago
-    touch -t "$(date -v-31d '+%Y%m%d%H%M.%S')" "$neatdm_dir/12345/seg.x0"
+    touch -t "$(/bin/date -v-31d '+%Y%m%d%H%M.%S')" "$neatdm_dir/12345/seg.x0"
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -1580,7 +1728,7 @@ EOF
     rm -rf "$neatdm_dir"
     mkdir -p "$neatdm_dir/history-backup"
     touch "$neatdm_dir/history-backup/seg.x0"
-    touch -t "$(date -v-31d '+%Y%m%d%H%M.%S')" "$neatdm_dir/history-backup/seg.x0"
+    touch -t "$(/bin/date -v-31d '+%Y%m%d%H%M.%S')" "$neatdm_dir/history-backup/seg.x0"
 
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -2524,6 +2672,40 @@ EOF
     [[ "$output" != *"Local Storage"* ]] || return 1
     [[ "$output" != *"Service Worker/Database"* ]] || return 1
     [[ "$output" != *"Service Worker/ScriptCache"* ]] || return 1
+}
+
+@test "clean_wechat_container_caches takes only the web profile caches" {
+    local iso="$HOME/iso-wechat-radium"
+    run env HOME="$iso" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+profile="$HOME/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/web/profiles/multitab_a1"
+mkdir -p "$profile/Cache" "$profile/Service Worker/CacheStorage" "$profile/IndexedDB" "$profile/WebStorage"
+touch "$profile/Cache/data_0" "$profile/Service Worker/CacheStorage/index"
+touch "$profile/IndexedDB/site.db" "$profile/WebStorage/store"
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+wechat_running() { return 1; }
+wecom_running() { return 1; }
+safe_clean_guarded() {
+    local guard="$1"
+    shift
+    local label="${*: -1}"
+    local path
+    for path in "${@:1:$#-1}"; do
+        if "$guard" "$path"; then echo "OK|$path|$label"; else echo "NO|$path"; fi
+    done
+}
+clean_wechat_container_caches
+if _wechat_container_delete_guard_allows "$profile/IndexedDB/site.db"; then echo "LEAK|IndexedDB"; fi
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"OK|$iso/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/web/profiles/multitab_a1/Cache/data_0|WeChat web cache"* ]] || return 1
+    [[ "$output" == *"OK|"*"multitab_a1/Service Worker/CacheStorage/index|WeChat service worker cache"* ]] || return 1
+    [[ "$output" != *"IndexedDB"* ]] || return 1
+    [[ "$output" != *"WebStorage"* ]] || return 1
+    [[ "$output" != *"NO|"* ]] || return 1
 }
 
 @test "clean_wechat_container_caches skips every target while an owner is running" {

@@ -189,14 +189,13 @@ drift, mdls timeout regression, SIP path changes, and CI matrix updates.
 
 ## Layer 4: Trash routing default
 
-`mo analyze`, `mo uninstall` (default since #723), and `mo clean`'s
-ad-hoc paths route deletions to the macOS Trash. `mo analyze`
-(`moveToTrash` in `cmd/analyze/delete.go`) tries Apple's
-`/usr/bin/trash` first, then an atomic no-overwrite rename into
-the per-volume Trash, and uses Finder AppleScript only as the last
-fallback. This gives users the standard Apple-native "Put Back" recovery
-flow. `mo clean`'s batched cleanup path, `mo purge`, and `mo installer`
-delete permanently; `mo uninstall --permanent` opts out of Trash, and
+`mo analyze` and `mo uninstall` (default since #723) route deletions to the
+macOS Trash. `mo analyze` (`moveToTrash` in `cmd/analyze/delete.go`) tries
+Apple's `/usr/bin/trash` first, then an atomic no-overwrite rename into the
+per-volume Trash, and uses Finder AppleScript only as the last fallback.
+This gives users the standard Apple-native "Put Back" recovery flow.
+`mo clean`'s batched cleanup path, `mo purge`, and `mo installer` delete
+permanently; `mo uninstall --permanent` opts out of Trash, and
 `mo analyze` always uses Trash.
 
 The `trash` and `osascript` calls use a 30-second timeout (`trashTimeout`)

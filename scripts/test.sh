@@ -272,7 +272,11 @@ if command -v bats > /dev/null 2>&1 && [ -d "tests" ]; then
     # CPU contention from parallel test workers. Safety/optimize fixtures also
     # use 1-2s subprocess budgets that must reach their mocked action first.
     # Project-cache stalled-root probes have a five-second outer alarm.
-    # The uninstall menu PTY case depends on one-second escape-sequence reads.
+    # The uninstall and main-menu PTY cases depend on one-second
+    # escape-sequence reads and real-terminal signal timing, and the history
+    # load-time case compares wall-clock work. cli.bats, uninstall_review.bats
+    # and history.bats each hold such a case and have gone red on main only
+    # under the parallel batch, then passed unchanged on a serial rerun.
     # When parallel mode is active,
     # split them out to run sequentially after the parallel batch completes.
     _sequential_files=()
@@ -282,14 +286,14 @@ if command -v bats > /dev/null 2>&1 && [ -d "tests" ]; then
         if [[ ${#_all[@]} -eq 1 && -d "${_all[0]}" ]]; then
             while IFS= read -r _f; do
                 case "$_f" in
-                    *core_performance.bats | *regression.bats | *core_safe_functions.bats | *clean_system_caches.bats | *optimize.bats | *uninstall_menu.bats) _sequential_files+=("$_f") ;;
+                    *core_performance.bats | *regression.bats | *core_safe_functions.bats | *clean_system_caches.bats | *optimize.bats | *uninstall_menu.bats | *cli.bats | *uninstall_review.bats | *history.bats) _sequential_files+=("$_f") ;;
                     *) _rest+=("$_f") ;;
                 esac
             done < <(find "${_all[0]}" -type f -name '*.bats' | sort)
         else
             for _f in "${_all[@]}"; do
                 case "$_f" in
-                    *core_performance.bats | *regression.bats | *core_safe_functions.bats | *clean_system_caches.bats | *optimize.bats | *uninstall_menu.bats) _sequential_files+=("$_f") ;;
+                    *core_performance.bats | *regression.bats | *core_safe_functions.bats | *clean_system_caches.bats | *optimize.bats | *uninstall_menu.bats | *cli.bats | *uninstall_review.bats | *history.bats) _sequential_files+=("$_f") ;;
                     *) _rest+=("$_f") ;;
                 esac
             done

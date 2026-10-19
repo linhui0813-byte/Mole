@@ -823,7 +823,7 @@ clean_deep_system() {
             "$system_cleanup_deadline") || stats_rc=$?
         if [[ $stats_rc -eq 0 ]]; then
             stats_out=$(_mole_bounded_sudo_find "$stats_timeout" \
-                "$mem_reports_dir" -maxdepth 5 -type f -mtime +30 -exec stat -f "%z" {} + 2> /dev/null |
+                "$mem_reports_dir" -maxdepth 5 -type f -mtime +30 -exec "$STAT_BSD" -f "%z" {} + 2> /dev/null |
                 awk '{c++; s+=$1} END {print c+0, s+0}') || stats_rc=$?
         fi
     fi

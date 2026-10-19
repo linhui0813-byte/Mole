@@ -332,7 +332,10 @@ SCRIPT
 	if grep -q -- "--update" "$installer_args_log"; then
 		return 1
 	fi
-	[ "$(cat "$installer_version_log")" = "V$current_version" ]
+	[ "$(cat "$installer_version_log")" = "V$current_version" ] || return 1
+	grep -Fq "[update] REBUILT $manual_bin/mo" "$HOME/Library/Logs/mole/operations.log" ||
+		grep -Fq "[update] REBUILT $manual_bin/mole" "$HOME/Library/Logs/mole/operations.log" || return 1
+	grep -Fq "(updated to $current_version)" "$HOME/Library/Logs/mole/operations.log" || return 1
 }
 
 @test "mo update retries transient installer download failures" {
@@ -375,6 +378,7 @@ SCRIPT
 	local manual_config="$TEST_ROOT/manual/config"
 	local fake_bin="$TEST_ROOT/fake-bin"
 	local curl_attempt_log="$TEST_ROOT/discovery.attempts"
+	local git_attempt_log="$TEST_ROOT/discovery.git-attempts"
 
 	mkdir -p "$fake_bin"
 	make_manual_mole_install "$manual_bin" "$manual_config" "0.0.1"
@@ -387,13 +391,20 @@ SCRIPT
 printf 'x\n' >> "$CURL_ATTEMPT_LOG"
 exit 28
 SCRIPT
+	# The git tag fallback must fail too, or the test reaches the real GitHub.
+	cat > "$fake_bin/git" << 'SCRIPT'
+#!/usr/bin/env bash
+printf 'x\n' >> "$GIT_ATTEMPT_LOG"
+exit 128
+SCRIPT
 	printf '#!/bin/bash\nexit 0\n' > "$fake_bin/sleep"
-	chmod +x "$fake_bin/curl" "$fake_bin/sleep"
+	chmod +x "$fake_bin/curl" "$fake_bin/git" "$fake_bin/sleep"
 
 	run env \
 		HOME="$HOME" \
 		PATH="$fake_bin:/usr/bin:/bin" \
 		CURL_ATTEMPT_LOG="$curl_attempt_log" \
+		GIT_ATTEMPT_LOG="$git_attempt_log" \
 		"$manual_bin/mo" update
 
 	[ "$status" -eq 1 ] || return 1
@@ -402,7 +413,9 @@ SCRIPT
 	# The bounded retry must not run behind a blank screen.
 	[[ "$output" == *"Checking for updates"* ]] || return 1
 	# Two endpoints per round, three bounded rounds.
-	[ "$(wc -l < "$curl_attempt_log" | tr -d ' ')" -eq 6 ]
+	[ "$(wc -l < "$curl_attempt_log" | tr -d ' ')" -eq 6 ] || return 1
+	# One git tag lookup per round once both HTTP endpoints fail.
+	[ "$(wc -l < "$git_attempt_log" | tr -d ' ')" -eq 3 ]
 }
 
 @test "mo update announces the check before the bounded retry, not after it" {
@@ -419,7 +432,8 @@ SCRIPT
 printf 'x\n' >> "$CURL_ATTEMPT_LOG"
 exit 28
 SCRIPT
-	chmod +x "$fake_bin/curl"
+	printf '#!/bin/bash\nexit 128\n' > "$fake_bin/git"
+	chmod +x "$fake_bin/curl" "$fake_bin/git"
 	: > "$out_file"
 	: > "$curl_attempt_log"
 
@@ -984,6 +998,32 @@ EOF
 	[[ "$output" != *"UNEXPECTED_DIRECT_MO"* ]]
 }
 
+@test "Homebrew update logs the new version and a no-op upgrade logs nothing" {
+	run env HOME="$HOME/logged-homebrew-update" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME"
+source "$PROJECT_ROOT/lib/core/common.sh"
+run_with_timeout() {
+	shift
+	case "$*" in
+		"brew upgrade mole") printf '%s\n' "${UPGRADE_OUTPUT:-==> Upgrading mole}" ;;
+		"brew list --versions mole") printf 'mole 9.9.9\n' ;;
+	esac
+}
+UPGRADE_OUTPUT="Warning: mole 9.9.9 already installed" update_via_homebrew "9.9.9"
+# Its own scratch files are not cleanup and must not be logged as such.
+[[ ! -s "$OPERATIONS_LOG_FILE" ]] || exit 1
+update_via_homebrew "1.0.0"
+cat "$OPERATIONS_LOG_FILE"
+EOF
+
+	[ "$status" -eq 0 ] || {
+		echo "$output"
+		return 1
+	}
+	[[ "$output" == *"[update] REBUILT Homebrew mole (updated to 9.9.9)"* ]]
+}
+
 @test "mo update preserves actionable Homebrew diagnostics on failure (#1247)" {
 	local fake_brew_bin="$TEST_ROOT/homebrew/bin"
 	local fake_brew_mole="$TEST_ROOT/homebrew/Cellar/mole/9.9.9/bin/mole"
@@ -1248,7 +1288,9 @@ SCRIPT
 	grep -q -- "--update" "$installer_args_log" || return 1
 	[[ "$output" == *"Retrying with a direct reinstall"* ]] || return 1
 	[[ "$output" == *"Updated to latest version, $current_version"* ]] || return 1
-	[ "$(cat "$heal_log")" = "V$current_version|$manual_bin|$manual_config" ]
+	[ "$(cat "$heal_log")" = "V$current_version|$manual_bin|$manual_config" ] || return 1
+	grep -Fq "] [update] REBUILT " "$HOME/Library/Logs/mole/operations.log" || return 1
+	grep -Fq "(updated to $current_version)" "$HOME/Library/Logs/mole/operations.log" || return 1
 }
 
 @test "mo update prints the manual reinstall command when self-heal fails too" {
@@ -1378,6 +1420,7 @@ SCRIPT
 	}
 	[[ "$output" == *"Retrying with a direct reinstall"* ]] || return 1
 	[[ "$output" == *"Updated to nightly build, abc1234"* ]] || return 1
+	grep -Fq "(updated to abc1234" "$HOME/Library/Logs/mole/operations.log" || return 1
 	[ "$(cat "$heal_log")" = "main|$manual_bin|$manual_config" ] || return 1
 	grep -qFx 'CHANNEL=nightly' "$manual_config/install_channel" || return 1
 	grep -qFx 'COMMIT_HASH=abc1234' "$manual_config/install_channel"
@@ -2070,6 +2113,38 @@ curl() { echo '{"tag_name":"V1.59.1"}'; }
 [[ "$(get_latest_version_from_github)" == 1.59.1 ]] || exit 1
 SCRIPT
  [ "$status" -eq 0 ]
+}
+
+@test "stable discovery falls back to git release tags when HTTP API lookups fail" {
+	run /bin/bash <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/update.sh"
+get_latest_version_from_github() { return 0; }
+get_latest_version() { return 0; }
+get_latest_version_from_git() { echo "1.61.0"; }
+[[ "$(resolve_latest_stable_version)" == "1.61.0" ]] || exit 1
+SCRIPT
+	[ "$status" -eq 0 ]
+}
+
+@test "get_latest_version_from_git resolves highest macOS release tag and ignores windows tags" {
+	local fake_bin="$TEST_ROOT/fake-bin-git"
+	mkdir -p "$fake_bin"
+	cat > "$fake_bin/git" <<'SCRIPT'
+#!/bin/bash
+printf '%s\trefs/tags/V1.59.0\n%s\trefs/tags/V1.61.0\n%s\trefs/tags/V1.62.0-windows\n' \
+    "deadbeef1" "deadbeef2" "deadbeef3"
+SCRIPT
+	chmod +x "$fake_bin/git"
+
+	run env PATH="$fake_bin:$PATH" /bin/bash <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/update.sh"
+[[ "$(get_latest_version_from_git)" == "1.61.0" ]] || exit 1
+SCRIPT
+	[ "$status" -eq 0 ]
 }
 
 @test "update check stays silent when the cache cannot be written or read" {

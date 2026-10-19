@@ -35,24 +35,29 @@ const trashTimeout = 30 * time.Second
 // Finder fallback.
 const trashBinary = "/usr/bin/trash"
 
-func deletePathCmd(path string, counter *int64) tea.Cmd {
+func deletePathCmd(path string, counter *int64, audit *deleteAudit) tea.Cmd {
 	return func() tea.Msg {
+		audit.begin()
 		count, err := trashPathWithProgress(path, counter)
+		audit.record(path, err)
+		audit.end()
 		return deleteProgressMsg{
-			done:  true,
-			err:   err,
-			count: count,
-			path:  path,
+			done:       true,
+			err:        err,
+			count:      count,
+			path:       path,
+			logWarning: audit.warning(),
 		}
 	}
 }
 
 // deleteMultiplePathsCmd moves paths to Trash and aggregates results.
-func deleteMultiplePathsCmd(paths []string, counter *int64) tea.Cmd {
+func deleteMultiplePathsCmd(paths []string, counter *int64, audit *deleteAudit) tea.Cmd {
 	return func() tea.Msg {
 		var totalCount int64
 		var errors []string
 		var removedPaths []string
+		audit.begin()
 
 		// Process deeper paths first to avoid parent/child conflicts.
 		pathsToDelete := append([]string(nil), paths...)
@@ -62,6 +67,7 @@ func deleteMultiplePathsCmd(paths []string, counter *int64) tea.Cmd {
 
 		for _, path := range pathsToDelete {
 			count, err := trashPathWithProgress(path, counter)
+			audit.record(path, err)
 			totalCount += count
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -78,6 +84,7 @@ func deleteMultiplePathsCmd(paths []string, counter *int64) tea.Cmd {
 		if len(errors) > 0 {
 			resultErr = &multiDeleteError{errors: errors}
 		}
+		audit.end()
 
 		return deleteProgressMsg{
 			done:         true,
@@ -85,6 +92,7 @@ func deleteMultiplePathsCmd(paths []string, counter *int64) tea.Cmd {
 			count:        totalCount,
 			path:         "",
 			removedPaths: removedPaths,
+			logWarning:   audit.warning(),
 		}
 	}
 }
@@ -528,6 +536,7 @@ var endpointSecurityBundlePrefixes = []string{
 	"com.paloaltonetworks.",
 	"com.cisco.anyconnect",
 	"com.cisco.secureclient",
+	"com.alibaba.security.",
 }
 
 // isEndpointSecurityCachePath reports whether path is an endpoint-security / EDR

@@ -44,7 +44,7 @@ IS_M_SERIES=$([[ "$(uname -m)" == "arm64" ]] && echo "true" || echo "false")
 MOLE_USER_HOME="$(get_invoking_home)"
 [[ -n "$MOLE_USER_HOME" ]] || MOLE_USER_HOME="$HOME"
 
-load_mole_whitelist "$MOLE_USER_HOME"
+load_mole_whitelist "$MOLE_USER_HOME" || exit 1
 
 CLEAN_PREVIEW_FINAL_FILE="$MOLE_USER_HOME/.config/mole/clean-list.txt"
 CLEAN_PREVIEW_STAGING_FILE=""
@@ -300,7 +300,7 @@ record_dry_run_cleanup_target() {
 # reach them in. The row stays in the preview, because a whitelist entry for
 # the child is how a user protects it, but the renderer counts it under the
 # ancestor. An ancestor with unknown size covers nothing: its children's
-# measured bytes are the only figure the "At least" total has for that tree.
+# measured bytes are the only figure the "N+" lower-bound total has for that tree.
 # Identity duplicates are dropped before coverage is decided, so a stale
 # unknown-size duplicate of an ancestor cannot hide a measured child.
 # Perl keeps the normal path linear for large clean previews; the Bash
@@ -754,7 +754,7 @@ get_cleanup_path_size_kb() {
     # with a zero/invalid stat we also fall back; a symlink reports 0 directly.
     if [[ -L "$path" || -f "$path" ]] && command -v stat > /dev/null 2>&1; then
         local bytes
-        bytes=$(stat -f%z "$path" 2> /dev/null || echo "0")
+        bytes=$("$STAT_BSD" -f%z "$path" 2> /dev/null || echo "0")
         if [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]]; then
             echo $(((bytes + 1023) / 1024))
             return 0
@@ -765,7 +765,8 @@ get_cleanup_path_size_kb() {
         fi
     fi
 
-    get_path_size_kb "$path"
+    # Cleanup totals count what can be freed: readable bytes (see get_path_size_kb).
+    get_path_size_kb "$path" "" readable
 }
 
 # Classification helper for cleanup risk levels
@@ -1018,7 +1019,7 @@ _safe_clean_impl() {
             local bulk_stat_file="$temp_dir/bulk_stat"
             local bulk_stat_rc=0
             run_with_timeout "$MOLE_TIMEOUT_DISK_VERIFY_SEC" \
-                stat -f%z "${existing_paths[@]}" < /dev/null \
+                "$STAT_BSD" -f%z "${existing_paths[@]}" < /dev/null \
                 > "$bulk_stat_file" 2> /dev/null || bulk_stat_rc=$?
             if [[ $bulk_stat_rc -ge 128 ]]; then
                 cleanup_interrupt_rc=$bulk_stat_rc
@@ -1478,6 +1479,14 @@ start_cleanup() {
         printf '\033[2J\033[H'
     fi
     printf '\n'
+    # Both system and external-volume previews publish the same candidate ledger.
+    if [[ "$DRY_RUN" == "true" ]]; then
+        prepare_clean_preview_file || {
+            echo -e "${YELLOW}${ICON_WARNING}${NC} Unable to create a safe cleanup preview file" >&2
+            return 1
+        }
+        write_clean_preview_header
+    fi
     if [[ -n "$EXTERNAL_VOLUME_TARGET" ]]; then
         echo -e "${PURPLE_BOLD}Clean External Volume${NC}"
         echo -e "${GRAY}${EXTERNAL_VOLUME_TARGET}${NC}"
@@ -1501,12 +1510,6 @@ start_cleanup() {
     if [[ "$DRY_RUN" == "true" ]]; then
         echo -e "${YELLOW}Dry Run Mode${NC}, Preview only, no deletions"
         echo ""
-
-        prepare_clean_preview_file || {
-            echo -e "${YELLOW}${ICON_WARNING}${NC} Unable to create a safe cleanup preview file" >&2
-            return 1
-        }
-        write_clean_preview_header
 
         # Preview system section when sudo is already cached (no password prompt).
         if adopt_sudo_session; then
@@ -1553,6 +1556,13 @@ perform_cleanup() {
 
     local initial_free_space_kb=""
     local initial_free_space_display="Unknown"
+    local free_space_target="$EXTERNAL_VOLUME_TARGET"
+    local free_space_parent="" free_space_parent_id="" free_space_volume_id=""
+    if [[ -n "$free_space_target" ]] && _mole_snapshot_path_identity "$free_space_target"; then
+        free_space_parent="$_MOLE_PATH_SNAPSHOT_PARENT"
+        free_space_parent_id="$_MOLE_PATH_SNAPSHOT_PARENT_ID"
+        free_space_volume_id="$_MOLE_PATH_SNAPSHOT_TARGET_ID"
+    fi
 
     # Test mode skips expensive scans and returns minimal output.
     local test_mode_enabled=false
@@ -1895,21 +1905,29 @@ perform_cleanup() {
     fi
 
     # Emit one "Free space" line, with the measured delta in parentheses when
-    # available. $1 is the free space in KB captured before cleanup started.
+    # available. $1 is the initial free space in KB; $2 is the selected volume.
     # Caller appends each printed line to summary_details.
     emit_free_space_summary() {
         local initial_kb="$1"
-        if [[ "$DRY_RUN" == "true" ]]; then
-            printf 'Free space: %s\n' "$(get_free_space)"
+        local target="$2"
+        # A disconnected mount may leave a directory on the internal disk.
+        # Refuse it (or a replacement volume) instead of reporting that disk.
+        if [[ -n "$target" ]] && ! _mole_path_matches_identity \
+            "$target" "$free_space_parent" "$free_space_parent_id" "$free_space_volume_id"; then
+            printf 'Free space: Unknown\n'
             return 0
         fi
 
         local final_kb
-        if ! final_kb=$(get_free_space_kb 2> /dev/null); then
+        if ! final_kb=$(get_free_space_kb "$target" 2> /dev/null); then
+            final_kb=""
+        fi
+        if [[ -n "$target" ]] && ! _mole_path_matches_identity \
+            "$target" "$free_space_parent" "$free_space_parent_id" "$free_space_volume_id"; then
             final_kb=""
         fi
         local delta_note=""
-        if [[ "$initial_kb" =~ ^[0-9]+$ && "$final_kb" =~ ^[0-9]+$ && "$initial_kb" -ne "$final_kb" ]]; then
+        if [[ "$DRY_RUN" != "true" && "$initial_kb" =~ ^[0-9]+$ && "$final_kb" =~ ^[0-9]+$ && "$initial_kb" -ne "$final_kb" ]]; then
             delta_note=" ($(format_free_space_delta_kb "$((final_kb - initial_kb))"))"
         fi
         printf 'Free space: %s%s\n' "$(format_free_space_kb "$final_kb")" "$delta_note"
@@ -1923,7 +1941,7 @@ perform_cleanup() {
         if [[ "$DRY_RUN" == "true" ]]; then
             local potential_label
             if [[ "$DRY_RUN_TOTAL_PARTIAL" == "true" ]]; then
-                potential_label="At least $freed_size_human"
+                potential_label="${freed_size_human}+"
             else
                 potential_label="$freed_size_human"
             fi
@@ -1945,7 +1963,7 @@ perform_cleanup() {
         else
             if [[ ${MOLE_CLEAN_SIZING_TIMEOUTS:-0} -gt 0 ]]; then
                 if [[ $total_size_cleaned -gt 0 ]]; then
-                    freed_size_human="At least $freed_size_human"
+                    freed_size_human="${freed_size_human}+"
                 else
                     freed_size_human="Partially measured"
                 fi
@@ -1961,7 +1979,7 @@ perform_cleanup() {
             local free_space_line
             while IFS= read -r free_space_line; do
                 summary_details+=("$free_space_line")
-            done < <(emit_free_space_summary "$initial_free_space_kb")
+            done < <(emit_free_space_summary "$initial_free_space_kb" "$free_space_target")
         fi
     else
         if [[ $cleanup_cancel_rc -eq 0 ]]; then
@@ -1981,7 +1999,7 @@ perform_cleanup() {
         local free_space_line
         while IFS= read -r free_space_line; do
             summary_details+=("$free_space_line")
-        done < <(emit_free_space_summary "$initial_free_space_kb")
+        done < <(emit_free_space_summary "$initial_free_space_kb" "$free_space_target")
     fi
 
     # Caches of running apps are deferred silently: skipping them is Mole's

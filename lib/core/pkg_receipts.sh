@@ -52,7 +52,7 @@ pkg_receipt_nonstandard_app_paths() {
     # covers both may outlive the short TTL.
     local receipts_dir="${MOLE_PKG_RECEIPT_DB_DIR:-/var/db/receipts}"
     local receipt_stamps=""
-    receipt_stamps=$(LC_ALL=C stat -f '%m %N' "$receipts_dir"/*.plist 2> /dev/null) || receipt_stamps=""
+    receipt_stamps=$(LC_ALL=C "$STAT_BSD" -f '%m %N' "$receipts_dir"/*.plist 2> /dev/null) || receipt_stamps=""
     if [[ -n "$receipt_stamps" && -z "${MOLE_PKG_RECEIPT_CACHE_TTL:-}" ]]; then
         cache_ttl=604800
     fi
@@ -73,7 +73,7 @@ pkg_receipt_nonstandard_app_paths() {
         if declare -f get_file_mtime > /dev/null 2>&1; then
             cache_mtime=$(get_file_mtime "$cache_file")
         else
-            cache_mtime=$(stat -f "%m" "$cache_file" 2> /dev/null || echo 0)
+            cache_mtime=$("$STAT_BSD" -f "%m" "$cache_file" 2> /dev/null || echo 0)
         fi
         if [[ "$cache_ttl" =~ ^[0-9]+$ && "$cache_mtime" =~ ^[0-9]+$ &&
             "$now_epoch" =~ ^[0-9]+$ && $cache_ttl -gt 0 &&

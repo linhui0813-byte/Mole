@@ -61,6 +61,25 @@ EOF
     [[ ! -d "$MOLE_TEST_TRASH_DIR" ]]
 }
 
+@test "remove_file_list refuses the Steam library root and its contents" {
+    local steam="$HOME/Library/Application Support/Steam"
+    mkdir -p "$steam/steamapps/common/Game" "$steam/userdata/42"
+    touch "$steam/steamapps/common/Game/game.bin" "$steam/userdata/42/save.vdf"
+    local list
+    printf -v list '%s\n%s\n%s' "$steam" "$steam/steamapps/common/Game" "$steam/userdata/42"
+
+    run /bin/bash --noprofile --norc <<EOF
+$(prelude)
+export MOLE_UNINSTALL_MODE=1
+remove_file_list "$list" "false"
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ -f "$steam/steamapps/common/Game/game.bin" ]] || return 1
+    [[ -f "$steam/userdata/42/save.vdf" ]] || return 1
+    [[ ! -d "$MOLE_TEST_TRASH_DIR" ]]
+}
+
 @test "uninstall keeps a LaunchAgent whose program changed after preview" {
     local app="$HOME/Applications/Target.app"
     local agents="$HOME/Library/LaunchAgents"

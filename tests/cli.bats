@@ -12,7 +12,9 @@ setup_file() {
 	# Without this, go build would use $HOME/Library/Caches/go-build inside the
 	# temp dir (empty), causing a full cold rebuild on every test run (~6s).
 	ORIGINAL_GOCACHE="$(go env GOCACHE 2>/dev/null || true)"
-	export ORIGINAL_GOCACHE
+	ORIGINAL_GOPATH="$(go env GOPATH 2>/dev/null || true)"
+	ORIGINAL_GOMODCACHE="$(go env GOMODCACHE 2>/dev/null || true)"
+	export ORIGINAL_GOCACHE ORIGINAL_GOPATH ORIGINAL_GOMODCACHE
 
 	HOME="$(mktemp -d "${BATS_TEST_DIRNAME}/tmp-cli-home.XXXXXX")"
 	export HOME
@@ -28,14 +30,15 @@ setup_file() {
 		export ANALYZE_BIN STATUS_BIN
 	elif command -v go > /dev/null 2>&1; then
 		# Build Go binaries from current source for JSON tests.
-		# Point GOPATH/GOMODCACHE/GOCACHE at the real home so local focused runs
-		# can reuse caches when the full runner did not prebuild helpers.
+		# Reuse the Go caches resolved before HOME moved (the shared harness may
+		# already have moved it off the account home) so local focused runs
+		# reuse caches when the full runner did not prebuild helpers.
 		ANALYZE_BIN="$(mktemp "${TMPDIR:-/tmp}/analyze-go.XXXXXX")"
 		STATUS_BIN="$(mktemp "${TMPDIR:-/tmp}/status-go.XXXXXX")"
-		GOPATH="${ORIGINAL_HOME}/go" GOMODCACHE="${ORIGINAL_HOME}/go/pkg/mod" \
+		GOPATH="${ORIGINAL_GOPATH}" GOMODCACHE="${ORIGINAL_GOMODCACHE}" \
 			GOCACHE="${ORIGINAL_GOCACHE}" \
 			go build -o "$ANALYZE_BIN" "$PROJECT_ROOT/cmd/analyze" 2>/dev/null
-		GOPATH="${ORIGINAL_HOME}/go" GOMODCACHE="${ORIGINAL_HOME}/go/pkg/mod" \
+		GOPATH="${ORIGINAL_GOPATH}" GOMODCACHE="${ORIGINAL_GOMODCACHE}" \
 			GOCACHE="${ORIGINAL_GOCACHE}" \
 			go build -o "$STATUS_BIN" "$PROJECT_ROOT/cmd/status" 2>/dev/null
 		CLI_OWNS_GO_HELPERS=1
@@ -176,6 +179,28 @@ SCRIPT
 	[[ "$output" == *"Install: Manual"* ]]
 }
 
+@test "mole --version names the commit of a Homebrew HEAD build" {
+	local prefix keg
+	prefix="$(mktemp -d "${BATS_TEST_TMPDIR}/mole-brew-head.XXXXXX")"
+	for keg in HEAD-1a2b3c4 9.9.9; do
+		mkdir -p "$prefix/Cellar/mole/$keg/libexec"
+		cp "$PROJECT_ROOT/mole" "$prefix/Cellar/mole/$keg/libexec/mole"
+		ln -s "$PROJECT_ROOT/lib" "$prefix/Cellar/mole/$keg/libexec/lib"
+		ln -s "$PROJECT_ROOT/bin" "$prefix/Cellar/mole/$keg/libexec/bin"
+	done
+	mkdir -p "$prefix/bin"
+
+	ln -s "$prefix/Cellar/mole/HEAD-1a2b3c4/libexec/mole" "$prefix/bin/mole"
+	run env HOME="$HOME" MOLE_HOMEBREW_DETECT_TIMEOUT=1 "$prefix/bin/mole" --version
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"Install: Homebrew (HEAD 1a2b3c4)"* ]] || { echo "$output"; return 1; }
+
+	ln -sf "$prefix/Cellar/mole/9.9.9/libexec/mole" "$prefix/bin/mole"
+	run env HOME="$HOME" MOLE_HOMEBREW_DETECT_TIMEOUT=1 "$prefix/bin/mole" --version
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	[[ "$output" == *"Install: Homebrew"$'\n'* ]] || { echo "$output"; return 1; }
+}
+
 @test "mole invoked through a cross-directory symlink still sources lib" {
 	local link_dir
 	link_dir="$(mktemp -d "${BATS_TEST_TMPDIR}/mole-abs-link.XXXXXX")"
@@ -243,6 +268,24 @@ EOF
 		[ "$status" -ne 0 ] || { echo "mo $cmd exited 0"; return 1; }
 		[ ! -s "$out" ] || { echo "mo $cmd wrote to stdout:"; cat "$out"; return 1; }
 		grep -qiE "unknown|not defined" "$err" || { echo "mo $cmd stderr:"; cat "$err"; return 1; }
+	done
+}
+
+@test "every command answers --help with usage and exit 0" {
+	local cmd
+	for cmd in clean uninstall optimize purge installer history completion touchid update remove; do
+		run env HOME="$HOME" "$PROJECT_ROOT/mole" "$cmd" --help
+		[ "$status" -eq 0 ] || return 1
+		[[ "$output" == *"Usage"* ]] || return 1
+	done
+}
+
+@test "every command answers -h with usage and exit 0" {
+	local cmd
+	for cmd in clean uninstall optimize purge installer history completion touchid update remove; do
+		run env HOME="$HOME" "$PROJECT_ROOT/mole" "$cmd" -h
+		[ "$status" -eq 0 ] || return 1
+		[[ "$output" == *"Usage"* ]] || return 1
 	done
 }
 
@@ -586,8 +629,8 @@ EOF
 	real_root="$(mktemp -d "$HOME/ext-real.XXXXXX")"
 	link_root="$HOME/ext-link"
 	ln -s "$real_root" "$link_root"
-	mkdir -p "$link_root/USB/.Trashes"
-	touch "$link_root/USB/.Trashes/cache.tmp"
+	mkdir -p "$link_root/USB/.TemporaryItems"
+	touch "$link_root/USB/.TemporaryItems/staged"
 
 	mock_bin="$HOME/mock-bin"
 	mkdir -p "$mock_bin"
@@ -654,6 +697,26 @@ EOF
 	[ "$status" -ne 0 ]
 }
 
+@test "touchid enable and disable each leave an operations.log row" {
+	pam_file="$HOME/pam_logged"
+	cat >"$pam_file" <<'EOF'
+auth       sufficient     pam_opendirectory.so
+EOF
+	rm -f "$HOME/Library/Logs/mole/operations.log"
+
+	fake_bin="$HOME/fake-bin-logged"
+	create_fake_utils "$fake_bin"
+
+	run env HOME="$HOME" PATH="$fake_bin:$PATH" MOLE_PAM_SUDO_FILE="$pam_file" "$PROJECT_ROOT/bin/touchid.sh" enable
+	[ "$status" -eq 0 ]
+	run env HOME="$HOME" PATH="$fake_bin:$PATH" MOLE_PAM_SUDO_FILE="$pam_file" "$PROJECT_ROOT/bin/touchid.sh" disable
+	[ "$status" -eq 0 ]
+
+	run cat "$HOME/Library/Logs/mole/operations.log"
+	[[ "$output" == *"[touchid] REBUILT $pam_file (touchid enabled)"* ]] || return 1
+	[[ "$output" == *"[touchid] REBUILT $pam_file (touchid disabled)"* ]] || return 1
+}
+
 @test "touchid enable --dry-run does not modify pam file" {
 	pam_file="$HOME/pam_enable_dry_run"
 	cat >"$pam_file" <<'EOF'
@@ -682,7 +745,7 @@ EOF
 	grep -q "pam_tid.so" "$pam_file"
 
 	local perms
-	perms=$(stat -f "%Lp" "$pam_file" 2>/dev/null || stat -c "%a" "$pam_file" 2>/dev/null)
+	perms=$(/usr/bin/stat -f "%Lp" "$pam_file" 2>/dev/null || stat -c "%a" "$pam_file" 2>/dev/null)
 	[ "$perms" = "444" ]
 }
 
@@ -700,7 +763,7 @@ EOF
 	[ "$status" -eq 0 ]
 
 	local perms
-	perms=$(stat -f "%Lp" "$pam_file" 2>/dev/null || stat -c "%a" "$pam_file" 2>/dev/null)
+	perms=$(/usr/bin/stat -f "%Lp" "$pam_file" 2>/dev/null || stat -c "%a" "$pam_file" 2>/dev/null)
 	[ "$perms" = "444" ]
 }
 
@@ -724,7 +787,7 @@ EOF
 	grep -q "pam_tid.so" "$pam_local"
 
 	local perms
-	perms=$(stat -f "%Lp" "$pam_local" 2>/dev/null || stat -c "%a" "$pam_local" 2>/dev/null)
+	perms=$(/usr/bin/stat -f "%Lp" "$pam_local" 2>/dev/null || stat -c "%a" "$pam_local" 2>/dev/null)
 	[ "$perms" = "444" ]
 }
 
@@ -924,5 +987,11 @@ PY
 @test "interactive terminal contract: menu restore, update notice wrapper and signals (PTY)" {
 	command -v python3 >/dev/null 2>&1 || skip "python3 not available"
 	run python3 "$PROJECT_ROOT/tests/main_menu_pty.py"
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "e2e harness keeps failed prerequisites from authorizing later mutations" {
+	command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+	run env MOLE_TEST_NO_AUTH=1 PYTHONDONTWRITEBYTECODE=1 python3 "$PROJECT_ROOT/tests/e2e_harness_test.py"
 	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }

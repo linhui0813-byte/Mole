@@ -75,17 +75,15 @@ clean_trash() {
                 fi
                 local trash_item_kb
                 local size_rc=0
-                trash_item_kb=$(get_path_size_kb "$trash_item" 2> /dev/null) || size_rc=$?
+                trash_item_kb=$(get_path_size_kb "$trash_item" "" readable 2> /dev/null) || size_rc=$?
                 # The real run empties an item whose sizing timed out or
-                # failed, so the preview lists it with an unknown size instead
-                # of dropping it or cancelling the later sections. A signal
-                # still cancels.
+                # failed, so the preview lists it instead of dropping it or
+                # cancelling the later sections. Only a timeout leaves its size
+                # unknown; a signal still cancels.
                 mole_item_size_continues "$size_rc" || return $?
                 local trash_size_known=true
-                [[ $size_rc -eq 0 && "$trash_item_kb" =~ ^[0-9]+$ ]] || {
-                    trash_item_kb=0
-                    trash_size_known=false
-                }
+                [[ $size_rc -eq 0 && "$trash_item_kb" =~ ^[0-9]+$ ]] || trash_item_kb=0
+                mole_rc_timeout "$size_rc" && trash_size_known=false
                 if (declare -f holds_compiled_model_cache > /dev/null 2>&1 &&
                     holds_compiled_model_cache "$trash_item" 2> /dev/null); then
                     continue
@@ -308,9 +306,7 @@ clean_user_essentials() {
 
     _clean_user_log_directory "$HOME/Library/Logs" "User app logs" || return $?
 
-    if [[ "${MOLE_SKIP_TRASH_CLEANUP:-0}" != "1" ]]; then
-        clean_trash
-    fi
+    clean_trash
     stop_section_spinner
 
     # Recent items
@@ -369,17 +365,15 @@ _incomplete_download_delete_guard_allows() {
 # view says the exact file is idle. The guarded cleanup repeats the probe after
 # sizing, and safe_remove repeats it again at the real deletion boundary.
 _clean_incomplete_downloads() {
-    local -a patterns=(
-        "$HOME/Downloads/*.download"
-        "$HOME/Downloads/*.crdownload"
-        "$HOME/Downloads/*.part"
-    )
-    local labels=("Safari incomplete downloads" "Chrome incomplete downloads" "Partial incomplete downloads")
+    [[ -d "$HOME/Downloads" ]] || return 0
+
+    local -a extensions=("download" "crdownload" "part")
+    local -a labels=("Safari incomplete downloads" "Chrome incomplete downloads" "Partial incomplete downloads")
     local i=0
-    for pattern in "${patterns[@]}"; do
+    for ext in "${extensions[@]}"; do
         local label="${labels[$i]}"
         i=$((i + 1))
-        for f in $pattern; do
+        for f in "$HOME/Downloads/"*."$ext"; do
             [[ -e "$f" ]] || continue
             local open_state=0
             _mole_paths_have_open_handle "$f" || open_state=$?
@@ -579,7 +573,7 @@ _clean_chromium_old_versions() {
         local newest_version=""
         local newest_mtime=0
         local current_mtime
-        current_mtime=$(stat -f%m "$versions_dir/$current_version" 2> /dev/null || echo "0")
+        current_mtime=$("$STAT_BSD" -f%m "$versions_dir/$current_version" 2> /dev/null || echo "0")
         [[ "$current_mtime" =~ ^[0-9]+$ ]] || current_mtime=0
 
         local -a old_versions=()
@@ -589,7 +583,7 @@ _clean_chromium_old_versions() {
             name=$(basename "$dir")
             [[ "$name" == "Current" ]] && continue
             local mtime
-            mtime=$(stat -f%m "$dir" 2> /dev/null || echo "0")
+            mtime=$("$STAT_BSD" -f%m "$dir" 2> /dev/null || echo "0")
             if [[ "$mtime" =~ ^[0-9]+$ ]] && [[ "$mtime" -gt "$newest_mtime" ]]; then
                 newest_mtime="$mtime"
                 newest_version="$name"
@@ -989,8 +983,7 @@ clean_finder_metadata() {
 
 # Conservative cleanup for support caches not covered by generic rules.
 clean_support_app_data() {
-    local support_age_days="${MOLE_SUPPORT_CACHE_AGE_DAYS:-30}"
-    [[ "$support_age_days" =~ ^[0-9]+$ ]] || support_age_days=30
+    local support_age_days=30
 
     local crash_reporter_dir="$HOME/Library/Application Support/CrashReporter"
     if [[ -d "$crash_reporter_dir" && ! -L "$crash_reporter_dir" ]]; then
@@ -1066,6 +1059,104 @@ directory_has_entries() {
     return 1
 }
 
+# Rendered wallpaper bitmaps the wallpaper agent keeps in its container: one
+# uncompressed BMP per picture and display size, named
+# `<sha256>-<width>-<height>-<n>-<hex>.bmp`. The agent never prunes them (a
+# user report measured 179.53 GB) and renders again from the source picture.
+# Only an exact render file older than a week that is not a render of a
+# picture that may be on screen (the newest of each display size, plus the
+# newest overall) is offered; the rest of the container stays. Two displays of
+# one size showing different pictures keep only the newer render, whose loss
+# costs a re-render; Mole Mac's policy accepts the same limit. Fills
+# _MOLE_WALLPAPER_RENDERS with at most the 50 oldest candidates, so a large
+# backlog drains over a few runs instead of probing thousands of files in one;
+# a listing timeout offers nothing, a signal returns its status.
+_MOLE_WALLPAPER_RENDERS=()
+_wallpaper_stale_render_files() {
+    _MOLE_WALLPAPER_RENDERS=()
+    local root="$HOME/Library/Containers/com.apple.wallpaper.agent/Data/Library/Caches/com.apple.wallpaper.caches"
+    local probe="$HOME" component
+    for component in Library Containers com.apple.wallpaper.agent Data Library Caches com.apple.wallpaper.caches; do
+        probe="$probe/$component"
+        [[ -d "$probe" && ! -L "$probe" ]] || return 0
+    done
+
+    local cutoff uid folder kind listing list_rc path
+    cutoff=$(($(date +%s) - 7 * 24 * 60 * 60))
+    uid=$(id -u)
+    for folder in "$root"/extension-com.apple.wallpaper.extension.*; do
+        kind="${folder##*/extension-com.apple.wallpaper.extension.}"
+        [[ -n "$kind" && ${#kind} -le 64 && "$kind" != *..* && "$kind" =~ ^[a-z0-9.]+$ ]] || continue
+        [[ -d "$folder" && ! -L "$folder" ]] || continue
+        list_rc=0
+        listing=$(run_with_timeout "$MOLE_TIMEOUT_MEDIUM_PROBE_SEC" find "$folder" -maxdepth 1 -type f -name '*.bmp' \
+            -user "$uid" -links 1 -exec "$STAT_BSD" -f '%m %N' {} + 2> /dev/null) || list_rc=$?
+        if mole_rc_signal "$list_rc"; then
+            _MOLE_WALLPAPER_RENDERS=()
+            return "$list_rc"
+        fi
+        # A timed-out or failed listing cannot show which picture is newest.
+        [[ $list_rc -eq 0 && -n "$listing" ]] || continue
+        # The newest picture must be judged on the whole listing; a folder too
+        # large to judge offers nothing rather than a truncated prefix.
+        [[ $(printf '%s\n' "$listing" | wc -l) -le 20000 ]] || continue
+        while IFS= read -r path; do
+            [[ -f "$path" && ! -L "$path" ]] && _MOLE_WALLPAPER_RENDERS+=("$path")
+        done < <(printf '%s\n' "$listing" | awk -v folder="$folder/" -v cutoff="$cutoff" '
+            {
+                mtime = $1
+                path = substr($0, length($1) + 2)
+                if (substr(path, 1, length(folder)) != folder) next
+                name = substr(path, length(folder) + 1)
+                if (name !~ /^[0-9a-f]+-[0-9]+-[0-9]+-[0-9]+-[0-9a-f]+\.bmp$/) next
+                split(name, part, "-")
+                if (length(part[1]) != 64 || length(part[2]) > 6 || length(part[3]) > 6 || length(part[4]) > 6) next
+                tail = part[5]
+                sub(/\.bmp$/, "", tail)
+                if (length(tail) > 32) next
+                n++
+                paths[n] = path
+                times[n] = mtime + 0
+                digests[n] = part[1]
+                size = part[2] "x" part[3]
+                if (!(size in newest_time) || times[n] > newest_time[size]) {
+                    newest_time[size] = times[n]
+                    newest_digest[size] = part[1]
+                }
+                if (n == 1 || times[n] > top_time) {
+                    top_time = times[n]
+                    top_digest = part[1]
+                }
+            }
+            END {
+                for (size in newest_digest) on_screen[newest_digest[size]] = 1
+                if (n > 0) on_screen[top_digest] = 1
+                for (i = 1; i <= n; i++)
+                    if (!(digests[i] in on_screen) && times[i] < cutoff) print times[i] " " paths[i]
+            }' | sort -n | head -n 50 | cut -d' ' -f2-)
+        [[ ${#_MOLE_WALLPAPER_RENDERS[@]} -lt 50 ]] || break
+    done
+    if [[ ${#_MOLE_WALLPAPER_RENDERS[@]} -gt 50 ]]; then
+        _MOLE_WALLPAPER_RENDERS=("${_MOLE_WALLPAPER_RENDERS[@]:0:50}")
+    fi
+    return 0
+}
+
+# Own probe budget: every render is one handle probe, and the shared section
+# budget must stay with the container rows after it.
+_clean_wallpaper_renders() {
+    local _MOLE_CONTAINER_CACHE_PROBE_DEADLINE=""
+    local wallpaper_rc=0
+    _wallpaper_stale_render_files || wallpaper_rc=$?
+    if mole_rc_signal "$wallpaper_rc"; then
+        return "$wallpaper_rc"
+    fi
+    if [[ ${#_MOLE_WALLPAPER_RENDERS[@]} -gt 0 ]]; then
+        safe_clean "${_MOLE_WALLPAPER_RENDERS[@]}" "Wallpaper agent cache"
+    fi
+    return 0
+}
+
 clean_app_caches() {
     # Every App Container handle probe in this section shares one wall-clock
     # budget, including the explicit Apple cache rows before the generic scan.
@@ -1097,7 +1188,7 @@ clean_app_caches() {
     stop_section_spinner
 
     # Sandboxed app caches
-    safe_clean ~/Library/Containers/com.apple.wallpaper.agent/Data/Library/Caches/* "Wallpaper agent cache"
+    _clean_wallpaper_renders || return $?
     safe_clean ~/Library/Containers/com.apple.mediaanalysisd/Data/Library/Caches/* "Media analysis cache"
     safe_clean ~/Library/Containers/com.apple.mediaanalysisd/Data/tmp/* "Media analysis temp files"
     safe_clean ~/Library/Containers/com.apple.AppStore/Data/Library/Caches/* "App Store cache"
@@ -1627,6 +1718,40 @@ _mole_external_volume_final_guard() {
         "$_MOLE_EXTERNAL_VOLUME_GUARD_TARGET_ID"
 }
 
+# Keep the normal failure short; retain every escaped diagnostic in the logs.
+_report_external_metadata_failure() {
+    local errors="$1" scan_rc="$2"
+    local detail="" first_detail=""
+    log_warning_to_file "External volume metadata cleanup stopped (exit $scan_rc)."
+    while IFS= read -r detail || [[ -n "$detail" ]]; do
+        [[ -n "$detail" ]] || continue
+        _mole_escape_log_value detail "$detail"
+        log_warning_to_file "$detail"
+        debug_log "$detail"
+        # The timeout wrapper writes its command trace to the same stderr.
+        if [[ -z "$first_detail" && "$detail" != '[TIMEOUT]'* ]]; then
+            first_detail="$detail"
+        fi
+    done < "$errors"
+    if [[ -n "$first_detail" ]]; then
+        printf '  %b%s%b\n' "$GRAY" "$(truncate_by_display_width "$first_detail" 320)" "$NC"
+    fi
+    local next_step=""
+    case "$first_detail" in
+        *'Permission denied'* | *'Operation not permitted'*)
+            next_step="Check this path's permissions and your terminal's disk access in System Settings."
+            ;;
+        *'No such file or directory'* | *'Device not configured'*)
+            next_step="Check that the external volume is still connected."
+            ;;
+        *)
+            _mole_escape_log_value next_step "$LOG_FILE"
+            next_step="Details: $next_step"
+            ;;
+    esac
+    printf '  %b%s%b\n' "$GRAY" "$next_step" "$NC"
+}
+
 clean_external_volume_target() {
     local volume="$1"
     [[ -d "$volume" ]] || return 1
@@ -1644,9 +1769,11 @@ clean_external_volume_target() {
     local _MOLE_EXTERNAL_VOLUME_PREVIOUS_FINAL_GUARD="${_MOLE_SAFE_REMOVE_FINAL_GUARD:-}"
     local _MOLE_SAFE_REMOVE_FINAL_GUARD="_mole_external_volume_final_guard"
 
+    # A volume Trash holds items the user can still restore from Finder, so
+    # it is never an OS-metadata target. Only temporary staging, .DS_Store and
+    # AppleDouble metadata are eligible here.
     local -a top_level_targets=(
         "$volume/.TemporaryItems"
-        "$volume/.Trashes"
     )
     local cleaned_count=0
     local total_size=0
@@ -1662,22 +1789,36 @@ clean_external_volume_target() {
     local metadata_scan_timeout="${MOLE_EXTERNAL_VOLUME_SCAN_TIMEOUT:-15}"
     [[ "$metadata_scan_timeout" =~ ^[0-9]+$ ]] || metadata_scan_timeout=15
     local metadata_scan_file=""
-    if ! metadata_scan_file=$(mktemp_file "external-volume-metadata"); then
+    local metadata_scan_errors=""
+    if ! metadata_scan_file=$(mktemp_file "external-volume-metadata") ||
+        ! metadata_scan_errors=$(create_temp_file); then
         stop_section_spinner
         echo -e "  ${YELLOW}${ICON_WARNING}${NC} External volume cleanup · ${GRAY}could not prepare scan, no changes${NC}"
         note_activity
         return 1
     fi
     local metadata_scan_rc=0
-    # Any nonzero find status fails the scan closed, and BSD find returns 1
-    # after a single unreadable directory. The volume metadata trees are
-    # root-owned on ownership-enabled volumes and never hold user AppleDouble
-    # files, so prune them rather than report a healthy volume as failed.
-    run_with_timeout "$metadata_scan_timeout" find -P "$volume" -xdev \
-        \( -path "$volume/.TemporaryItems" -o -path "$volume/.Trashes" \
-        -o -path "$volume/.Spotlight-V100" -o -path "$volume/.fseventsd" \
-        -o -path "$volume/.DocumentRevisions-V100" \) -prune -o \
-        -type f -name "._*" -print0 > "$metadata_scan_file" 2> /dev/null || metadata_scan_rc=$?
+    # Both metadata scans preserve these exact volume roots. Installation
+    # staging can be denied by macOS policy even with Full Disk Access.
+    # Escape find's pattern syntax so a volume name cannot change the scope.
+    local volume_pattern="${volume//\\/\\\\}"
+    volume_pattern="${volume_pattern//\*/\\*}"
+    volume_pattern="${volume_pattern//\?/\\?}"
+    volume_pattern="${volume_pattern//\[/\\[}"
+    local -a metadata_exclusions=(
+        -xdev \( -path "$volume_pattern/.TemporaryItems" -o -path "$volume_pattern/.Trashes"
+        -o -path "$volume_pattern/.Spotlight-V100" -o -path "$volume_pattern/.fseventsd"
+        -o -path "$volume_pattern/.DocumentRevisions-V100"
+        -o -path "$volume_pattern/.AppInstallationStaging" \) -prune -o
+    )
+    if [[ "$PROTECT_FINDER_METADATA" == "true" ]]; then
+        # The whitelist row protects Finder metadata as a whole, so no
+        # AppleDouble file is a candidate while it is active.
+        : > "$metadata_scan_file" || true
+    else
+        run_with_timeout "$metadata_scan_timeout" find -P "$volume" "${metadata_exclusions[@]}" \
+            -type f -name "._*" -print0 > "$metadata_scan_file" 2> "$metadata_scan_errors" || metadata_scan_rc=$?
+    fi
     if [[ $metadata_scan_rc -ne 0 ]]; then
         : > "$metadata_scan_file" || true
         stop_section_spinner
@@ -1688,6 +1829,7 @@ clean_external_volume_target() {
         else
             echo -e "  ${YELLOW}${ICON_WARNING}${NC} External volume cleanup · ${GRAY}scan failed, no changes${NC}"
         fi
+        _report_external_metadata_failure "$metadata_scan_errors" "$metadata_scan_rc"
         note_activity
         _mole_record_clean_cancellation "$metadata_scan_rc"
         return "$metadata_scan_rc"
@@ -1704,6 +1846,15 @@ clean_external_volume_target() {
         local target_parent_id="$_MOLE_PATH_SNAPSHOT_PARENT_ID"
         local target_id="$_MOLE_PATH_SNAPSHOT_TARGET_ID"
         if should_protect_path "$target_path" 2> /dev/null || is_path_whitelisted "$target_path" 2> /dev/null; then
+            continue
+        fi
+        # macOS may expose these roots as write/search-only directories. Keep
+        # them without sizing or removal; other eligible metadata can proceed.
+        if [[ ! -r "$target_path" || ! -x "$target_path" ]]; then
+            local kept_reason=""
+            _mole_escape_log_value kept_reason "External volume cleanup kept unreadable directory: $target_path"
+            log_warning_to_file "$kept_reason"
+            debug_log "$kept_reason"
             continue
         fi
 
@@ -1735,9 +1886,11 @@ clean_external_volume_target() {
 
     if [[ "$PROTECT_FINDER_METADATA" != "true" ]]; then
         local finder_rc=0
-        clean_ds_store_tree "$volume" "${volume_name} volume, .DS_Store" || finder_rc=$?
+        clean_ds_store_tree "$volume" "${volume_name} volume, .DS_Store" \
+            "$metadata_scan_errors" "${metadata_exclusions[@]}" || finder_rc=$?
         if [[ $finder_rc -ne 0 ]]; then
             stop_section_spinner
+            _report_external_metadata_failure "$metadata_scan_errors" "$finder_rc"
             _mole_record_clean_cancellation "$finder_rc"
             return "$finder_rc"
         fi
@@ -2267,7 +2420,7 @@ app_support_item_size_bytes() {
 
     if [[ -f "$item" && ! -L "$item" ]]; then
         local file_bytes
-        file_bytes=$(stat -f%z "$item" 2> /dev/null || echo "0")
+        file_bytes=$("$STAT_BSD" -f%z "$item" 2> /dev/null || echo "0")
         [[ "$file_bytes" =~ ^[0-9]+$ ]] || return 1
         printf '%s\n' "$file_bytes"
         return 0
@@ -3158,11 +3311,11 @@ _check_large_file_candidates_body() {
         local path="$1"
         local mtimes="" newest=""
         mtimes=$(run_with_timeout "$MOLE_TIMEOUT_SHORT_QUERY_SEC" \
-            command find "$path" -mindepth 1 -maxdepth 1 -exec stat -f '%m' {} + 2> /dev/null) || return 1
+            command find "$path" -mindepth 1 -maxdepth 1 -exec "$STAT_BSD" -f '%m' {} + 2> /dev/null) || return 1
         [[ -n "$mtimes" ]] || return 1
         newest=$(printf '%s\n' "$mtimes" | sort -n | tail -1)
         [[ "$newest" =~ ^[0-9]+$ ]] || return 1
-        date -r "$newest" '+%Y-%m-%d' 2> /dev/null || return 1
+        "$_DATE_CMD" -r "$newest" '+%Y-%m-%d' 2> /dev/null || return 1
     }
 
     # One row per large item: "label · size · path", with an optional date

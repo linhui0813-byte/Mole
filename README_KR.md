@@ -16,7 +16,7 @@
   <img src="./docs/img/big-mole.png" alt="Mole 정리 결과" width="1000" />
 </p>
 
-> 💡 이 저장소는 무료 오픈소스 CLI(`mo`)입니다. 네이티브 앱을 원한다면 [Mole for Mac](https://mole.fit/)을 별도로 내려받을 수 있습니다. 삭제 전 항목별 확인, 800개 이상 앱에서 테스트한 잔여 파일 정리, 유지보수, 디스크 단계별 분석, 실시간 상태 확인, 지원되는 Mac에서의 팬 제어를 제공합니다. `brew install mole`은 CLI만 설치합니다.
+> 💡 이 저장소는 무료 오픈소스 CLI(`mo`)입니다. 네이티브 앱을 원한다면 [Mole for Mac](https://mole.fit/)을 별도로 내려받을 수 있습니다. 삭제 전 항목별 확인, 800개 이상 앱에서 테스트한 잔여 파일 정리, 유지보수, 디스크 단계별 분석, 실시간 상태 확인, 지원되는 Mac에서의 팬 제어를 제공합니다. Windows용 네이티브 앱은 [Mole for Windows](https://mole.fit/ko/windows)입니다. `brew install mole`은 CLI만 설치합니다.
 
 ## 주요 기능
 
@@ -49,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/tw93/mole/main/install.sh | bash
 iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
 ```
 
-Mole은 Homebrew, 이 GitHub 저장소, Mac 앱용 [mole.fit](https://mole.fit/)에서만 배포됩니다. "Mole 기반"이라고 소개하는 다른 앱이나 인코딩된 명령을 터미널에 붙여 넣으라고 하는 사이트는 Mole과 관련이 없습니다.
+Mole은 Homebrew, 이 GitHub 저장소, Mac 앱과 Windows 앱용 [mole.fit](https://mole.fit/)에서만 배포됩니다. "Mole 기반"이라고 소개하는 다른 앱이나 인코딩된 명령을 터미널에 붙여 넣으라고 하는 사이트는 Mole과 관련이 없습니다.
 
 **주요 명령어**
 
@@ -62,6 +62,7 @@ mo analyze                   # 디스크 분석: 인터랙티브 디스크 용�
 mo status                    # 상태 모니터링: CPU, 메모리, 네트워크 및 하드웨어 실시간 대시보드
 mo purge                     # 프로젝트 정리: 개발 빌드 결과물(node_modules, target 등) 정리
 mo installer                 # 설치 파일 정리: 설치 파일 탐색 및 삭제
+mo slim                      # 앱 슬림화: 유니버설 앱의 Intel용 코드 제거
 
 mo touchid                   # 터미널 sudo용 Touch ID 지문 인증 설정
 mo completion                # 셸 Tab 키 자동완성 구성
@@ -80,6 +81,7 @@ mo uninstall --dry-run
 mo optimize --dry-run
 mo purge --dry-run
 mo installer --dry-run
+mo slim --dry-run
 mo history
 mo history --json
 
@@ -131,11 +133,12 @@ nix profile remove mole
 
 Mole은 파일을 삭제할 수 있으므로 경로를 검증하고, 공유 위치와 시스템 소유 위치를 보호하며, 필요할 때 확인을 요청합니다. 안전하게 변경할 수 있다고 확인할 수 없는 항목은 건너뛰거나 거부합니다.
 
-- `clean`, `uninstall`, `purge`, `installer`, `remove` 명령은 파일을 삭제하므로 먼저 `--dry-run`으로 확인하고 필요 시 `--debug`를 함께 사용하세요
+- `clean`, `uninstall`, `purge`, `installer`, `slim`, `remove` 명령은 파일을 삭제하므로 먼저 `--dry-run`으로 확인하고 필요 시 `--debug`를 함께 사용하세요
 - 일상적인 Mole 실행에는 **`sudo`가 필요하지 않으며**, 시스템 수준의 정리 작업에만 관리자 권한을 요청합니다
-- `mo analyze`에서 선택한 항목은 확인 후 macOS 휴지통으로 이동됩니다
+- `mo uninstall`, `mo analyze`, `mo slim`은 확인 후 삭제 항목을 기본적으로 휴지통으로 이동합니다. `clean`, `purge`, `installer`는 영구 삭제하며, `mo uninstall --permanent`는 휴지통을 거치지 않습니다
 - 정리 내역은 `~/Library/Logs/mole/operations.log`에 기록되며, `mo history`로 확인하거나 `MO_NO_OPLOG=1`로 비활성화할 수 있습니다
 - `mo clean --whitelist`로 보존할 캐시를 지정하거나 `mo optimize --whitelist`로 제외할 유지보수 작업을 관리하세요
+- 화이트리스트 파일을 읽을 수 없으면 `clean`, `purge`, `optimize`는 이를 무시하고 실행하지 않고 중단합니다
 
 취약점 신고 방법, 안전 경계, 현재 한계는 [SECURITY.md](SECURITY.md) 및 [SECURITY_AUDIT.md](SECURITY_AUDIT.md)를 참고하세요.
 
@@ -145,7 +148,7 @@ Mole은 파일을 삭제할 수 있으므로 경로를 검증하고, 공유 위�
 
 ### 심층 정리 (Clean)
 
-`mo clean`은 안전한 캐시, 로그, 임시 파일, 개발 도구 캐시 및 이미 삭제된 앱의 잔여 파일을 검사하고 정리하며, 기본적으로 휴지통을 비웁니다. 휴지통을 유지하려면 `mo clean --whitelist`에서 Trash를 선택하세요. 같은 메뉴에서 보존할 캐시도 지정할 수 있고, 선택한 항목은 `~/.config/mole/whitelist`에 저장됩니다. 직접 경로를 추가하려면 먼저 메뉴를 열고 Enter를 눌러 선택 항목을 저장한 뒤, 한 줄에 하나씩 경로를 추가하세요. 이 파일이 있으면 선택적 기본 규칙을 대체하며, 내장 안전 보호는 계속 적용됩니다.
+`mo clean`은 안전한 캐시, 로그, 임시 파일, 개발 도구 캐시 및 이미 삭제된 앱의 잔여 파일을 검사하고 정리하며, 기본적으로 `~/.Trash`를 비웁니다. 휴지통을 유지하려면 `mo clean --whitelist`에서 Trash를 선택하세요. 같은 메뉴에서 보존할 캐시도 지정할 수 있고, `/Volumes/*/.Trashes` 같은 볼륨 휴지통은 함께 비워지지 않습니다. 선택한 항목은 `~/.config/mole/whitelist`에 저장됩니다. 직접 경로를 추가하려면 먼저 메뉴를 열고 Enter를 눌러 선택 항목을 저장한 뒤, 한 줄에 하나씩 경로를 추가하세요. 이 파일이 있으면 선택적 기본 규칙을 대체하며, 내장 안전 보호는 계속 적용됩니다.
 
 ```text
 $ mo clean
@@ -181,7 +184,7 @@ Free space: 223.5GB (+4.5GB)
 
 `mo uninstall`은 설치된 앱과 함께 Mole이 해당 앱의 것으로 확인할 수 있는 관련 파일을 제거합니다. 같은 앱의 다른 설치본이 아직 사용하는 공유 파일은 보존됩니다. 이미 삭제된 앱의 경우 `mo clean`을 실행하여 남은 잔여물을 찾으세요.
 
-설정과 플러그인 등 개인 데이터는 기본적으로 보존됩니다. 삭제 미리보기에서 `D`를 누르면 삭제할 데이터 경로를 개별적으로 선택할 수 있습니다. 삭제 후 shell, Hook, MCP 설정에 삭제된 경로의 참조가 있으면 파일과 줄 번호만 표시하며, 설정은 수정하지 않습니다.
+설정과 플러그인 등 개인 데이터는 기본적으로 보존됩니다. 삭제 미리보기에서 `D`를 누르면 삭제할 데이터 경로를 개별적으로 선택할 수 있습니다. `mo uninstall --with-data`를 사용하면 브라우저 프로필과 App Group 컨테이너를 제외한 이 데이터가 미리 선택되고 미리보기에서 따로 표시되며, `D`로 원하는 경로를 계속 보존할 수 있습니다. 삭제 후 shell, Hook, MCP 설정에 삭제된 경로의 참조가 있으면 파일과 줄 번호만 표시하며, 설정은 수정하지 않습니다.
 
 ```text
 $ mo uninstall
@@ -223,30 +226,29 @@ Optimize
 PERFORMANCE DIAGNOSIS
   ✓ No sustained high-CPU bottleneck detected
 
-➤ DNS & Spotlight Check
-  → DNS cache flushed
-  → Spotlight index verified
-
 ➤ Finder Cache Refresh
   → QuickLook thumbnails refreshed
   → Icon services cache rebuilt
+
+➤ Network Cache Refresh
+  → DNS cache refreshed
 
 ➤ Database Optimization
   ◎ Close these apps before database optimization: Safari
 
 ➤ Disk Health
-  → Disk verify skipped (set MOLE_ENABLE_DISK_VERIFY=1 to enable)
+  → Disk verify skipped
 
 ======================================================================
 Optimization Complete
-Applied 3 optimizations
-14 unchanged | 3 skipped | 1 unavailable
+Applied 2 optimizations
+13 unchanged | 3 skipped | 1 unavailable
 ======================================================================
 ```
 
 ### 디스크 분석 (Analyze)
 
-`mo analyze`는 터미널 기반의 인터랙티브 디스크 탐색기입니다. 방향키와 Vim 단축키 탐색, 빠른 필터링, 다중 선택, Finder 미리보기 및 휴지통 이동을 지원합니다. 외장 드라이브는 기본 뷰에서 제외되며 `mo analyze /Volumes` 또는 특정 마운트 경로로 확인할 수 있습니다. `mo analyze /private/tmp`를 사용하면 자동 삭제 없이 임시 파일만 확인할 수 있습니다.
+`mo analyze`는 터미널 기반의 인터랙티브 디스크 탐색기입니다. 방향키와 Vim 단축키 탐색, 빠른 필터링, 다중 선택, Finder 미리보기 및 휴지통 이동을 지원합니다. 외장 드라이브는 기본 뷰에서 제외되며 `mo analyze /Volumes` 또는 특정 마운트 경로로 확인할 수 있습니다. `mo analyze /private/tmp`를 사용하면 자동 삭제 없이 임시 파일만 확인할 수 있습니다. 파일별 스캔에서는 모든 블록을 공유하는 APFS 클론을 한 번만 계산합니다. 폴더 크기를 빠르게 추정할 때는 공유 블록이 중복 계산될 수 있습니다.
 
 크기 뒤에 `+`가 붙은 항목은 부분 검사를 의미하며, `unknown`은 계산이 불가능했음을 나타냅니다. 일시적인 시간 초과로 중단된 결과는 기존 캐시를 덮어쓰지 않으므로 나중에 다시 검사하여 보완할 수 있습니다. macOS가 터미널의 읽기를 허용하지 않는 폴더는 접근 권한이 바뀔 때까지 부분 검사로 남습니다. 터미널에는 상위 30개 항목만 표시되므로 읽을 수 없는 항목이 목록 밖에 있을 수 있지만, 합계는 여전히 부분 검사로 표시됩니다. JSON 출력에는 모든 항목이 포함됩니다.
 
@@ -417,6 +419,10 @@ Removed 5 installers, freed 3.83GB
 ```
 
 </details>
+
+### 앱 슬림화 (Slim)
+
+`mo slim`은 Apple Silicon Mac에서 유니버설 앱에 포함된 Intel용 코드를 제거합니다. 본인 소유이면서 Developer ID로 서명된 앱과 각 앱의 Intel용 코드 용량을 보여 주고, 선택한 앱만 처리합니다. 각 앱은 먼저 복사본에서 정리되며, 메인 실행 파일과 자체 서명을 가진 중첩 코드만 대상으로 합니다. 복사본이 Apple Silicon용 코드를 유지하고 코드 서명과 Gatekeeper 검사를 통과해야만 원래 앱을 대체하며, 원래 앱은 휴지통으로 이동합니다. App Store 앱, Apple 앱, Rosetta를 사용하여 열도록 설정된 앱, 다른 사용자가 소유한 앱, 실행 중인 앱은 처리하지 않습니다. 개발 도구는 필요 없으며, 앱을 업데이트하면 Intel용 코드가 다시 생깁니다.
 
 ## 퀵 런처
 

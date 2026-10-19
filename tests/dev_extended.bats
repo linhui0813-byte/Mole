@@ -186,6 +186,7 @@ source "$PROJECT_ROOT/lib/clean/dev.sh"
 note_activity() { :; }
 pgrep() { return 1; }
 stat() { return 9; }
+STAT_BSD=stat
 safe_clean() { echo "UNEXPECTED_CLEAN:$*"; }
 clean_xcode_device_support "$HOME/UnreadableDeviceSupport" "iOS DeviceSupport"
 EOF
@@ -946,6 +947,100 @@ EOF
     [[ "$output" != *"Xcode documentation cache · stopped"* ]] || return 1
     [[ "$output" != *"already clean"* ]] || return 1
     [[ "$output" != *"UNEXPECTED_REMOVE"* ]]
+}
+
+@test "clean_xcode_documentation_cache keeps whitelisted indexes out of the skipped count" {
+    local doc_root mode
+    for mode in whitelist protect; do
+        doc_root="$HOME/DocumentationCacheSkipCount-$mode"
+        rm -rf "$doc_root"
+        mkdir -p "$doc_root"
+        touch "$doc_root/DeveloperDocumentation.index" "$doc_root/DeveloperDocumentation-16.0.index" "$doc_root/DeveloperDocumentation-15.0.index"
+        touch -t 202603010000 "$doc_root/DeveloperDocumentation.index"
+        touch -t 202602010000 "$doc_root/DeveloperDocumentation-16.0.index"
+        touch -t 202601010000 "$doc_root/DeveloperDocumentation-15.0.index"
+
+        run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_XCODE_DOCUMENTATION_CACHE_DIR="$doc_root" MODE="$mode" \
+            /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+note_activity() { :; }
+kept="$MOLE_XCODE_DOCUMENTATION_CACHE_DIR/DeveloperDocumentation-16.0.index"
+is_path_whitelisted() { [[ "$MODE" == whitelist && "$1" == "$kept" ]]; }
+should_protect_path() { [[ "$MODE" == protect && "$1" == "$kept" ]]; }
+has_sudo_session() { return 0; }
+_sim_runtime_size_kb() { echo 1; }
+_xcode_xctest_devices_process_running() { return 1; }
+safe_sudo_remove() { echo "REMOVE:$1"; }
+clean_xcode_documentation_cache
+EOF
+        [ "$status" -eq 0 ] || {
+            echo "$output"
+            return 1
+        }
+        [[ "$output" == *"Xcode documentation cache · removed 1 old indexes"* ]] || return 1
+        [[ "$output" == *"REMOVE:$doc_root/DeveloperDocumentation-15.0.index"* ]] || return 1
+        [[ "$output" != *"REMOVE:$doc_root/DeveloperDocumentation-16.0.index"* ]] || return 1
+        if [[ "$mode" == whitelist ]]; then
+            [[ "$output" != *"skipped"* ]] || return 1
+        else
+            [[ "$output" == *"Xcode documentation cache · skipped 1 protected items"* ]] || return 1
+        fi
+    done
+}
+
+@test "clean_xcode_system_coresimulator_caches keeps whitelisted entries out of the skipped count" {
+    local cache_root mode
+    for mode in whitelist protect; do
+        cache_root="$HOME/SystemCoreSimulatorSkipCount-$mode"
+        rm -rf "$cache_root"
+        mkdir -p "$cache_root/dyld" "$cache_root/metadata"
+
+        run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_XCODE_SYSTEM_CORESIMULATOR_CACHE_DIR="$cache_root" MODE="$mode" \
+            /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+note_activity() { :; }
+kept="$MOLE_XCODE_SYSTEM_CORESIMULATOR_CACHE_DIR/metadata"
+is_path_whitelisted() { [[ "$MODE" == whitelist && "$1" == "$kept" ]]; }
+should_protect_path() { [[ "$MODE" == protect && "$1" == "$kept" ]]; }
+_coresimulator_activity_state() { return 1; }
+has_sudo_session() { return 0; }
+get_path_size_kb() { echo 3; }
+safe_sudo_remove() { echo "REMOVE:$1"; }
+clean_xcode_system_coresimulator_caches
+EOF
+        [ "$status" -eq 0 ] || {
+            echo "$output"
+            return 1
+        }
+        [[ "$output" == *"REMOVE:$cache_root/dyld"* ]] || return 1
+        [[ "$output" != *"REMOVE:$cache_root/metadata"* ]] || return 1
+        if [[ "$mode" == whitelist ]]; then
+            [[ "$output" != *"skipped"* ]] || return 1
+        else
+            [[ "$output" == *"skipped 1 protected"* ]] || return 1
+        fi
+    done
+}
+
+@test "clean covers every DeviceSupport platform the Xcode uninstall sweep knows" {
+    local uninstall_platforms clean_platforms platform
+    # shellcheck disable=SC2016  # matches the literal $HOME in the source text
+    uninstall_platforms=$(sed -nE 's|.*"\$HOME/Library/Developer/Xcode/([A-Za-z]+) DeviceSupport".*|\1|p' \
+        "$PROJECT_ROOT/lib/core/app_protection.sh" | sort -u)
+    clean_platforms=$(sed -nE 's|^[[:space:]]*clean_xcode_device_support ~/Library/Developer/Xcode/([A-Za-z]+)\\ DeviceSupport .*|\1|p' \
+        "$PROJECT_ROOT/lib/clean/dev.sh" | sort -u)
+    [ -n "$uninstall_platforms" ] || return 1
+    [ -n "$clean_platforms" ] || return 1
+    for platform in $uninstall_platforms; do
+        if ! grep -qx "$platform" <<< "$clean_platforms"; then
+            echo "clean misses $platform DeviceSupport"
+            return 1
+        fi
+    done
 }
 
 @test "clean_xcode_device_support skips all deletion paths while build tooling owns it" {
@@ -1965,6 +2060,66 @@ EOF
     }
 }
 
+@test "clean_dev_mobile keeps a spinner up through every simctl probe and clears it before rows" {
+    local event_log="$HOME/simctl-spinner-events.log"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true \
+        EVENT_LOG="$event_log" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+check_android_ndk() { :; }
+clean_xcode_documentation_cache() { :; }
+clean_xcode_system_coresimulator_caches() { :; }
+clean_xcode_xctest_devices() { :; }
+clean_xcode_device_support() { :; }
+_xcode_safe_clean_guarded() { :; }
+safe_clean() { :; }
+note_activity() { :; }
+debug_log() { :; }
+xcrun() { :; }
+start_section_spinner() { printf 'spin:%s\n' "$1" >> "$EVENT_LOG"; }
+stop_section_spinner() { printf 'stop\n' >> "$EVENT_LOG"; }
+_resolve_simctl_developer_dir() {
+    _MOLE_SIMCTL_RESOLUTION_STATUS="ready"
+    _MOLE_SIMCTL_DEVELOPER_DIR="$HOME/Xcode.app/Contents/Developer"
+}
+_run_simctl() {
+    shift
+    printf 'simctl:%s\n' "$*" >> "$EVENT_LOG"
+    [[ "$*" == "list devices -j" ]] && printf '{"devices":{}}\n'
+    return 0
+}
+_simctl_orphan_runtime_rows() { printf 'R1\tiOS\t18.0\t22A1\t100\n'; }
+
+clean_dev_mobile >> "$EVENT_LOG"
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    grep -q '^simctl:' "$event_log" || return 1
+    grep -q 'Orphaned simulator runtime' "$event_log" || {
+        cat "$event_log"
+        return 1
+    }
+    # A cold CoreSimulatorService takes seconds per probe; any probe outside a
+    # spinner leaves the previous row on screen as if the run had stopped.
+    run awk '
+        /^spin:/ { active = 1; next }
+        /^stop$/ { active = 0; next }
+        /^simctl:/ { if (!active) { print "probe without spinner: " $0; bad = 1 }; next }
+        /Orphaned simulator runtime/ { if (active) { print "row under spinner: " $0; bad = 1 }; next }
+        END { if (active) { print "spinner left running"; bad = 1 }; exit bad }
+    ' "$event_log"
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        cat "$event_log"
+        return 1
+    }
+}
+
 @test "clean_dev_mobile continues cleanup when simctl is unavailable" {
     local tmp_bin
     tmp_bin="$HOME/simctl-unavailable-bin"
@@ -2212,6 +2367,86 @@ EOF
     [[ "$output" == *"DEBUG:simctl probe statuses: first=7 retry=124"* ]] || return 1
     [[ "$output" == *"DEBUG:simctl probe first stderr: ~/Library/Developer/private [31mprobe failed[0m"* ]] || return 1
     [[ "$output" != *"$HOME/Library/Developer/private"* ]] || return 1
+}
+
+@test "simctl stays untouched while Xcode first-launch setup is unfinished" {
+    local tmp_bin developer_dir call_log
+    tmp_bin="$HOME/first-launch-bin"
+    developer_dir="$HOME/Applications/Xcode.app/Contents/Developer"
+    call_log="$HOME/first-launch-simctl.log"
+    mkdir -p "$tmp_bin" "$developer_dir/usr/bin"
+
+    # simctl on an unfinished Xcode asks macOS to install CoreSimulator behind
+    # an administrator prompt; a cleanup run must not be what triggers it.
+    cat > "$developer_dir/usr/bin/xcodebuild" << 'XEOF'
+#!/bin/bash
+[[ "$*" == "-checkFirstLaunchStatus" ]] || exit 2
+exit "$FIRST_LAUNCH_STATUS"
+XEOF
+    cat > "$tmp_bin/xcrun" << 'XEOF'
+#!/bin/bash
+[[ "$*" == "--find simctl" ]] && exit 0
+printf '%s\n' "$*" >> "$SIMCTL_CALL_LOG"
+[[ "$*" == "simctl list devices booted -j" ]] && printf '{"devices":{}}\n'
+exit 0
+XEOF
+    cat > "$tmp_bin/xcode-select" << XEOF
+#!/bin/bash
+printf '%s\n' "$developer_dir"
+XEOF
+    chmod +x "$developer_dir/usr/bin/xcodebuild" "$tmp_bin/xcrun" "$tmp_bin/xcode-select"
+
+    local first_launch_status
+    for first_launch_status in 1 0 130; do
+        rm -f "$call_log"
+        run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$tmp_bin:$PATH" \
+            DRY_RUN=true FIRST_LAUNCH_STATUS="$first_launch_status" SIMCTL_CALL_LOG="$call_log" \
+            /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+unset DEVELOPER_DIR
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+check_android_ndk() { :; }
+clean_xcode_documentation_cache() { :; }
+clean_xcode_system_coresimulator_caches() { :; }
+clean_xcode_xctest_devices() { :; }
+clean_xcode_device_support() { :; }
+safe_clean() { :; }
+note_activity() { :; }
+debug_log() { :; }
+
+state=0
+_coresimulator_booted_device_state || state=$?
+echo "booted_state=$state"
+_MOLE_SIMCTL_RESOLUTION_STATUS=""
+mobile_rc=0
+clean_dev_mobile || mobile_rc=$?
+echo "mobile_rc=$mobile_rc"
+EOF
+        [ "$status" -eq 0 ] || {
+            echo "$output"
+            return 1
+        }
+        if [[ "$first_launch_status" == "130" ]]; then
+            # Ctrl-C during the check cancels instead of reading as unfinished.
+            [[ ! -e "$call_log" ]] || { cat "$call_log"; return 1; }
+            [[ "$output" == *"booted_state=130"* ]] || { echo "$output"; return 1; }
+            [[ "$output" == *"mobile_rc=130"* ]] || { echo "$output"; return 1; }
+        elif [[ "$first_launch_status" == "1" ]]; then
+            [[ ! -e "$call_log" ]] || {
+                echo "simctl ran while setup was unfinished:"
+                cat "$call_log"
+                return 1
+            }
+            [[ "$output" == *"booted_state=2"* ]] || return 1
+            [[ "$output" != *"simctl could not be resolved"* ]] || return 1
+            [[ "$output" == *"mobile_rc=0"* ]] || return 1
+        else
+            grep -q '^simctl list devices booted -j$' "$call_log" || return 1
+            grep -q '^simctl list devices unavailable$' "$call_log" || return 1
+            [[ "$output" == *"booted_state=1"* ]] || return 1
+        fi
+    done
 }
 
 @test "clean_dev_mobile uses the sole Xcode Beta candidate when CLT is selected (#1261)" {
@@ -2668,6 +2903,59 @@ EOF
             fi
         fi
     done
+}
+
+@test "clean_dev_mobile names a macOS privacy refusal from simctl delete unavailable" {
+    # On macOS 27 CoreSimulator cannot move a device's data folder and simctl
+    # says "You don't have permission" with an Operation not permitted cause.
+    # That is macOS refusing access, not a generic failure.
+    local udid="ABCDEF01-2345-6789-ABCD-EF0123456789"
+    local case_home="$HOME/simctl-delete-privacy"
+    mkdir -p "$case_home/Library/Developer/CoreSimulator/Devices/$udid"
+
+    run env HOME="$case_home" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false \
+        MOLE_CURRENT_COMMAND=clean MOLE_CLEAN_CANCEL_STATUS=0 \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+check_android_ndk() { :; }
+clean_xcode_documentation_cache() { :; }
+clean_xcode_system_coresimulator_caches() { :; }
+clean_xcode_xctest_devices() { :; }
+clean_xcode_device_support() { :; }
+safe_clean() { :; }
+get_path_size_kb() { echo "1"; }
+note_activity() { :; }
+debug_log() { :; }
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+cleanup_result_color_kb() { printf '%s' "$GREEN"; }
+xcrun() { :; }
+_resolve_simctl_developer_dir() {
+    _MOLE_SIMCTL_DEVELOPER_DIR="$HOME/Xcode.app/Contents/Developer"
+    _MOLE_SIMCTL_RESOLUTION_STATUS="ready"
+}
+_run_simctl() {
+    shift
+    case "$*" in
+        "list devices unavailable")
+            printf '    iPhone 16 (ABCDEF01-2345-6789-ABCD-EF0123456789) (Shutdown) (unavailable)\n'
+            return 0
+            ;;
+        "delete unavailable")
+            printf '%s\n' 'An error was encountered processing the command (domain=NSCocoaErrorDomain, code=513):' \
+                'Errors encountered while deleting multiple devices.' "You don’t have permission." >&2
+            return 1
+            ;;
+    esac
+    return 1
+}
+clean_dev_mobile
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Xcode unavailable simulators cleanup failed (macOS denied access)"* ]] || { echo "$output"; return 1; }
 }
 
 @test "clean_dev_mobile stops when simctl delete unavailable is interrupted" {

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"container/heap"
 	"context"
 	"encoding/gob"
 	"encoding/json"
@@ -70,7 +71,7 @@ func scanResultMsgFromMsg(t *testing.T, msg tea.Msg) (scanResultMsg, bool) {
 func drainLiveScanToResultMsg(t *testing.T, start liveScanStartMsg) scanResultMsg {
 	t.Helper()
 	if start.err != nil {
-		return scanResultMsg{path: start.path, err: start.err}
+		return scanResultMsg{id: start.id, path: start.path, err: start.err}
 	}
 	deadline := time.After(5 * time.Second)
 	for {
@@ -81,9 +82,9 @@ func drainLiveScanToResultMsg(t *testing.T, start liveScanStartMsg) scanResultMs
 			}
 			switch event.kind {
 			case liveScanComplete:
-				return scanResultMsg{path: start.path, result: event.result}
+				return scanResultMsg{id: start.id, path: start.path, result: event.result}
 			case liveScanFailed:
-				return scanResultMsg{path: start.path, err: event.err}
+				return scanResultMsg{id: start.id, path: start.path, err: event.err}
 			}
 		case <-deadline:
 			if start.cancel != nil {
@@ -115,6 +116,7 @@ func installBlockingDuProbe(t *testing.T) string {
 		t.Fatalf("write du stub: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	useDuStub(t, duStub)
 	t.Setenv("MOLE_TEST_DU_STARTED", started)
 	return started
 }
@@ -1808,24 +1810,18 @@ func TestCanceledCacheMutationsDoNotPublish(t *testing.T) {
 	}
 }
 
-func TestLiveScanSortConfigFromEnv(t *testing.T) {
-	t.Run("defaults to freeze on move", func(t *testing.T) {
-		t.Setenv(liveSortModeEnv, "")
+func TestLiveScanSortDefaultsToFreezeOnMove(t *testing.T) {
+	// The former MOLE_ANALYZE_LIVE_SORT override is gone; the s key is the
+	// only way to switch, so the environment must not change the default.
+	t.Setenv("MOLE_ANALYZE_LIVE_SORT", "continuous")
 
-		m := newModel(t.TempDir(), false)
-		if m.liveSortMode != liveSortFreezeOnMove {
-			t.Fatalf("expected freeze-on-move sort mode, got %v", m.liveSortMode)
-		}
-	})
-
-	t.Run("continuous remains available", func(t *testing.T) {
-		t.Setenv(liveSortModeEnv, "continuous")
-
-		m := newModel(t.TempDir(), false)
-		if m.liveSortMode != liveSortContinuous {
-			t.Fatalf("expected continuous sort mode, got %v", m.liveSortMode)
-		}
-	})
+	m := newModel(t.TempDir(), false)
+	if m.liveSortMode != liveSortFreezeOnMove {
+		t.Fatalf("expected freeze-on-move sort mode, got %v", m.liveSortMode)
+	}
+	if next := nextLiveSortMode(m.liveSortMode); next != liveSortContinuous {
+		t.Fatalf("expected the s toggle to reach continuous, got %v", next)
+	}
 }
 
 func TestLiveScanInitialListingShowsImmediateChildren(t *testing.T) {
@@ -2087,10 +2083,8 @@ func TestCanceledLiveScanPublishesNoResultsOrCache(t *testing.T) {
 	}
 	started := installBlockingDuProbe(t)
 
-	var filesScanned, dirsScanned, bytesScanned int64
-	currentPath := &atomic.Value{}
-	currentPath.Store("")
-	start, ok := startLiveScanCmd(root, &filesScanned, &dirsScanned, &bytesScanned, currentPath)().(liveScanStartMsg)
+	m := newModel(root, false)
+	start, ok := m.scanFreshCmd(root)().(liveScanStartMsg)
 	if !ok {
 		t.Fatal("expected live scan start message")
 	}
@@ -2415,8 +2409,10 @@ func TestLiveScanStartPreservesEntryFilterBackingList(t *testing.T) {
 
 	m := newModel(root, false)
 	m.entryFilter = "app"
+	_ = m.scanFreshCmd(root)
+	defer m.cancelLiveScan()
 	start := liveScanStartMsg{
-		id:   1,
+		id:   m.liveScanID,
 		path: root,
 		entries: []dirEntry{
 			{Name: "apps", Path: apps, Size: -1, IsDir: true},
@@ -3120,7 +3116,7 @@ func TestLoadCacheExpiresWhenDirectoryChanges(t *testing.T) {
 	if _, err := os.Stat(cachePath); err != nil {
 		t.Fatalf("stat cache: %v", err)
 	}
-	oldTime := time.Now().Add(-cacheModTimeGrace - time.Minute)
+	oldTime := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(cachePath, oldTime, oldTime); err != nil {
 		t.Fatalf("chtimes cache: %v", err)
 	}
@@ -3155,11 +3151,12 @@ func TestLoadCacheExpiresWhenDirectoryChanges(t *testing.T) {
 	}
 }
 
-// setChangedAfterRecentScan runs save while dir's mtime is 2h old, then moves
-// the mtime to now: past the grace window, with the scan only just recorded.
+// setChangedAfterRecentScan runs save while dir's mtime is a minute old, then
+// moves the mtime to now: a file added or removed right after the scan, as when
+// a user downloads something and reopens analyze.
 func setChangedAfterRecentScan(t *testing.T, dir string, save func()) {
 	t.Helper()
-	old := time.Now().Add(-2 * time.Hour)
+	old := time.Now().Add(-time.Minute)
 	if err := os.Chtimes(dir, old, old); err != nil {
 		t.Fatalf("chtimes %s: %v", dir, err)
 	}
@@ -3671,10 +3668,8 @@ func TestLiveScanKeepsUnavailableDirectoryAndPartialTotal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	var files, dirs, bytes int64
-	current := &atomic.Value{}
-	current.Store("")
-	msg := runScanResultCmd(t, startLiveScanCmd(root, &files, &dirs, &bytes, current))
+	m := newModel(root, false)
+	msg := runScanResultCmd(t, m.scanFreshCmd(root))
 	if msg.err != nil || msg.result.State != scanPartial || msg.result.TotalSize != 4096 {
 		t.Fatalf("live scan lost partial result: %+v", msg)
 	}
@@ -3738,10 +3733,16 @@ func TestPartialScanCoverageSurvivesEntryLimit(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 	m := newModel(root, false)
 	msg := runScanResultCmd(t, m.scanFreshCmd(root))
-	if msg.err != nil || msg.result.State != scanPartial || msg.result.TotalSize != int64(maxEntries*4096) || len(msg.result.Entries) != maxEntries {
-		t.Fatalf("limited view lost aggregate coverage: %+v", msg)
+	if msg.err != nil || msg.result.State != scanPartial || msg.result.TotalSize != int64(maxEntries*4096) || len(msg.result.Entries) != maxEntries+1 {
+		t.Fatalf("live listing lost entries or aggregate coverage: %+v", msg)
 	}
-	for _, entry := range msg.result.Entries {
+	// Recursive summaries still retain only the largest rows, while carrying
+	// aggregate coverage for the unavailable entries they leave out.
+	summary, err := scanPathConcurrent(context.Background(), root, m.filesScanned, m.dirsScanned, m.bytesScanned, m.currentPath)
+	if err != nil || summary.State != scanPartial || summary.TotalSize != msg.result.TotalSize || len(summary.Entries) != maxEntries {
+		t.Fatalf("bounded summary lost aggregate coverage: %+v, %v", summary, err)
+	}
+	for _, entry := range summary.Entries {
 		if entry.Path == locked {
 			t.Fatal("unknown entry displaced a larger measured entry")
 		}
@@ -4043,6 +4044,7 @@ func TestTransientPartialIsNotCachedAndDenialOnlyPartialIs(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", stubDir)
+			useDuStub(t, filepath.Join(stubDir, "du"))
 
 			var files, dirs, bytes int64
 			current := &atomic.Value{}
@@ -4115,6 +4117,33 @@ func TestPreviousSchemaCacheEntryIsRejected(t *testing.T) {
 	}
 	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
 		t.Fatalf("schema 4 entry was kept, stat err: %v", err)
+	}
+}
+
+func TestCacheSchemaSevenFromBeforeCloneDeduplicationIsRejected(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	target := filepath.Join(home, "target")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cachePath, err := getCachePath(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Schema 7 totals can still hold every APFS clone in full.
+	old := cacheEntry{TotalSize: 1 << 30, TotalFiles: 3, ModTime: time.Now(), ScanTime: time.Now(), SchemaVersion: 7}
+	if err := gob.NewEncoder(file).Encode(old); err != nil {
+		file.Close() //nolint:errcheck
+		t.Fatal(err)
+	}
+	file.Close() //nolint:errcheck
+	if entry, err := loadCacheFromDisk(target); err == nil {
+		t.Fatalf("schema 7 entry was accepted: %+v", entry)
 	}
 }
 
@@ -4384,7 +4413,7 @@ func TestTickLoopEntrypoints(t *testing.T) {
 		{"enter stale directory", func(m *model) {
 			m.cache[m.entries[0].Path] = historyEntry{NeedsRefresh: true}
 		}, tea.KeyMsg{Type: tea.KeyEnter}},
-		{"stale scan result", func(m *model) {}, scanResultMsg{stale: true}},
+		{"stale scan result", func(m *model) { m.liveScanID, m.path = 1, "/fixture" }, scanResultMsg{id: 1, path: "/fixture", stale: true}},
 		{"single delete", func(m *model) {
 			m.deleteConfirm, m.deleteTarget = true, &m.entries[0]
 		}, tea.KeyMsg{Type: tea.KeyEnter}},
@@ -4544,6 +4573,7 @@ func TestDeleteCancelsOverviewPublicationBeforeInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	useDuStub(t, filepath.Join(bin, "du"))
 	m := newModel("/", true)
 	m.entries = []dirEntry{{Name: "Project", Path: root, IsDir: true, Size: -1}, {Name: "Applications", Path: sibling, IsDir: true, Size: -1}}
 	batch := m.scheduleOverviewScans()().(tea.BatchMsg)
@@ -4667,7 +4697,8 @@ func TestCompletedScanCacheWritesRemainCancelable(t *testing.T) {
 			if live {
 				m.finishLiveScan(result)
 			} else {
-				updated, _ := m.Update(scanResultMsg{path: root, result: result})
+				_ = m.scanCmd(root)
+				updated, _ := m.Update(scanResultMsg{id: m.liveScanID, path: root, result: result})
 				m = updated.(model)
 			}
 			publication := m.cachePublications[root]
@@ -4766,8 +4797,9 @@ func TestDeleteAfterRefreshCancelsLiveScanBeforeCacheInvalidation(t *testing.T) 
 		t.Fatal("refresh during deletion was not scheduled")
 	}
 	canceled := false
+	refreshedID := m.liveScanID
 	updated, _ = m.Update(liveScanStartMsg{
-		id: 1, path: root, entries: result.Entries, totalSize: result.TotalSize,
+		id: refreshedID, path: root, entries: result.Entries, totalSize: result.TotalSize,
 		totalFiles: result.TotalFiles, events: make(chan liveScanEventMsg),
 		cancel: func() {
 			// Model a publication that won the lock just before cancellation.
@@ -4793,8 +4825,9 @@ func TestDeleteAfterRefreshCancelsLiveScanBeforeCacheInvalidation(t *testing.T) 
 	}
 	updated, _ = m.Update(deleteProgressMsg{done: true, count: 1, path: removed})
 	m = updated.(model)
-	if !canceled || m.liveScanCancel != nil {
-		t.Fatal("delete completion did not cancel the refreshed live scan")
+	defer m.cancelLiveScan()
+	if !canceled || m.liveScanID == refreshedID || m.liveScanID == 0 {
+		t.Fatal("delete completion did not cancel the refreshed scan and reserve its replacement")
 	}
 	if _, err := loadStoredOverviewSize(root); err == nil {
 		t.Error("live scan restored an overview snapshot after delete invalidation")
@@ -4846,5 +4879,222 @@ func TestOverviewPartialMarkerSitsRightOfAlignedUnits(t *testing.T) {
 	}
 	if len(unitColumn) != 2 || unitColumn["User Library"] != unitColumn["Applications"] {
 		t.Fatalf("partial and complete rows should share the unit column, got %v in:\n%s", unitColumn, ansi.Strip(m.View()))
+	}
+}
+
+// Rows of equal size must not swap places between scans, refreshes or --json
+// runs; the list a user is reading should hold still.
+func TestSortDirEntriesBySizeBreaksTiesByPath(t *testing.T) {
+	entries := []dirEntry{
+		{Name: "c", Path: "/x/c", Size: 100},
+		{Name: "a", Path: "/x/a", Size: 100},
+		{Name: "big", Path: "/x/big", Size: 500},
+		{Name: "b", Path: "/x/b", Size: 100},
+	}
+
+	sortDirEntriesBySize(entries)
+
+	want := []string{"/x/big", "/x/a", "/x/b", "/x/c"}
+	for i, path := range want {
+		if entries[i].Path != path {
+			t.Fatalf("row %d: got %s, want %s (all: %+v)", i, entries[i].Path, path, entries)
+		}
+	}
+}
+
+func TestSortFileEntriesBySizeBreaksTiesByPath(t *testing.T) {
+	files := []fileEntry{
+		{Name: "z", Path: "/f/z", Size: 7},
+		{Name: "y", Path: "/f/y", Size: 7},
+		{Name: "top", Path: "/f/top", Size: 9},
+	}
+
+	sortFileEntriesBySize(files)
+
+	want := []string{"/f/top", "/f/y", "/f/z"}
+	for i, path := range want {
+		if files[i].Path != path {
+			t.Fatalf("row %d: got %s, want %s", i, files[i].Path, path)
+		}
+	}
+}
+
+func TestOverviewSortBreaksTiesByPath(t *testing.T) {
+	m := model{entries: []dirEntry{
+		{Name: "b", Path: "/o/b", Size: 10},
+		{Name: "a", Path: "/o/a", Size: 10},
+	}}
+
+	m.sortOverviewEntriesBySize()
+
+	if m.entries[0].Path != "/o/a" || m.entries[1].Path != "/o/b" {
+		t.Fatalf("overview rows of equal size must order by path, got %+v", m.entries)
+	}
+}
+
+func TestSizeHeapsPopEqualSizesInPathOrderWhateverTheArrivalOrder(t *testing.T) {
+	popPaths := func(order []string) []string {
+		h := &entryHeap{}
+		heap.Init(h)
+		for _, path := range order {
+			heap.Push(h, dirEntry{Path: path, Size: 42})
+		}
+		popped := make([]string, 0, len(order))
+		for h.Len() > 0 {
+			popped = append(popped, heap.Pop(h).(dirEntry).Path)
+		}
+		return popped
+	}
+	first := popPaths([]string{"/p/a", "/p/b", "/p/c", "/p/d"})
+	second := popPaths([]string{"/p/d", "/p/b", "/p/a", "/p/c"})
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("pop order depends on arrival order: %v vs %v", first, second)
+		}
+	}
+
+	fileHeap := &largeFileHeap{}
+	heap.Init(fileHeap)
+	for _, path := range []string{"/q/c", "/q/a", "/q/b"} {
+		heap.Push(fileHeap, fileEntry{Path: path, Size: 5})
+	}
+	var filePaths []string
+	for fileHeap.Len() > 0 {
+		filePaths = append(filePaths, heap.Pop(fileHeap).(fileEntry).Path)
+	}
+	if filePaths[0] != "/q/c" || filePaths[2] != "/q/a" {
+		t.Fatalf("the later path must be evicted first, got %v", filePaths)
+	}
+}
+
+func TestTopLargeFilesKeepsEarlierEqualSizePathsAfterHeapFills(t *testing.T) {
+	files := make([]fileEntry, 0, maxLargeFiles+1)
+	for i := 0; i <= maxLargeFiles; i++ {
+		files = append(files, fileEntry{Path: fmt.Sprintf("/files/%04d", i), Size: 1 << 30})
+	}
+	forward := topLargeFiles(append([]fileEntry(nil), files...))
+	slices.Reverse(files)
+	backward := topLargeFiles(files)
+	for i := range forward {
+		if forward[i].Path != backward[i].Path {
+			t.Fatalf("arrival order changed selection: %s vs %s", forward[i].Path, backward[i].Path)
+		}
+	}
+}
+
+func TestLiveScanRejectsOlderSamePathStart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := newModel(t.TempDir(), false)
+	oldCmd := m.scanCmd(m.path)
+	newCmd := m.scanCmd(m.path)
+	newer := newCmd().(liveScanStartMsg)
+	next, _ := m.Update(newer)
+	m = next.(model)
+	older := oldCmd().(liveScanStartMsg)
+	next, _ = m.Update(older)
+	got := next.(model)
+	defer got.cancelLiveScan()
+	if got.liveScanID != newer.id {
+		t.Fatalf("older request replaced newest scan: got=%d newest=%d", got.liveScanID, newer.id)
+	}
+}
+
+func TestLiveScanRejectsStartAfterCancel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := newModel(t.TempDir(), false)
+	cmd := m.scanCmd(m.path)
+	m.cancelLiveScan()
+	start := cmd().(liveScanStartMsg)
+	if !errors.Is(start.err, context.Canceled) {
+		t.Fatalf("canceled command still enumerated directory: %v", start.err)
+	}
+	next, wait := m.Update(start)
+	got := next.(model)
+	defer got.cancelLiveScan()
+	if got.liveScanID != 0 || wait != nil {
+		t.Fatalf("canceled queued request became active: id=%d", got.liveScanID)
+	}
+}
+
+func TestLiveScanRejectsDelayedStartedRequest(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := newModel(t.TempDir(), false)
+	oldStart := m.scanCmd(m.path)().(liveScanStartMsg)
+	newerCmd := m.scanCmd(m.path)
+	newStart := newerCmd().(liveScanStartMsg)
+	next, _ := m.Update(newStart)
+	m = next.(model)
+	next, cmd := m.Update(oldStart)
+	got := next.(model)
+	defer got.cancelLiveScan()
+	if got.liveScanID != newStart.id || cmd != nil {
+		t.Fatal("delayed start superseded active request")
+	}
+}
+
+func TestLiveScanCurrentRequestCompletes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := newModel(t.TempDir(), false)
+	cmd := m.scanCmd(m.path)
+	next, wait := m.Update(cmd())
+	m = next.(model)
+	if wait == nil {
+		t.Fatal("current request did not start event delivery")
+	}
+	next, _ = m.Update(wait())
+	got := next.(model)
+	if got.scanning || got.liveScanID != 0 {
+		t.Fatalf("empty directory did not complete: scanning=%v id=%d", got.scanning, got.liveScanID)
+	}
+}
+
+func TestLiveScanVariantsRejectSupersededStart(t *testing.T) {
+	for _, bypass := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bypass=%t", bypass), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			m := newModel(t.TempDir(), false)
+			var older, newer tea.Cmd
+			if bypass {
+				older, newer = m.scanBypassingCacheCmd(m.path), m.scanBypassingCacheCmd(m.path)
+			} else {
+				older, newer = m.scanFreshCmd(m.path), m.scanFreshCmd(m.path)
+			}
+			next, _ := m.Update(newer())
+			m = next.(model)
+			id := m.liveScanID
+			next, wait := m.Update(older())
+			m = next.(model)
+			defer m.cancelLiveScan()
+			if id == 0 || m.liveScanID != id || wait != nil {
+				t.Fatal("older scan replaced current request")
+			}
+		})
+	}
+}
+
+func TestCachedScanRejectsSupersededResult(t *testing.T) {
+	for _, warmed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("warmed=%t", warmed), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			root := t.TempDir()
+			result := scanResult{TotalSize: 42, TotalFiles: 1}
+			if err := saveCacheToDiskWithOptions(newScanPublication(context.Background(), nil), root, result, warmed); err != nil {
+				t.Fatal(err)
+			}
+			m := newModel(root, false)
+			older := m.scanCmd(root)()
+			if _, ok := older.(scanResultMsg); !ok {
+				t.Fatalf("expected cached result, got %T", older)
+			}
+			next, _ := m.Update(m.scanFreshCmd(root)())
+			m = next.(model)
+			id := m.liveScanID
+			next, wait := m.Update(older)
+			m = next.(model)
+			defer m.cancelLiveScan()
+			if id == 0 || m.liveScanID != id || m.totalSize != 0 || wait != nil {
+				t.Fatal("cached result replaced the newer live scan")
+			}
+		})
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -285,5 +286,69 @@ func TestCollectBatteriesEnforcesTimeoutOnPMSet(t *testing.T) {
 	remaining := time.Until(observedDeadline)
 	if remaining <= 0 || remaining > time.Second {
 		t.Fatalf("expected deadline <= 1s in the future, got %v", remaining)
+	}
+}
+
+// macOS 27 moved the battery's gauge data under the AppleSmartBatteryPack child,
+// so the top-level AppleSmartBattery read has no Temperature key at all and the
+// card showed 0 C. The fixture mirrors that pack output; the lifetime block
+// comes first so a loose key match on MaximumTemperature would win.
+const batteryPackOutput = `
+  | |   "BatteryData" = {"LifetimeData"={"MaximumTemperature"=44,"AverageTemperature"=271,"MinimumTemperature"=13},"CycleCount"=66,"DesignCapacity"=8579,"Temperature"=3200,"VirtualTemperature"=3100,"Voltage"=12964}
+`
+
+func TestCollectThermalReadsBatteryPackWhenTopLevelHasNoTemperature(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("battery thermal collection is darwin-only")
+	}
+	origRunCmd := runCmd
+	t.Cleanup(func() { runCmd = origRunCmd })
+
+	runCmd = func(_ context.Context, name string, args ...string) (string, error) {
+		switch {
+		case name == "ioreg" && strings.Join(args, " ") == "-rn AppleSmartBattery":
+			return "  | |   \"SystemPowerIn\" = 19967\n", nil
+		case name == "ioreg" && strings.Join(args, " ") == "-rc AppleSmartBatteryPack -l":
+			return batteryPackOutput, nil
+		}
+		return "", errors.New("command not mocked")
+	}
+
+	thermal := collectThermal()
+
+	if math.Abs(thermal.BatteryTemp-32.0) > 0.001 {
+		t.Fatalf("expected battery temp 32 from the pack, got %v", thermal.BatteryTemp)
+	}
+	if math.Abs(thermal.SystemPower-19.967) > 0.001 {
+		t.Fatalf("top-level power must still be read, got %v", thermal.SystemPower)
+	}
+}
+
+func TestCollectThermalSkipsBatteryPackWhenTopLevelHasTemperature(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("battery thermal collection is darwin-only")
+	}
+	origRunCmd := runCmd
+	t.Cleanup(func() { runCmd = origRunCmd })
+
+	packRead := false
+	runCmd = func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "ioreg" && strings.Join(args, " ") == "-rc AppleSmartBatteryPack -l" {
+			packRead = true
+			return batteryPackOutput, nil
+		}
+		if name == "ioreg" {
+			return "  | |   \"Temperature\" = 3055\n", nil
+		}
+		return "", errors.New("command not mocked")
+	}
+
+	thermal := collectThermal()
+
+	if packRead {
+		t.Fatal("the pack read is a fallback and must not run when the top level has a temperature")
+	}
+	if math.Abs(thermal.BatteryTemp-30.55) > 0.001 {
+		t.Fatalf("expected the top-level 30.55, got %v", thermal.BatteryTemp)
 	}
 }

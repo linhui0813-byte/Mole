@@ -6,6 +6,7 @@ DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$DESKTOP_DIR/.." && pwd)"
 BUILD_DIR="$DESKTOP_DIR/build"
 APP_DIR="$BUILD_DIR/Mole Dashboard.app"
+"$DESKTOP_DIR/check-upstream.sh"
 mkdir -p "$BUILD_DIR/cache/go" "$BUILD_DIR/cache/swift" \
     "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Helpers" "$APP_DIR/Contents/Resources"
 
@@ -21,7 +22,7 @@ PY
 
 cd "$REPO_DIR"
 echo 'Building the read-only Mole collector...'
-CGO_ENABLED=0 GOCACHE="$BUILD_DIR/cache/go" go build -overlay "$BUILD_DIR/overlay.json" \
+CGO_ENABLED=0 GOWORK=off GOCACHE="$BUILD_DIR/cache/go" go build -overlay "$BUILD_DIR/overlay.json" \
     -trimpath -ldflags='-s -w' -o "$APP_DIR/Contents/Helpers/mole-dashboard-collector" ./cmd/status
 
 echo 'Building the native macOS window...'
@@ -48,7 +49,8 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
 PLIST
 
 cp "$REPO_DIR/LICENSE" "$APP_DIR/Contents/Resources/LICENSE"
-git rev-parse HEAD > "$APP_DIR/Contents/Resources/MoleSourceCommit.txt"
+cp "$DESKTOP_DIR/UPSTREAM_COMMIT" "$APP_DIR/Contents/Resources/MoleSourceCommit.txt"
+git rev-parse HEAD > "$APP_DIR/Contents/Resources/DashboardSourceCommit.txt"
 codesign --force --sign - "$APP_DIR/Contents/Helpers/mole-dashboard-collector"
 codesign --force --sign - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"

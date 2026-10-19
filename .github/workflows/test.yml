@@ -5,6 +5,7 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,7 +23,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install tools
-        run: brew install bats-core shellcheck coreutils parallel
+        # fd keeps tests/installer_fd.bats in the run: scripts/test.sh drops the
+        # whole file when fd is missing, which silently hid its 25 cases.
+        run: brew install bats-core shellcheck coreutils parallel fd
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -31,8 +34,10 @@ jobs:
 
       - name: Run test script
         env:
-          MOLE_PERF_BYTES_TO_HUMAN_LIMIT_MS: "6000"
-          MOLE_PERF_GET_FILE_SIZE_LIMIT_MS: "3000"
+          # The perf cases now time a plain child shell, not the Bats DEBUG
+          # trap, so these budgets can be tight enough to catch a new fork per
+          # call while still leaving several times the local measurement.
+          MOLE_PERF_BYTES_TO_HUMAN_LIMIT_MS: "1000"
           MOLE_PERF_NORMALIZE_PATHS_LIMIT_MS: "10000"
           MOLE_TEST_JOBS: "6"
           # Emits a "Slowest test files" table at the end of the run. Parallel

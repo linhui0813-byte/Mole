@@ -16,7 +16,7 @@
   <img src="./docs/img/big-mole.png" alt="Mole クリーンアップ結果" width="1000" />
 </p>
 
-> 💡 このリポジトリは無料のオープンソースCLI（`mo`）です。ネイティブアプリがよければ、[Mole for Mac](https://mole.fit/) を別途ダウンロードできます。削除前の項目別確認、800以上のアプリで検証済みの残留ファイル削除、メンテナンス、ディスクの階層分析、リアルタイムのステータス表示、対応Macでのファン制御を備えています。`brew install mole` でインストールされるのはCLIのみです。
+> 💡 このリポジトリは無料のオープンソースCLI（`mo`）です。ネイティブアプリがよければ、[Mole for Mac](https://mole.fit/) を別途ダウンロードできます。削除前の項目別確認、800以上のアプリで検証済みの残留ファイル削除、メンテナンス、ディスクの階層分析、リアルタイムのステータス表示、対応Macでのファン制御を備えています。Windowsのネイティブアプリは [Mole for Windows](https://mole.fit/ja/windows) です。`brew install mole` でインストールされるのはCLIのみです。
 
 ## 機能
 
@@ -49,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/tw93/mole/main/install.sh | bash
 iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
 ```
 
-Moleの配布元はHomebrew、このGitHubリポジトリ、Mac版の[mole.fit](https://mole.fit/)だけです。「Moleベース」をうたう別のアプリや、エンコードされたコマンドをターミナルに貼り付けるよう求めるサイトはMoleとは無関係です。
+Moleの配布元はHomebrew、このGitHubリポジトリ、Mac版とWindows版の[mole.fit](https://mole.fit/)だけです。「Moleベース」をうたう別のアプリや、エンコードされたコマンドをターミナルに貼り付けるよう求めるサイトはMoleとは無関係です。
 
 **主要コマンド**
 
@@ -62,6 +62,7 @@ mo analyze                   # ディスク分析：ディスク容量の内訳�
 mo status                    # 状態監視：CPU、メモリ、ネットワーク、ハードウェアの健康度ダッシュボード
 mo purge                     # プロジェクトクリーン：ビルド生成物（node_modules、targetなど）の整理
 mo installer                 # インストーラ整理：インストーラファイルの探索と削除
+mo slim                      # アプリのスリム化：ユニバーサルアプリの Intel 用コードを削除
 
 mo touchid                   # ターミナルsudo用Touch ID認証の設定
 mo completion                # シェル補完の設定
@@ -80,6 +81,7 @@ mo uninstall --dry-run
 mo optimize --dry-run
 mo purge --dry-run
 mo installer --dry-run
+mo slim --dry-run
 mo history
 mo history --json
 
@@ -131,11 +133,12 @@ nix profile remove mole
 
 Moleはファイルを削除できるため、パスを検証し、共有の場所やシステム所有の場所を保護し、必要な操作では確認を求めます。安全に変更できると確認できない項目は、スキップするか処理を拒否します。
 
-- `clean`、`uninstall`、`purge`、`installer`、`remove` はファイル削除を伴うため、事前に `--dry-run` で確認し、必要に応じて `--debug` を併用してください
+- `clean`、`uninstall`、`purge`、`installer`、`slim`、`remove` はファイル削除を伴うため、事前に `--dry-run` で確認し、必要に応じて `--debug` を併用してください
 - 通常利用では **`sudo` 不要** で、システム領域のクリーン時のみ必要に応じて管理者権限を要求します
-- `mo analyze` で選択した項目は、確認後にmacOSのゴミ箱へ移動されます
+- `mo uninstall`、`mo analyze`、`mo slim` は、確認後に削除項目を既定でゴミ箱へ移動します。`clean`、`purge`、`installer` は完全に削除し、`mo uninstall --permanent` はゴミ箱を経由しません
 - クリーンアップ履歴は `~/Library/Logs/mole/operations.log` に記録され、`mo history` で確認するか、`MO_NO_OPLOG=1` で無効化できます
 - `mo clean --whitelist` で保持したいキャッシュを保護し、`mo optimize --whitelist` で除外項目を設定できます
+- ホワイトリストファイルを読み取れない場合、`clean`、`purge`、`optimize` はそれなしで実行せずに停止します
 
 脆弱性の報告方法、安全上の境界、現在の制限は [SECURITY.md](SECURITY.md) および [SECURITY_AUDIT.md](SECURITY_AUDIT.md) をご覧ください。
 
@@ -145,7 +148,7 @@ Moleはファイルを削除できるため、パスを検証し、共有の場�
 
 ### ディープクリーン（Clean）
 
-`mo clean` は安全なキャッシュ、ログ、一時ファイル、開発ツールキャッシュ、アンインストール済みアプリの残留物を探索して削除します。既定でゴミ箱を空にするので、残したい場合は `mo clean --whitelist` で Trash を選択してください。同じメニューで保持したいキャッシュも保護でき、選択内容は `~/.config/mole/whitelist` に保存されます。独自のパスを追加する前に、メニューを開いてEnterで選択内容を保存し、そのあと1行に1パスずつ追記してください。ファイルが存在するとオプションの標準ルールは置き換えられますが、組み込みの安全保護は引き続き有効です。
+`mo clean` は安全なキャッシュ、ログ、一時ファイル、開発ツールキャッシュ、アンインストール済みアプリの残留物を探索して削除します。既定で `~/.Trash` を空にするので、残したい場合は `mo clean --whitelist` で Trash を選択してください。同じメニューで保持したいキャッシュも保護でき、`/Volumes/*/.Trashes` などのボリュームのゴミ箱は一緒には空になりません。選択内容は `~/.config/mole/whitelist` に保存されます。独自のパスを追加する前に、メニューを開いてEnterで選択内容を保存し、そのあと1行に1パスずつ追記してください。ファイルが存在するとオプションの標準ルールは置き換えられますが、組み込みの安全保護は引き続き有効です。
 
 ```text
 $ mo clean
@@ -181,7 +184,7 @@ Free space: 223.5GB (+4.5GB)
 
 `mo uninstall` はインストール済みアプリと、Moleがそのアプリのものだと特定できる関連ファイルを削除します。同じアプリの別のインストールがまだ使っている共有ファイルは保持されます。アプリがすでに削除済みの場合は、`mo clean` で残留ファイルを探せます。
 
-設定やプラグインなどの個人データは標準で保持されます。削除プレビューで `D` を押すと、削除するデータのパスを個別に選べます。削除後、shell・Hook・MCP 設定に削除済みパスへの参照が見つかった場合は、ファイル名と行番号だけを表示し、設定は変更しません。
+設定やプラグインなどの個人データは標準で保持されます。削除プレビューで `D` を押すと、削除するデータのパスを個別に選べます。`mo uninstall --with-data` を使うと、ブラウザのプロファイルと App Group コンテナを除くこれらのデータが最初から選択され、プレビューでは別枠で表示されます。`D` で任意のパスを残すこともできます。削除後、shell・Hook・MCP 設定に削除済みパスへの参照が見つかった場合は、ファイル名と行番号だけを表示し、設定は変更しません。
 
 ```text
 $ mo uninstall
@@ -223,30 +226,29 @@ Optimize
 PERFORMANCE DIAGNOSIS
   ✓ No sustained high-CPU bottleneck detected
 
-➤ DNS & Spotlight Check
-  → DNS cache flushed
-  → Spotlight index verified
-
 ➤ Finder Cache Refresh
   → QuickLook thumbnails refreshed
   → Icon services cache rebuilt
+
+➤ Network Cache Refresh
+  → DNS cache refreshed
 
 ➤ Database Optimization
   ◎ Close these apps before database optimization: Safari
 
 ➤ Disk Health
-  → Disk verify skipped (set MOLE_ENABLE_DISK_VERIFY=1 to enable)
+  → Disk verify skipped
 
 ======================================================================
 Optimization Complete
-Applied 3 optimizations
-14 unchanged | 3 skipped | 1 unavailable
+Applied 2 optimizations
+13 unchanged | 3 skipped | 1 unavailable
 ======================================================================
 ```
 
 ### ディスク分析（Analyze）
 
-`mo analyze` はターミナル内で動作するインタラクティブなディスク探索ツールです。矢印キーやVimキーバインドでの移動、絞り込み、複数選択、Finderプレビュー、ゴミ箱への移動に対応しています。外付けドライブは通常画面から除外されており、`mo analyze /Volumes` または特定のマウントパスで確認できます。`mo analyze /private/tmp` を使うと、ユーザー所有の一時ファイルを自動クリーンアップの対象にせずに確認できます。
+`mo analyze` はターミナル内で動作するインタラクティブなディスク探索ツールです。矢印キーやVimキーバインドでの移動、絞り込み、複数選択、Finderプレビュー、ゴミ箱への移動に対応しています。外付けドライブは通常画面から除外されており、`mo analyze /Volumes` または特定のマウントパスで確認できます。`mo analyze /private/tmp` を使うと、ユーザー所有の一時ファイルを自動クリーンアップの対象にせずに確認できます。ファイル単位のスキャンでは、すべてのブロックを共有するAPFSクローンを1回だけ計上します。フォルダの高速推計では共有ブロックが重複して計上される場合があります。
 
 サイズの末尾に `+` が付く場合は部分スキャンで計測できたバイト数、`unknown` はサイズを計測できなかったことを示します。タイムアウトなど一時的な失敗で中断した結果は、完全なキャッシュ済みの計測値を上書きせず、後の再スキャンで欠けたデータを補えます。macOSがターミナルからの読み取りを許可しないフォルダは、アクセス権が変わるまで部分スキャンのままです。ターミナルの一覧は大きい順に30件までなので、読み取れない項目が一覧から外れることがありますが、その場合も合計は部分スキャンとして表示されます。ディレクトリのJSON出力にはスキャンしたすべての項目が含まれます。
 
@@ -417,6 +419,10 @@ Removed 5 installers, freed 3.83GB
 ```
 
 </details>
+
+### アプリのスリム化（Slim）
+
+`mo slim` は Apple Silicon Mac で、ユニバーサルアプリに含まれる Intel 用コードを削除します。自分が所有し Developer ID で署名されたアプリと、それぞれの Intel 用コードのサイズを一覧表示し、選択したアプリだけを処理します。各アプリはまずコピー上でスリム化され、対象はメイン実行ファイルと独自の署名を持つ入れ子のコードに限られます。コピーが Apple Silicon 用コードを保ち、コード署名と Gatekeeper の検証に通った場合にのみ元のアプリと置き換え、元のアプリはゴミ箱へ移動します。App Store のアプリ、Apple のアプリ、Rosetta を使用して開く設定のアプリ、他のユーザーが所有するアプリ、実行中のアプリは処理しません。開発ツールは不要で、アプリをアップデートすると Intel 用コードは元に戻ります。
 
 ## クイックランチャー
 
