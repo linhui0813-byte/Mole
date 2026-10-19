@@ -28,7 +28,7 @@ if ! git -C "$REPO_DIR" cat-file -e "$upstream_commit^{commit}" 2> /dev/null; th
     exit 1
 fi
 
-if git -C "$REPO_DIR" diff --no-ext-diff --no-textconv --quiet "$upstream_commit" -- . ':(exclude)desktop/'; then
+if git -C "$REPO_DIR" diff --no-ext-diff --no-textconv --quiet "$upstream_commit" -- . ':(exclude)desktop/' ':(exclude)AGENTS.md'; then
     :
 else
     comparison_status=$?
@@ -42,6 +42,32 @@ else
     fi
     exit 1
 fi
+
+# Only an appended, marked fork policy may differ in the upstream agent guide.
+python3 - "$REPO_DIR" "$upstream_commit" << 'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+root, pin = sys.argv[1:]
+try:
+    baseline = subprocess.run(["git", "-C", root, "show", f"{pin}:AGENTS.md"],
+                              check=True, capture_output=True).stdout
+    path = Path(root) / "AGENTS.md"
+    current = path.read_bytes() if not path.is_symlink() else b""
+except (OSError, subprocess.CalledProcessError):
+    current, baseline = None, b""
+start = b"\n<!-- mole-dashboard-fork:start -->\n"
+end = b"<!-- mole-dashboard-fork:end -->\n"
+valid = current == baseline
+if current is not None and current.count(start) == 1 and current.count(end) == 1:
+    original, policy = current.split(start)
+    valid = original == baseline and policy.endswith(end)
+if not valid:
+    print("[agent-policy-diff] AGENTS.md differs beyond its appended dashboard policy.", file=sys.stderr)
+    print("Restore the upstream text; keep fork rules in one marked section at the end.", file=sys.stderr)
+    sys.exit(1)
+PY
 
 # Untracked Go files can be compiled even when Git ignores them. Include those
 # files in this check, while leaving unrelated files such as .vmark/ alone.
@@ -57,4 +83,4 @@ if [[ -n "$extra_sources" ]]; then
     printf '%s\n' 'Move fork-specific source into desktop/, then retry the build.' >&2
     exit 1
 fi
-printf 'Upstream core matches %s; dashboard changes stay in desktop/.\n' "$upstream_commit"
+printf 'Upstream core matches %s; only desktop/ and the appended dashboard policy may differ.\n' "$upstream_commit"

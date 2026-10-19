@@ -15,6 +15,12 @@ class UpstreamIsolation(unittest.TestCase):
         (self.root / "desktop").mkdir()
         (self.root / "cmd/status").mkdir(parents=True)
         (self.root / "cmd/status/metrics.go").write_text("package main\n")
+        self.agents = self.root / "AGENTS.md"
+        self.upstream_rules = "# Upstream rules\n\nPreserve the execution core.\n"
+        self.fork_rules = ("\n<!-- mole-dashboard-fork:start -->\n"
+                           "## Dashboard delivery\n\nCommit, push, and deploy.\n"
+                           "<!-- mole-dashboard-fork:end -->\n")
+        self.agents.write_text(self.upstream_rules)
         self.git("init", "-q")
         self.git("config", "user.name", "Fixture")
         self.git("config", "user.email", "fixture@example.invalid")
@@ -22,7 +28,7 @@ class UpstreamIsolation(unittest.TestCase):
         hooks = self.root / "empty-hooks"
         hooks.mkdir()
         self.git("config", "core.hooksPath", str(hooks))
-        self.git("add", "cmd")
+        self.git("add", "cmd", "AGENTS.md")
         self.git("commit", "-qm", "upstream fixture")
         self.pin = self.git("rev-parse", "HEAD").stdout.strip()
         self.pin_file = self.root / "desktop/UPSTREAM_COMMIT"
@@ -54,6 +60,24 @@ class UpstreamIsolation(unittest.TestCase):
         self.check_guard("core-diff")
         self.git("add", "cmd")
         self.check_guard("core-diff")
+
+    def test_appended_fork_policy_is_allowed_in_worktree_and_index(self):
+        self.agents.write_text(self.upstream_rules + self.fork_rules)
+        self.check_guard()
+        self.git("add", "AGENTS.md")
+        self.check_guard()
+
+    def test_fork_policy_cannot_hide_changed_upstream_instructions(self):
+        for text in (self.upstream_rules.replace("Preserve", "Rewrite"),
+                     self.upstream_rules.replace("Preserve", "Rewrite") + self.fork_rules,
+                     self.upstream_rules + self.fork_rules + "Extra instructions\n",
+                     self.upstream_rules + self.fork_rules + self.fork_rules,
+                     self.upstream_rules + self.fork_rules.replace("fork:end", "fork:broken")):
+            with self.subTest(text=text):
+                self.agents.write_text(text)
+                self.check_guard("agent-policy-diff")
+        self.agents.unlink()
+        self.check_guard("agent-policy-diff")
 
     def test_untracked_and_ignored_go_source_are_refused(self):
         extra = self.root / "cmd/status/local.go"

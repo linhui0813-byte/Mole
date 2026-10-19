@@ -49,14 +49,17 @@ The additional dashboard source lives in this directory.
 
 The execution and metric-collection code comes from **Mole CLI (macOS)** at
 `tw93/Mole`. Our code lives entirely in `desktop/`, including any compatibility
-adapter needed by the graphical dashboard. Keep the upstream root documentation,
-CLI entrypoint, `lib/`, `cmd/`, `internal/`, tests, and dependencies unchanged.
+adapter needed by the graphical dashboard. The sole root-file exception is the
+marked dashboard delivery policy appended to `AGENTS.md`; its upstream text
+stays unchanged. Keep the other upstream root documentation, CLI entrypoint,
+`lib/`, `cmd/`, `internal/`, tests, and dependencies unchanged.
 
 - `main` follows `upstream/main` by fast-forward only.
 - `native-dashboard` merges those upstream updates and owns the desktop app.
 - `desktop/UPSTREAM_COMMIT` records the exact upstream snapshot in use.
 - `desktop/check-upstream.sh` refuses a build if files outside `desktop/` differ
-  from that snapshot, or extra Go files could enter the collector build.
+  from that snapshot, except the appended policy above, or extra Go files could
+  enter the collector build. Edits to the upstream agent instructions still fail.
 - The build compiles the collector from the merged upstream source. It does not
   copy and maintain a second version of the engine.
 
@@ -79,11 +82,22 @@ git rev-parse upstream/main > desktop/UPSTREAM_COMMIT
 
 Run the dashboard checks below and the repository's required checks before
 committing the merge. Adapt only files inside `desktop/` if compatibility work
-is needed. Then push `main` and `native-dashboard` to `origin`, our GitHub fork.
+is needed. Then push `native-dashboard` to `origin`, our GitHub fork. Publishing
+an update to the fork's default `main` branch requires separate authorization.
 The official `upstream` remote remains the source of core updates.
 
 See [the integration status](UPSTREAM_STATUS.md) for the current source pin,
 verification evidence, and known upstream test limitations.
+
+## Automatic dashboard delivery
+
+The appended policy in [AGENTS.md](../AGENTS.md) gives agents standing
+authorization to validate, commit, push, and deploy every completed dashboard
+update. Stage only the reviewed dashboard and accompanying policy changes,
+push `origin/native-dashboard`, then quit the app, rebuild that committed
+revision, and reopen the local `desktop/build/Mole Dashboard.app`. Verify the
+bundled source commit, signature, and live readings before reporting deployment.
+Keep unrelated work intact and report any blocked stage separately.
 
 ## Verification
 

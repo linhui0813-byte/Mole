@@ -170,3 +170,15 @@ golangci-lint run ./cmd/...
 The Windows CLI on the `windows` branch publishes its own `V<x.y.z>-windows` releases in this repository, always with `make_latest: false`, so `releases/latest` and the README version badge stay on macOS. Anything here that resolves a release from tags must accept only plain `V<x.y.z>`: `sort -V` ranks `V1.60.0-windows` above `V1.60.0`. Locked by `get_latest_release_tag_from_git ignores Windows CLI tags` in `tests/install_checksum.bats`.
 
 Tag-driven flow via `release.yml` on capital-`V` tag pushes. The full release runbook (distribution channels, pre-flight checklist, tag/publish commands, curated notes handoff, release-only pitfalls) lives in `.claude/skills/release-flow/SKILL.md`; read it before starting any release-flavored task. Notes formatting stays owned by `.claude/skills/release-notes/SKILL.md`. One rule that always applies: restate which distribution channels a release-flavored run will touch and confirm with the maintainer before acting; channel scope is specified by the maintainer, never inferred.
+
+<!-- mole-dashboard-fork:start -->
+## Dashboard delivery in Hui's fork
+
+**Automatically commit, push, and deploy every completed dashboard change or update.** Hui gives standing authorization for this workflow; carry it through without another confirmation so the running app matches the delivered source.
+
+1. Keep dashboard source, adapters, tests, and documentation in `desktop/`. Preserve the upstream execution code and instructions; the sole root-file exception is this marked, appended policy section in `AGENTS.md`. Keep `CLAUDE.md` as its symlink.
+2. Run `./desktop/check-upstream.sh`, `python3 desktop/Tests/test_upstream_isolation.py`, and the build and affected checks in `desktop/README.md`, plus the repository checks required above. Distinguish the reproduced upstream failure documented in `desktop/UPSTREAM_STATUS.md` from new failures; report it without changing the core or weakening an assertion.
+3. Review and commit only the dashboard change and its accompanying policy edits, preserving unrelated staged, modified, and untracked files. Push the commit to `origin` on `native-dashboard` and verify the remote commit matches. Use Hui's configured Git identity. This authorization covers this policy's maintenance; pushes to `main`, `upstream`, or release tags require separate authorization.
+4. Deploy locally: preserve a copy of the last verified app, quit the running dashboard, rebuild the committed revision with `./desktop/build.sh`, and reopen `desktop/build/Mole Dashboard.app`. Verify its bundled `DashboardSourceCommit.txt` equals the pushed commit, its signature passes, and the native window shows live readings. Deployment means this local Mac app; public distribution and system-wide installation require a separate request.
+5. Report the commit, push, and deployment results. If a new required check, push, build, or live verification fails, fix the scoped cause and retry; if it remains blocked, state the failed stage and retain the last verified app rather than claiming completion.
+<!-- mole-dashboard-fork:end -->

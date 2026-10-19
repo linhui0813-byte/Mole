@@ -8,7 +8,9 @@ Reviewed on 2026-10-19.
 - Destination: the independent local dashboard in `desktop/`, branch
   `native-dashboard` of `linhui0813-byte/Mole`.
 - Synchronization: **Implemented**. All tracked files outside `desktop/` match
-  the pinned upstream snapshot. Fork-specific code and compatibility work stay
+  the pinned upstream snapshot except the marked dashboard delivery policy
+  appended to `AGENTS.md`. The upstream instructions remain intact, and the
+  guard rejects changes to them. Fork-specific code and compatibility work stay
   in `desktop/`.
 - This is a source update and a verified local development build, not a release
   of the commercial Mole Mac app or a newly published binary.
@@ -28,6 +30,12 @@ Reviewed on 2026-10-19.
   source-audit case below failed. Go tests, module loading, integration, and
   installation stages passed. This snapshot must not be described as having
   a fully passing suite.
+- Delivery-policy verification: all seven dashboard isolation tests passed,
+  including the appended-policy boundary. The full normal-access rerun exited
+  1: the unit stage failed on the known audit case and `run_with_timeout: shell
+  fallback cleans up watchdog sleep`. The watchdog case passed when rerun alone
+  after an earlier sandbox-restricted test run finished. Go tests, module loading,
+  integration, and installation passed again; the full rerun remains a failed run.
 
 ## Known upstream audit failure
 
