@@ -35,9 +35,53 @@ it. The menu also shows collection status and CPU/memory readings, with
 **Quit Mole Dashboard**. Reopening a paused dashboard preserves the pause.
 Pause stops collection; Resume and Reconnect start a fresh collector. Quit
 stops the app and its helper; the helper also exits if its parent disappears.
-There is no login item, launch agent, network server, telemetry, cleanup,
-process termination, or fan control. Subprocesses use fixed arguments and
-no authorization prompts.
+There is no login item, launch agent, network server, telemetry,
+process termination, or fan control. Clean is an explicit user action described
+below. Subprocesses use fixed arguments and never request administrator access.
+
+## Clean
+
+Choose **Clean**, then **Scan**. Review exact paths and scan-estimated sizes,
+select individual items or categories, and choose **Move selected to Trash…**.
+A confirmation shows the selected count and size before execution. Nothing is
+selected automatically. Files in Trash still occupy disk space until the user
+empties Trash in Finder. Clean never empties it or falls back to permanent deletion.
+
+This first version covers the existing upstream user-cache and log targets:
+immediate children of `~/Library/Caches`, `~/Library/Logs` (keeping the report
+directory and Mole history), and the contents of the two user diagnostic-report
+directories. It excludes system/admin cleanup, app leftovers, sandbox/group
+containers, browser profiles, developer/package-manager stores, snapshots,
+recent-item preferences, mail attachments, downloads, and external volumes.
+It does not claim full Clean parity with the commercial Mac app or CLI.
+
+The native adapter keeps an opaque, private plan in its helper process. Only
+IDs from that scan can be executed; plans expire after 15 minutes and are
+consumed by one execution attempt. Paths, parent identities, target identities,
+whitelists, Deno roots, and protection policy are checked again for each selected
+item. The upstream target-specific live-owner and SQLite probes remain in preview
+and at the final Trash guard; unknown required evidence keeps that target. A scoped
+adapter extends that guard with Deno and parent checks. All moves use upstream `mole_delete`
+with Trash mode. The bundled native `trash` transport uses the macOS Trash API;
+it adds no deletion policy or permanent fallback. Outcomes retain moved, kept,
+unverified, and unprocessed items separately. Successful moves and refusals use
+Mole's operation log. An uncertain move stops later items.
+
+Unknown required visibility, inaccessible paths, symlinks, incomplete sizes, and
+known active caches/databases are kept. Ordinary disposable logs use upstream's
+existing policy without imposing an unrelated administrator-visibility gate.
+A scan has four bounded workers, a two-minute budget, and a 1,000-entry cap;
+partial results retain only completed item checks and are labeled. A cancelled
+scan cannot authorize cleaning. Stop cancels
+the current subprocess and prevents later moves. If stopping interrupts a move,
+the app marks its outcome unverified. Check the original path and Trash before
+trying again. Dashboard verification does not clean existing user files; action tests
+use a temporary HOME, mocked process visibility, and a fixture Trash directory.
+
+The build packages an unmodified snapshot of `bin/clean.sh` and `lib/` from the
+upstream pin, plus our adapter. These generated resources use hidden directories
+so upstream repository checks do not rescan bundled shell copies under an app
+path containing spaces. The engine source remains maintained only upstream.
 
 The app icon, header, and About panel reuse the original Mole mascot from
 `docs/img/mole-banner.png`; the menu bar uses its monochrome silhouette so macOS
@@ -115,6 +159,9 @@ Keep unrelated work intact and report any blocked stage separately.
 
 ```bash
 python3 desktop/Tests/test_upstream_isolation.py
+MOLE_TEST_NO_AUTH=1 go test -race ./desktop/cleaner
+shellcheck --rcfile .shellcheckrc desktop/Engine/clean.sh desktop/build.sh
+python3 desktop/Tests/check_clean_bundle.py
 MOLE_TEST_NO_AUTH=1 go test ./cmd/status
 python3 desktop/Tests/collector_smoke.py
 xcrun swiftc -swift-version 5 -parse-as-library \
@@ -133,3 +180,11 @@ reopening the window, preserving Pause across reopening, live collection with
 the window closed, Reconnect replacing exactly one helper, and Quit stopping
 both processes. The generated app icon includes 1024-pixel artwork, and the
 menu template has a transparent background and solid mascot pixels.
+
+Clean tests run the actual adapter and upstream funnel against fixture files:
+selected-only recoverable moves, paths with spaces/quotes/Unicode, operation
+logging, changed target/parent identities, new whitelist protection, redirected
+roots, Deno protection, open/unknown handles, final-sink rechecks, expiry, stale
+IDs, duplicate IDs, cancellation, and protocol plan consumption. Native testing
+covers scan progress, selection, confirmation cancellation, stopping and rescanning;
+it does not perform a real cleanup of this Mac.

@@ -8,7 +8,7 @@ BUILD_DIR="$DESKTOP_DIR/build"
 APP_DIR="$BUILD_DIR/Mole Dashboard.app"
 "$DESKTOP_DIR/check-upstream.sh"
 mkdir -p "$BUILD_DIR/cache/go" "$BUILD_DIR/cache/swift" \
-    "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Helpers" "$APP_DIR/Contents/Resources"
+    "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Helpers/TrashTool" "$APP_DIR/Contents/Resources/.Clean"
 
 echo 'Preparing the upstream Mole artwork...'
 xcrun swiftc -O -module-cache-path "$BUILD_DIR/cache/swift" \
@@ -32,6 +32,17 @@ cd "$REPO_DIR"
 echo 'Building the read-only Mole collector...'
 CGO_ENABLED=0 GOWORK=off GOCACHE="$BUILD_DIR/cache/go" go build -overlay "$BUILD_DIR/overlay.json" \
     -trimpath -ldflags='-s -w' -o "$APP_DIR/Contents/Helpers/mole-dashboard-collector" ./cmd/status
+
+echo 'Building the selected-item Clean adapter...'
+CGO_ENABLED=0 GOWORK=off GOCACHE="$BUILD_DIR/cache/go" go build -trimpath -ldflags='-s -w' \
+    -o "$APP_DIR/Contents/Helpers/mole-dashboard-cleaner" ./desktop/cleaner
+xcrun swiftc -O -target "$(uname -m)-apple-macos14.0" -module-cache-path "$BUILD_DIR/cache/swift" \
+    "$DESKTOP_DIR/Tools/Trash.swift" -o "$APP_DIR/Contents/Helpers/TrashTool/trash"
+cp "$DESKTOP_DIR/Engine/clean.sh" "$APP_DIR/Contents/Resources/.Clean/clean.sh"
+/bin/rm -rf "$APP_DIR/Contents/Resources/.MoleEngine" # SAFE: Generated bundled source under desktop/build is rebuilt from the verified upstream pin.
+mkdir -p "$APP_DIR/Contents/Resources/.MoleEngine"
+git archive "$(cat "$DESKTOP_DIR/UPSTREAM_COMMIT")" bin/clean.sh lib |
+    /usr/bin/tar -x -C "$APP_DIR/Contents/Resources/.MoleEngine"
 
 echo 'Building the native macOS window...'
 xcrun swiftc -swift-version 5 -parse-as-library -O -target "$(uname -m)-apple-macos14.0" \
@@ -61,6 +72,8 @@ cp "$REPO_DIR/LICENSE" "$APP_DIR/Contents/Resources/LICENSE"
 cp "$DESKTOP_DIR/UPSTREAM_COMMIT" "$APP_DIR/Contents/Resources/MoleSourceCommit.txt"
 git rev-parse HEAD > "$APP_DIR/Contents/Resources/DashboardSourceCommit.txt"
 codesign --force --sign - "$APP_DIR/Contents/Helpers/mole-dashboard-collector"
+codesign --force --sign - "$APP_DIR/Contents/Helpers/mole-dashboard-cleaner"
+codesign --force --sign - "$APP_DIR/Contents/Helpers/TrashTool/trash"
 codesign --force --sign - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 echo "Built: $APP_DIR"

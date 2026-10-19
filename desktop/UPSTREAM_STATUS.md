@@ -4,7 +4,8 @@ Reviewed on 2026-10-19.
 
 - Source: **Mole CLI (macOS)**, `tw93/Mole`, commit
   `7b2a196061e1be7fae4ba422cd9102313fcb321d`.
-- Source entry point: the collectors in `cmd/status/`.
+- Source entry points: the collectors in `cmd/status/`, plus `bin/clean.sh`
+  and its shared protection and Trash helpers for the separate Clean adapter.
 - Destination: the independent local dashboard in `desktop/`, branch
   `native-dashboard` of `linhui0813-byte/Mole`.
 - Synchronization: **Implemented**. All tracked files outside `desktop/` match
@@ -42,6 +43,16 @@ Reviewed on 2026-10-19.
   menu Pause/Resume, exactly one collector after Reconnect, and complete cleanup
   on menu Quit. The latest full suite exited 1 only on the known audit case
   below; Go, module loading, integration, and installation stages passed.
+- Clean update: selected-item fixture tests (including race detection), native
+  build, exact bundled-engine comparison, repository checks, and all Go packages
+  passed. Native verification covered a real read-only scan, item/category/all
+  selection, zero selection disabling execution, confirmation cancellation,
+  stopping, and rescanning. The scan retained a partial flag instead of treating
+  unreadable or incomplete checks as zero. Existing user files were not cleaned.
+  The final full suite exited 1 only on the known fallback-audit case below;
+  Go, module loading, integration, and installation stages passed. An earlier
+  run inherited `CARGO_HOME`/`RUSTUP_HOME` from another project and failed four
+  unrelated Rust fixture assertions; removing those overrides resolved them.
 
 ## Known upstream audit failure
 
@@ -51,8 +62,8 @@ the pinned upstream source contains eleven.
 
 The same failure was reproduced in a temporary, detached checkout of the
 unmodified source commit, with no dashboard files present. That checkout was
-removed after the reproduction. The dashboard does not call these cleanup
-paths, and no upstream code or assertion was changed to silence the failure.
+removed after the reproduction. The desktop adapter reuses existing protection
+and Trash helpers; no upstream code or assertion was changed to silence the failure.
 
 Next check: rerun the case after the next upstream update. Any remediation of
 the cleanup implementation or its audited baseline belongs upstream and must

@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private enum Theme {
+enum Theme {
     static let background = Color(red: 0.105, green: 0.100, blue: 0.078)
     static let card = Color(red: 0.175, green: 0.163, blue: 0.124)
     static let border = Color.white.opacity(0.085)
@@ -121,6 +121,7 @@ private struct Meter: View {
 struct DashboardView: View {
     @EnvironmentObject var store: DashboardStore
     @State private var processOnly = false
+    @State private var showClean = false
     @State private var query = ""
     @State private var sort: ProcessSort = .cpu
     @State private var selectedPID: Int?
@@ -132,29 +133,33 @@ struct DashboardView: View {
         GeometryReader { geometry in
             VStack(spacing: 18) {
                 header
-                if let error = store.error {
-                    HStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.gold)
-                        Text(error).font(.system(size: 12))
-                        Spacer()
-                        Button("Reconnect") { store.reconnect() }.buttonStyle(.bordered)
-                    }.padding(12).background(Theme.gold.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
-                }
-                if !processOnly {
-                    let columns = geometry.size.width > 1050 ? 4 : 2
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: columns), spacing: 14) {
-                        healthCard
-                        cpuCard
-                        gpuCard
-                        memoryCard
-                        temperatureCard
-                        diskCard
-                        networkCard
-                        fanCard
+                if showClean {
+                    CleanView()
+                } else {
+                    if let error = store.error {
+                        HStack(spacing: 10) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.gold)
+                            Text(error).font(.system(size: 12))
+                            Spacer()
+                            Button("Reconnect") { store.reconnect() }.buttonStyle(.bordered)
+                        }.padding(12).background(Theme.gold.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
                     }
+                    if !processOnly {
+                        let columns = geometry.size.width > 1050 ? 4 : 2
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: columns), spacing: 14) {
+                            healthCard
+                            cpuCard
+                            gpuCard
+                            memoryCard
+                            temperatureCard
+                            diskCard
+                            networkCard
+                            fanCard
+                        }
+                    }
+                    processTable
+                    footer
                 }
-                processTable
-                footer
             }.padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -178,8 +183,9 @@ struct DashboardView: View {
             }
             Spacer()
             HStack(spacing: 4) {
-                navButton("Status", selected: !processOnly) { processOnly = false }
-                navButton("Processes", selected: processOnly) { processOnly = true }
+                navButton("Clean", selected: showClean) { showClean = true }
+                navButton("Status", selected: !showClean && !processOnly) { showClean = false; processOnly = false }
+                navButton("Processes", selected: !showClean && processOnly) { showClean = false; processOnly = true }
             }.padding(4).background(Color.white.opacity(0.05), in: Capsule())
             Spacer()
             HStack(spacing: 10) {
@@ -461,10 +467,10 @@ struct DashboardView: View {
                 Image(nsImage: DashboardBrand.logo).resizable().scaledToFit().frame(width: 44, height: 44)
                 Text("Mole Dashboard").font(.system(size: 24, weight: .semibold))
             }
-            Text("A local, read-only Mac dashboard built from Mole’s open-source status collectors.")
+            Text("A local Mac dashboard built from Mole’s open-source collectors and cleanup safety helpers.")
             Text("Readings continue while the app runs, including when its window is closed. Use the Mole menu bar icon to reopen the dashboard, pause readings, or quit. Hardware details refresh every 30 seconds. A dash means the collector cannot provide that reading.")
             Text("Process CPU can exceed 100% when it uses multiple cores. Each table row is one process; memory is resident memory, not an app-wide total.")
-            Text("This is an independent local build, not the commercial Mole Mac app. No cleanup, fan control, login item or background service is installed.")
+            Text("Clean reviews selected user caches and logs before moving them to Trash. This independent local build has no administrator cleanup, fan control, login item or background service.")
             Link("Mole source and GPL-3.0 license", destination: URL(string: "https://github.com/tw93/Mole")!)
             HStack { Spacer(); Button("Done") { showAbout = false }.keyboardShortcut(.defaultAction) }
         }.font(.system(size: 13)).padding(28).frame(width: 500)
