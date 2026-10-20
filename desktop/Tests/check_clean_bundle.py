@@ -20,7 +20,8 @@ for path in sorted(expected):
     ).stdout
     assert (engine / path).read_bytes() == original, f"bundled engine differs: {path}"
 assert (app / "Resources/.Clean/clean.sh").read_bytes() == (repo / "desktop/Engine/clean.sh").read_bytes()
-for path in [app / "Helpers/mole-dashboard-cleaner", app / "Helpers/TrashTool/trash"]:
+assert (app / "Resources/.Analyze/actions.sh").read_bytes() == (repo / "desktop/Engine/analyze.sh").read_bytes()
+for path in [app / "Helpers/mole-dashboard-cleaner", app / "Helpers/TrashTool/trash", app / "Helpers/mole-dashboard-analyzer"]:
     assert path.is_file() and path.stat().st_mode & 0o111, f"missing executable: {path}"
     subprocess.run(["codesign", "--verify", "--strict", str(path)], check=True)
-print(f"Clean bundle passed: {len(expected)} exact upstream files, adapter, and signed helpers")
+print(f"Dashboard action bundle passed: {len(expected)} exact upstream files, adapter, and signed helpers")

@@ -17,6 +17,7 @@ replacement.write_text(source.replace(needle, "func upstreamCLIMain() {", 1))
 paths = {
     str(repo / "cmd/analyze/main.go"): str(replacement),
     str(repo / "cmd/analyze/dashboard_adapter.go"): str(repo / "desktop/analyzer/main.go.in"),
+    str(repo / "cmd/analyze/dashboard_policy.go"): str(repo / "desktop/analyzer/policy.go.in"),
 }
 if "--test" in sys.argv[2:]:
     paths[str(repo / "cmd/analyze/dashboard_adapter_test.go")] = str(repo / "desktop/analyzer/main_test.go.in")

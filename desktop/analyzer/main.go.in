@@ -13,17 +13,20 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/tw93/mole/desktop/pathbinding"
 )
 
 const dashboardScanBudget = 2 * time.Minute
 
 type dashboardAnalyzeEvent struct {
-	Kind        string      `json:"kind"`
-	Files       int64       `json:"files,omitempty"`
-	Directories int64       `json:"directories,omitempty"`
-	Bytes       int64       `json:"bytes,omitempty"`
-	Result      *jsonOutput `json:"result,omitempty"`
-	Message     string      `json:"message,omitempty"`
+	Bindings    map[string]pathbinding.Binding `json:"bindings,omitempty"`
+	Kind        string                         `json:"kind"`
+	Files       int64                          `json:"files,omitempty"`
+	Directories int64                          `json:"directories,omitempty"`
+	Bytes       int64                          `json:"bytes,omitempty"`
+	Result      *jsonOutput                    `json:"result,omitempty"`
+	Message     string                         `json:"message,omitempty"`
 }
 
 func dashboardAnalyze(ctx context.Context, path string, output io.Writer) error {
@@ -78,12 +81,27 @@ func dashboardAnalyze(ctx context.Context, path string, output io.Writer) error 
 				Entries:    jsonEntriesFromDirEntries(result.result.Entries, false, nil),
 				LargeFiles: jsonFileEntriesFromFileEntries(result.result.LargeFiles),
 				TotalSize:  result.result.TotalSize, TotalFiles: result.result.TotalFiles}
-			return encoder.Encode(dashboardAnalyzeEvent{Kind: "done", Result: &payload})
+			bindings := dashboardBindings(ctx, payload)
+			if ctx.Err() != nil {
+				_ = encoder.Encode(dashboardAnalyzeEvent{Kind: "error", Message: "Scan stopped before item identities were ready. Scan again."})
+				return ctx.Err()
+			}
+			return encoder.Encode(dashboardAnalyzeEvent{Kind: "done", Result: &payload, Bindings: bindings})
 		}
 	}
 }
 
 func main() {
+	if os.Geteuid() == 0 {
+		os.Exit(1)
+	}
+	if handled, err := dashboardPolicyMain(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(65)
+		}
+		return
+	}
 	if len(os.Args) != 2 || !filepath.IsAbs(os.Args[1]) {
 		fmt.Fprintln(os.Stderr, "Analyze requires exactly one absolute folder path")
 		os.Exit(2)

@@ -1,7 +1,7 @@
 //go:build darwin
 
-// Native Clean protocol. The private, expiring plan stays in this process;
-// clients select opaque IDs, never send paths or shell commands for execution.
+// Shared native selection protocol. Review binds candidates to objects;
+// execution accepts only opaque IDs from the private, expiring plan.
 package main
 
 import (
@@ -16,12 +16,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/tw93/mole/desktop/pathbinding"
 )
 
 type item struct {
@@ -30,15 +33,18 @@ type item struct {
 	Path                                 string `json:"path"`
 	Bytes                                uint64 `json:"bytes"`
 	identity, parent, parentID, targetID string
+	binding                              string
 }
 
 type command struct {
-	Action string   `json:"action"`
-	ID     string   `json:"request_id"`
-	IDs    []string `json:"ids"`
+	Action     string                `json:"action"`
+	ID         string                `json:"request_id"`
+	IDs        []string              `json:"ids"`
+	Candidates []pathbinding.Binding `json:"candidates"`
 }
 
 type event struct {
+	Path      string `json:"path,omitempty"`
 	Kind      string `json:"kind"`
 	RequestID string `json:"request_id"`
 	Item      *item  `json:"item,omitempty"`
@@ -53,6 +59,7 @@ type event struct {
 
 type engine struct {
 	root, script, home, trashBin string
+	analyze                      bool
 	env                          []string
 }
 
@@ -70,6 +77,10 @@ func token() string {
 }
 
 func main() {
+	analyze := len(os.Args) == 2 && os.Args[1] == "--analyze-actions"
+	if len(os.Args) != 1 && !analyze {
+		os.Exit(64)
+	}
 	if os.Geteuid() == 0 {
 		fmt.Fprintln(os.Stderr, "Run the dashboard as your regular user.")
 		os.Exit(1)
@@ -86,7 +97,14 @@ func main() {
 	}
 	e := engine{root: filepath.Join(resources, ".MoleEngine"), script: filepath.Join(resources, ".Clean/clean.sh"),
 		home: home, trashBin: filepath.Join(helperDir, "TrashTool")}
+	if analyze {
+		e.analyze = true
+		e.script = filepath.Join(resources, ".Analyze/actions.sh")
+	}
 	e.env = []string{"HOME=" + home, "PATH=" + e.trashBin + ":/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C", "LANG=C", "TERM=xterm-256color"}
+	if analyze {
+		e.env = append(e.env, "MOLE_DASHBOARD_ANALYZE_GATE="+filepath.Join(helperDir, "mole-dashboard-analyzer"))
+	}
 	if deno := os.Getenv("DENO_DIR"); deno != "" {
 		e.env = append(e.env, "DENO_DIR="+deno)
 	}
@@ -171,12 +189,24 @@ func run(input io.Reader, output io.Writer, e engine) {
 				continue
 			}
 			if cancel != nil {
-				emit(event{Kind: "error", RequestID: c.ID, Message: "A Clean operation is still running."})
+				emit(event{Kind: "error", RequestID: c.ID, Message: "An operation is still running."})
 				continue
 			}
 			var ctx context.Context
 			switch c.Action {
+			case "review":
+				if !e.analyze {
+					emit(event{Kind: "error", RequestID: c.ID, Message: "Analyze review is unavailable in Clean."})
+					continue
+				}
+				current = nil
+				ctx, cancel = context.WithTimeout(context.Background(), 2*time.Minute)
+				launch(func(events func(event)) *plan { return e.review(ctx, c.ID, c.Candidates, events) })
 			case "scan":
+				if e.analyze {
+					emit(event{Kind: "error", RequestID: c.ID, Message: "Select Analyze items and review them first."})
+					continue
+				}
 				current = nil
 				ctx, cancel = context.WithTimeout(context.Background(), 2*time.Minute)
 				launch(func(events func(event)) *plan { return e.scan(ctx, c.ID, events) })
@@ -340,9 +370,20 @@ func safeAncestors(home, path string) error {
 func (e engine) invoke(ctx context.Context, action string, v item, extra ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	if e.analyze {
+		extra = append(extra, v.binding)
+	}
 	args := append([]string{e.script, e.root, action, v.Category, v.Path}, extra...)
 	cmd := exec.CommandContext(ctx, "/bin/bash", args...)
 	cmd.Env = e.env
+	if e.analyze {
+		scratch, err := os.MkdirTemp("", "mole-analyze-invoke-")
+		if err != nil {
+			return nil, err
+		}
+		defer os.RemoveAll(scratch) // Only this invocation's private scratch directory.
+		cmd.Env = append(slices.Clone(e.env), "TMPDIR="+scratch)
+	}
 	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }

@@ -5,6 +5,9 @@ import Foundation
 
 @MainActor
 final class AnalyzeStore: ObservableObject {
+    let actions: CleanStore
+    @Published var selected = Set<String>()
+    @Published private(set) var bindings: [String: AnalyzeBinding] = [:]
     @Published private(set) var result: AnalyzeResult?
     @Published private(set) var busy = false
     @Published private(set) var stopping = false
@@ -15,8 +18,8 @@ final class AnalyzeStore: ObservableObject {
     @Published private(set) var scannedAt: Date?
     @Published var folder = NSHomeDirectory() {
         didSet {
-            if !busy && folder != oldValue && result?.path != folder {
-                result = nil; scannedAt = nil
+            if !busy && !actions.busy && folder != oldValue && result?.path != folder {
+                result = nil; scannedAt = nil; selected = []; bindings = [:]; actions.resetReview()
             }
         }
     }
@@ -27,18 +30,20 @@ final class AnalyzeStore: ObservableObject {
     private var terminalEvent = false
     private let helper: URL
 
-    init(helper: URL? = nil) {
+    init(helper: URL? = nil, actions: CleanStore? = nil) {
+        self.actions = actions ?? CleanStore(analyze: true)
         self.helper = helper ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/mole-dashboard-analyzer")
     }
 
-    func scan(_ path: String? = nil) {
-        guard !busy else { return }
+    func scan(_ path: String? = nil, preserveActions: Bool = false) {
+        guard !busy, !actions.busy else { return }
         let expanded = ((path ?? folder) as NSString).expandingTildeInPath
         guard expanded.hasPrefix("/"), !expanded.contains("\0") else {
             message = "Enter an absolute folder path, or choose a folder."; return
         }
         let requested = URL(fileURLWithPath: expanded).standardizedFileURL.path
-        folder = requested; result = nil; scannedAt = nil
+        if !preserveActions { actions.resetReview() }
+        folder = requested; result = nil; scannedAt = nil; selected = []; bindings = [:]
         files = 0; directories = 0; scannedBytes = 0; terminalEvent = false
         guard FileManager.default.isExecutableFile(atPath: helper.path) else {
             message = "The Analyze helper is missing. Rebuild Mole Dashboard."; return
@@ -115,6 +120,8 @@ final class AnalyzeStore: ObservableObject {
             guard let snapshot = event.result, snapshot.matches(requested) else {
                 message = "The scan returned an invalid folder result. Scan again."; return
             }
+            let paths = Set(snapshot.entries.filter { $0.scan_status != .unavailable && !$0.isLink }.map(\.path) + (snapshot.large_files ?? []).map(\.path))
+            bindings = (event.bindings ?? [:]).filter { key, value in paths.contains(key) && value.path == key }
             result = snapshot; scannedAt = Date()
             switch snapshot.scan_status {
             case .complete: message = "Scan finished within Mole’s scan filters. Sizes are estimates from a changing disk."
@@ -139,10 +146,15 @@ final class AnalyzeStore: ObservableObject {
         }
     }
 
-    func stop() { cancel() }
+    func reviewSelection() {
+        guard !busy, !actions.busy, !selected.isEmpty else { return }
+        actions.review(selected.sorted().compactMap { bindings[$0] })
+    }
+
+    func stop() { cancel(); actions.stop() }
 
     func chooseFolder() {
-        guard !busy else { return }
+        guard !busy, !actions.busy else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose a folder to analyze"
         panel.canChooseFiles = false; panel.canChooseDirectories = true

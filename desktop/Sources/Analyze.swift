@@ -2,6 +2,14 @@ import SwiftUI
 
 struct AnalyzeView: View {
     @EnvironmentObject private var analyze: AnalyzeStore
+    var body: some View { AnalyzeContent(analyze: analyze, actions: analyze.actions) }
+}
+
+private struct AnalyzeContent: View {
+    @ObservedObject var analyze: AnalyzeStore
+    @ObservedObject var actions: CleanStore
+    @State private var showReview = false
+    private var busy: Bool { analyze.busy || actions.busy }
     @State private var largeFiles = false
     @State private var query = ""
     @State private var byName = false
@@ -12,13 +20,15 @@ struct AnalyzeView: View {
             HStack(spacing: 10) {
                 Button { analyze.scan(URL(fileURLWithPath: analyze.folder).deletingLastPathComponent().path) } label: {
                     Image(systemName: "arrow.up").frame(width: 22, height: 22)
-                }.help("Scan parent folder").accessibilityLabel("Scan parent folder").disabled(analyze.busy || analyze.folder == "/")
+                }.help("Scan parent folder").accessibilityLabel("Scan parent folder").disabled(busy || analyze.folder == "/")
                 TextField("Absolute folder path", text: $analyze.folder)
                     .textFieldStyle(.roundedBorder).onSubmit { analyze.scan() }
-                    .accessibilityLabel("Folder to analyze").disabled(analyze.busy)
-                Button("Choose folder…") { analyze.chooseFolder() }.disabled(analyze.busy)
-                if analyze.busy {
-                    Button(analyze.stopping ? "Stopping…" : "Stop") { analyze.cancel() }.disabled(analyze.stopping)
+                    .accessibilityLabel("Folder to analyze").disabled(busy)
+                Button("Choose folder…") { analyze.chooseFolder() }.disabled(busy)
+                if busy {
+                    Button(analyze.stopping || actions.stopping ? "Stopping…" : "Stop") {
+                        if actions.busy { actions.cancel() } else { analyze.cancel() }
+                    }.disabled(analyze.stopping || actions.stopping)
                 } else {
                     Button(analyze.result == nil ? "Scan folder" : "Scan again") { analyze.scan() }
                         .buttonStyle(.borderedProminent).tint(Theme.green).foregroundStyle(Theme.background)
@@ -31,13 +41,13 @@ struct AnalyzeView: View {
                 Divider().frame(height: 14)
                 breadcrumbs
                 Spacer(minLength: 0)
-            }.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(Theme.secondary).disabled(analyze.busy)
+            }.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(Theme.secondary).disabled(busy)
             HStack(spacing: 10) {
-                if analyze.busy { ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 20) }
+                if busy { ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 20) }
                 else { Image(systemName: analyze.result?.scan_status == .partial ? "exclamationmark.triangle" : "info.circle").foregroundStyle(Theme.gold) }
                 Text(analyze.message).font(.system(size: 12)).lineLimit(2)
                 Spacer()
-                if analyze.busy {
+                if busy {
                     Text("\(analyze.files.formatted()) files · \(analyze.directories.formatted()) folders checked")
                         .font(.system(size: 11)).foregroundStyle(Theme.secondary).monospacedDigit()
                 } else if let date = analyze.scannedAt {
@@ -52,15 +62,37 @@ struct AnalyzeView: View {
             } else {
                 VStack(spacing: 14) {
                     Image(systemName: "square.grid.2x2").font(.system(size: 48, weight: .ultraLight)).foregroundStyle(Theme.gold)
-                    Text(analyze.busy ? "Finding where the space goes" : "Explore your disk, one folder at a time")
+                    Text(busy ? "Finding where the space goes" : "Explore your disk, one folder at a time")
                         .font(.system(size: 20, weight: .medium))
-                    Text(analyze.busy ? "The map appears when this scan finishes. You can stop at any time." : "Start with Home, Applications, or a folder you choose.")
+                    Text(busy ? "The map appears when this scan finishes. You can stop at any time." : "Start with Home, Applications, or a folder you choose.")
                         .font(.system(size: 12)).foregroundStyle(Theme.secondary)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            Text("Read-only · Mole skips some system and virtual-machine folders and does not follow symbolic links while measuring. Measured size is not reclaimable space.")
+            HStack(spacing: 12) {
+                Button("Select visible (up to 200)") { analyze.selected.formUnion(visiblePaths.prefix(200)) }.disabled(busy || analyze.result == nil)
+                Button("Deselect all") { analyze.selected = [] }.disabled(busy || analyze.selected.isEmpty)
+                Text("\(analyze.selected.count) selected across both views").font(.system(size: 11)).foregroundStyle(Theme.secondary)
+                if analyze.selected.count > 200 { Text("Review up to 200 items at a time").font(.system(size: 11)).foregroundStyle(Theme.gold) }
+                Spacer()
+                if actions.phase == .finished || actions.phase == .failed {
+                    Button("Last results") { showReview = true }
+                }
+                Button("Review selected for Trash…") { analyze.reviewSelection(); showReview = true }
+                    .buttonStyle(.borderedProminent).tint(Theme.gold).foregroundStyle(Theme.background)
+                    .disabled(busy || analyze.selected.isEmpty || analyze.selected.count > 200)
+            }
+            Text("Selected items move to Trash after review. Protected or unverifiable items are kept. Files in Trash still occupy disk space.")
                 .font(.system(size: 10)).foregroundStyle(Theme.secondary).frame(maxWidth: .infinity, alignment: .leading)
         }.onChange(of: analyze.result?.path) { _, _ in query = ""; largeFiles = false }
+            .onChange(of: actions.phase) { old, new in
+                if old == .cleaning && (new == .finished || new == .failed || new == .stopped) {
+                    analyze.scan(preserveActions: true)
+                }
+            }
+            .sheet(isPresented: $showReview) {
+                AnalyzeReviewSheet(actions: actions) { showReview = false }
+                    .interactiveDismissDisabled(actions.busy)
+            }
     }
 
     private var summary: some View {
@@ -69,7 +101,7 @@ struct AnalyzeView: View {
                 Label("Analyze", systemImage: "chart.pie").font(.system(size: 25, weight: .semibold))
                 Text("See the folders and files taking up space. Open a folder to explore further.")
                     .font(.system(size: 12)).foregroundStyle(Theme.secondary)
-                Label("Inspect sizes and reveal items in Finder", systemImage: "eye")
+                Label("Select items, review them, then move them to Trash", systemImage: "checkmark.shield")
                     .font(.system(size: 11)).foregroundStyle(Theme.green)
             }
             Spacer()
@@ -136,10 +168,17 @@ struct AnalyzeView: View {
                                     .background(color.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
                                     .overlay(RoundedRectangle(cornerRadius: 7).stroke(color.opacity(0.4), lineWidth: 1))
                                     .clipped().contentShape(Rectangle())
-                            }.buttonStyle(.plain).disabled(analyze.busy || rect.tile.entry == nil)
+                            }.buttonStyle(.plain).disabled(busy || rect.tile.entry == nil)
                                 .help("\(rect.tile.name) · \(rect.tile.entry?.sizeLabel ?? Format.bytes(UInt64(rect.tile.bytes)))\(rect.tile.entry == nil ? " · See the list for these items" : "")")
                                 .accessibilityLabel("\(rect.tile.name), \(rect.tile.entry?.sizeLabel ?? Format.bytes(UInt64(rect.tile.bytes)))")
                                 .offset(x: rect.x, y: rect.y)
+                                .contextMenu {
+                                    if let entry = rect.tile.entry {
+                                        Button(analyze.selected.contains(entry.path) ? "Deselect item" : "Select for Trash review") { toggle(entry.path) }
+                                            .disabled(busy || analyze.bindings[entry.path] == nil)
+                                        Button("Reveal in Finder") { analyze.reveal(entry.path) }
+                                    }
+                                }
                         }
                     }
                 }
@@ -164,19 +203,13 @@ struct AnalyzeView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if largeFiles {
-                        let files = (result.large_files ?? []).filter { matches($0.name, path: $0.path) }
-                            .sorted { byName ? $0.name.localizedStandardCompare($1.name) == .orderedAscending : $0.size > $1.size }
+                        let files = visibleFiles(result)
                         ForEach(files) { file in
                             fileRow(name: file.name, path: file.path, icon: "doc", size: Format.bytes(UInt64(max(0, file.size)))) { analyze.reveal(file.path) }
                         }
                         if files.isEmpty { emptyList("No matching large files found.") }
                     } else {
-                        let entries = result.entries.filter { matches($0.name, path: $0.path) }.sorted {
-                            if byName { return $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-                            if $0.scan_status == .unavailable && $1.scan_status != .unavailable { return false }
-                            if $1.scan_status == .unavailable && $0.scan_status != .unavailable { return true }
-                            return $0.size == $1.size ? $0.path < $1.path : $0.size > $1.size
-                        }
+                        let entries = visibleEntries(result)
                         ForEach(entries) { entry in
                             fileRow(name: entry.name, path: entry.path, icon: entry.browsable ? "folder" : entry.isLink ? "link" : "doc", size: entry.sizeLabel) { open(entry) }
                         }
@@ -195,6 +228,9 @@ struct AnalyzeView: View {
     private func fileRow(name: String, path: String, icon: String, size: String, action: @escaping () -> Void) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
+                Toggle("Select \(name)", isOn: Binding(get: { analyze.selected.contains(path) }, set: { _ in toggle(path) }))
+                    .labelsHidden().toggleStyle(.checkbox).disabled(busy || analyze.bindings[path] == nil)
+                    .help(analyze.bindings[path] == nil ? "This item is unavailable for selection. Reveal it in Finder to inspect it." : "Select for Trash review")
                 Image(systemName: icon).foregroundStyle(Theme.blue).frame(width: 20)
                 Button(action: action) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -205,9 +241,33 @@ struct AnalyzeView: View {
                 Text(size).font(.system(size: 11)).foregroundStyle(size.contains("Unavailable") || size.contains("At least") ? Theme.gold : Theme.secondary).monospacedDigit()
                 Button { analyze.reveal(path) } label: { Image(systemName: "arrow.up.forward.square") }
                     .buttonStyle(.plain).help("Reveal in Finder").accessibilityLabel("Reveal \(name) in Finder")
-            }.padding(.vertical, 11).disabled(analyze.busy)
+            }.padding(.vertical, 11).disabled(busy)
             Divider().overlay(Theme.border)
         }
+    }
+
+    private var visiblePaths: [String] {
+        guard let result = analyze.result else { return [] }
+        let paths = largeFiles ? visibleFiles(result).map(\.path) : visibleEntries(result).map(\.path)
+        return paths.filter { analyze.bindings[$0] != nil }
+    }
+    private func visibleFiles(_ result: AnalyzeResult) -> [AnalyzeFile] {
+        (result.large_files ?? []).filter { matches($0.name, path: $0.path) }.sorted {
+            if byName { return $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            return $0.size == $1.size ? $0.path < $1.path : $0.size > $1.size
+        }
+    }
+    private func visibleEntries(_ result: AnalyzeResult) -> [AnalyzeEntry] {
+        result.entries.filter { matches($0.name, path: $0.path) }.sorted {
+            if byName { return $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            if $0.scan_status == .unavailable && $1.scan_status != .unavailable { return false }
+            if $1.scan_status == .unavailable && $0.scan_status != .unavailable { return true }
+            return $0.size == $1.size ? $0.path < $1.path : $0.size > $1.size
+        }
+    }
+    private func toggle(_ path: String) {
+        guard !busy, analyze.bindings[path] != nil else { return }
+        if analyze.selected.contains(path) { analyze.selected.remove(path) } else { analyze.selected.insert(path) }
     }
 
     private func open(_ entry: AnalyzeEntry) {

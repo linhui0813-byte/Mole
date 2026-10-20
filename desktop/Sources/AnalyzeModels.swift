@@ -57,7 +57,17 @@ struct AnalyzeResult: Decodable {
     }
 }
 
+struct AnalyzeBinding: Codable {
+    let path: String
+    let identity: String
+    let parent: String
+    let parent_id: String
+    let target_id: String
+    let stamp: String
+}
+
 struct AnalyzeEvent: Decodable {
+    let bindings: [String: AnalyzeBinding]?
     let kind: String
     let files: Int?
     let directories: Int?

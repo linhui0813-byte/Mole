@@ -8,9 +8,64 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestDashboardTrashPolicySpecialFiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	if err := dashboardValidateTree(root); err != nil {
+		t.Fatalf("positive empty folder refused: %v", err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(root, "active.pipe"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardValidateTree(root); err == nil || !strings.Contains(err.Error(), "special file") {
+		t.Fatalf("folder with live IPC became eligible: %v", err)
+	}
+}
+
+func TestDashboardTrashPolicyRecognizedStateAndAliases(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	normal := filepath.Join(root, "ordinary.txt")
+	if err := os.WriteFile(normal, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardValidateTree(root); err != nil {
+		t.Fatalf("positive ordinary folder refused: %v", err)
+	}
+	secret := filepath.Join(root, ".env")
+	if err := os.WriteFile(secret, []byte("DUMMY=fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardValidateTree(root); err == nil {
+		t.Fatal("recognized credentials became eligible")
+	}
+	if err := os.Remove(secret); err != nil {
+		t.Fatal(err)
+	}
+	auth := filepath.Join(home, "Library/Caches/aws_credentials_cache.json")
+	if err := os.MkdirAll(filepath.Dir(auth), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(auth, []byte("dummy fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "ordinary-alias")
+	if err := os.Link(auth, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardValidateTree(root); err == nil {
+		t.Fatal("credential hardlink became eligible")
+	}
+	if err := dashboardValidateTree(home); err == nil {
+		t.Fatal("home root became eligible")
+	}
+}
 
 type dashboardReadEvent struct {
 	Kind   string `json:"kind"`

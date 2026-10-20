@@ -6,7 +6,7 @@ Reviewed on 2026-10-20.
   `7b2a196061e1be7fae4ba422cd9102313fcb321d`.
 - Source entry points: the collectors in `cmd/status/`, traversal and JSON
   contracts in `cmd/analyze/`, plus `bin/clean.sh` and its shared protection and
-  Trash helpers for the separate Clean adapter.
+  Trash helpers for the separate Clean and Analyze action adapters.
 - Destination: the independent local dashboard in `desktop/`, branch
   `native-dashboard` of `linhui0813-byte/Mole`.
 - Synchronization: **Implemented**. All tracked files outside `desktop/` match
@@ -114,8 +114,53 @@ compatibility code remains in `desktop/`.
   passed alone. The final full-suite rerun exited 1 only on the documented
   fallback-count audit; its Go, module loading, integration, and installation
   stages passed.
-- Native interactive verification remains unverified: the control tool returns
-  `cgWindowNotFound` for the dashboard window on the external display. A main
-  display handoff is pending. Signed-build and helper checks above are verified;
-  the previous verified app is preserved for rollback. No window-restoration
-  changes or temporary window diagnostics are included in the source.
+- Hui verified the read-only explorer in the native window. Automated control of
+  the original app identifier still returns `cgWindowNotFound` on the external
+  display. The action workflow below was verified in a separately identified QA
+  copy of the same native build. No window-restoration changes or temporary
+  window diagnostics are included in the source.
+
+## Analyze selected-item actions
+
+Implemented entirely inside `desktop/`. Scanning remains read-only; selected
+paths can now enter a separate review and explicit Trash execution. The shared
+private plan service preserves the original Clean scope and rejects Analyze
+review requests in Clean mode. Review captures fresh sizes, omits overlapping
+children, reports refused paths, and binds accepted items to their file version
+and physical parent. Only reviewed IDs can execute, once, within 15 minutes.
+
+The action adapter checks the upstream Analyze root policy and the unmodified
+cleanup safety helpers. It adds bounded physical descendant checks for protected
+state, recognized credentials, application bundles, Git metadata, symlinks, and
+special files. The final guard repeats the binding, parent, whitelist and live
+checks before the existing `mole_delete` funnel. Production uses one native Trash
+attempt without Finder authorization, retry, or permanent fallback. Unknown
+outcomes stop later moves. These are point-in-time checks; folder contents are
+not transactionally locked, and user review of selected documents remains required.
+
+- Go action and binding tests passed with race detection and fresh runs. Fixtures
+  cover exact selected-only moves and logs, parent/child overlap, object replacement,
+  same-inode rewrites with restored mtime, parent replacement, credential/symlink/
+  special-file refusal, late protected descendants, new whitelists, cancellation,
+  failed native transport without retry, and Clean/Analyze protocol separation.
+- Negative checks passed: weakening recognized-credential protection and ignoring
+  the stronger object-version stamp each made its regression fail at the intended
+  assertion. Read-only scanner/cache and isolation regressions remain covered.
+- Swift contracts passed for accepted IDs, refused paths, result retention,
+  cancellation with a late ready response, restart, and plan reset. Existing
+  Analyze presentation and scan contracts also passed.
+- Packaged native smoke used only newly created disposable files: one selected
+  file moved to macOS Trash, the unselected control remained, the temporary-HOME
+  audit record matched, and reusing the consumed plan was refused.
+- Native GUI testing used a disposable folder in an independently identified QA
+  copy. Review accepted the ordinary file and kept a folder containing a dummy
+  `.env`; cancelling left both intact. After Hui approved the exact test file,
+  confirmation moved it to Trash, all controls/protected files remained, the map
+  refreshed from five items to four, and **Last results** remained available.
+- The full suite completed with exit status 1 only on the already reproduced
+  upstream fallback-count audit documented above. Go, module loading, integration, and
+  installation stages passed. Core source and the failing assertion remain unchanged.
+
+The prior verified application is preserved locally for rollback. Delivery is a
+commit on the fork's `native-dashboard` branch and a locally signed development
+app, not a public binary release.

@@ -1,0 +1,116 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/tw93/mole/desktop/pathbinding"
+)
+
+// This supplements, never weakens, upstream Analyze's protected-root policy.
+func dashboardTrashPolicy(path string) error {
+	if err := validateTrashTarget(path); err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return errors.New("home identity unavailable")
+	}
+	roots := []string{".ssh", ".gnupg", ".aws", ".azure", ".codex", ".claude", ".config", ".local/share",
+		"Library/Keychains", "Library/Accounts", "Library/Mail", "Library/Calendars", "Library/Contacts",
+		"Library/Logs/mole", "Library/Mobile Documents", "Library/CloudStorage"}
+	for _, rel := range roots {
+		root := filepath.Join(home, rel)
+		if path == root || isSameExistingPath(path, root) || isPathWithinExistingRoot(path, root) {
+			return fmt.Errorf("protected state root is kept: %s; inspect it in Finder", root)
+		}
+	}
+	if path == filepath.Join(home, "Library") || path == filepath.Join(home, "Library/Application Support") || path == filepath.Join(home, "Library/Containers") || path == filepath.Join(home, "Library/Group Containers") {
+		return errors.New("application-state collection root is kept; explore inside it")
+	}
+	for _, component := range strings.Split(path, string(filepath.Separator)) {
+		lower := strings.ToLower(component)
+		if strings.HasSuffix(lower, ".app") {
+			return fmt.Errorf("application bundles are kept: %s; use an app-uninstall workflow", path)
+		}
+		if lower == ".git" {
+			return fmt.Errorf("Git metadata is kept: %s; inspect the project in Finder", path)
+		}
+		if lower == ".aws" || lower == ".azure" || lower == ".codex" || lower == ".claude" || lower == ".config" || lower == ".ssh" || lower == ".gnupg" || lower == ".env" || strings.HasPrefix(lower, ".env.") {
+			return fmt.Errorf("recognized credentials or session state are kept: %s", path)
+		}
+	}
+	auth := filepath.Join(home, "Library/Caches/aws_credentials_cache.json")
+	if path == auth || isSameExistingPath(path, auth) {
+		return errors.New("authentication cache is kept")
+	}
+	return nil
+}
+
+func dashboardValidateTree(path string) error {
+	if _, err := pathbinding.Read(path); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	count := 0
+	return filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return errors.New("folder contents could not be verified")
+		}
+		if ctx.Err() != nil || count >= 10000 {
+			return errors.New("folder check exceeded its budget; choose a smaller item")
+		}
+		count++
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("folder contains a symbolic link: %s; reveal it in Finder to review", p)
+		}
+		if !d.IsDir() && !d.Type().IsRegular() {
+			return fmt.Errorf("folder contains a socket or special file: %s; close its owner and review it in Finder", p)
+		}
+		return dashboardTrashPolicy(p)
+	})
+}
+
+// Private helper endpoints are invoked only with fixed argument arrays.
+func dashboardPolicyMain(args []string) (bool, error) {
+	if len(args) == 2 && args[0] == "--validate-trash" {
+		return true, dashboardValidateTree(args[1])
+	}
+	if len(args) == 3 && args[0] == "--check-binding" {
+		var b pathbinding.Binding
+		if json.Unmarshal([]byte(args[2]), &b) != nil || b.Path != args[1] || !b.Matches() {
+			return true, errors.New("item or parent changed; scan again")
+		}
+		return true, dashboardValidateTree(b.Path)
+	}
+	return false, nil
+}
+
+func dashboardBindings(ctx context.Context, result jsonOutput) map[string]pathbinding.Binding {
+	bindings := make(map[string]pathbinding.Binding)
+	add := func(path string) {
+		if ctx.Err() != nil {
+			return
+		}
+		if b, err := pathbinding.Read(path); err == nil {
+			bindings[path] = b
+		}
+	}
+	for _, entry := range result.Entries {
+		if entry.ScanStatus != scanUnavailable {
+			add(entry.Path)
+		}
+	}
+	for _, file := range result.LargeFiles {
+		add(file.Path)
+	}
+	return bindings
+}

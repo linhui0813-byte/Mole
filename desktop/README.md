@@ -1,7 +1,7 @@
 # Mole Dashboard
 
 An independent, native SwiftUI dashboard for macOS 14 or later, with live
-status, read-only disk analysis, and selected-item cleanup powered by this
+status, disk exploration, and selected-item Trash actions powered by this
 repository. This is a separate local app, inspired by the
 provided status-screen reference. It is not the commercial Mole Mac app.
 
@@ -52,8 +52,7 @@ The **Large files** view shows the engine's discovery list, up to 20 files of at
 least 1 MiB; upstream filters omit some file types and files in folded folders.
 It is not a complete inventory of every large file.
 
-This version is read-only: it offers no Trash or deletion actions. Measurements
-reuse the pinned upstream analyzer traversal, hardlink handling, concurrency
+Measurements reuse the pinned upstream analyzer traversal, hardlink handling, concurrency
 budgets, directory filters, and JSON coverage states. The dashboard adapter
 runs a fresh scan on each navigation, bypasses saved measurements, and denies
 cache publication, so inspecting a folder does not create, replace, prune, or
@@ -72,6 +71,52 @@ has stopped, and result identity is bound to the requested path. Closing the
 window leaves an explicitly started scan running; quitting cancels it. The
 helper also cancels on stdin closure or loss of its parent, with a bounded exit.
 There are no administrator requests or new background services.
+
+### Move selected items to Trash
+
+Check individual rows in either list, or use a map tile's context menu. **Select
+visible (up to 200)** follows the current filter and sort order. Selections span
+both list views; navigation or a new scan clears them. Choose **Review selected
+for Trash…** to check up to 200 exact paths. No item moves during review.
+
+The review sheet lists accepted paths, freshly measured allocated-size estimates,
+and refused paths with reasons. These estimates can differ from the map and do
+not promise reclaimed space. Uncheck any accepted item you want to retain, then
+choose **Move checked items to Trash**. Moving a folder includes its contents;
+an accepted selected parent covers selected children without counting them twice.
+Cancel discards the plan. Zero checked items disables execution.
+
+Review binds each selection to its file version and physical parent. The private
+helper accepts only opaque IDs from that review, expires plans after 15 minutes,
+and consumes a plan on its first execution attempt. It checks identities,
+whitelists, protected contents, and upstream live-cache/database rules again
+before each move and at the final Trash guard. A changed object, incomplete
+size, inaccessible tree, unknown required visibility, or exceeded budget keeps
+the item. Reviews have a two-minute total budget, a 20-second per-item subprocess
+budget, and physical tree checks capped at 10,000 entries and eight seconds.
+Choose a smaller item if review refuses a large folder.
+
+The desktop policy supplements upstream Analyze's protected-root rules. It keeps
+application bundles, Git metadata, recognized credential/session locations,
+cloud-document roots, broad application-state collection roots, symbolic links
+and redirected user ancestors, sockets and special files, compiled-model state,
+Deno stores, and the protected authentication cache and its file aliases. Folder
+checks inspect descendants rather than relying on the scan's filtered totals.
+This recognizes known sensitive state; it does not classify every personal file
+or prove that arbitrary applications have stopped using a selected document.
+Review the exact paths yourself. Checks are point-in-time observations, not a
+filesystem transaction or a lock on folder contents.
+
+All moves use upstream `mole_delete` in Trash mode and the bundled macOS Trash
+transport. Native failure never falls back to permanent deletion, an authorization
+prompt, or a second move attempt. **Stop** prevents later moves; an interrupted
+or uncertain move remains **unverified** and stops the batch. Check its original
+path and Trash before retrying. The result sheet distinguishes moved, kept,
+unverified, and unprocessed items. The map refreshes after an execution attempt,
+and **Last results** retains its outcomes until another scan or review. Successful
+moves and execution refusals use Mole's operation log under
+`~/Library/Logs/mole/operations.log`. Trash still occupies disk space until you
+empty it in Finder; this app never empties it.
 
 The Go build overlay retains the upstream main file's helper definitions while
 renaming its unused CLI entrypoint and supplying the desktop entrypoint from
@@ -204,16 +249,22 @@ Keep unrelated work intact and report any blocked stage separately.
 python3 desktop/Tests/test_upstream_isolation.py
 python3 desktop/Tools/analyzer_overlay.py desktop/build/analyzer-tests --test
 MOLE_TEST_NO_AUTH=1 go test -race -overlay desktop/build/analyzer-tests/analyzer-overlay.json \
-  ./cmd/analyze -run '^TestDashboardAnalyze' -count=1
+  ./cmd/analyze -run '^TestDashboard' -count=1
 python3 desktop/Tests/analyzer_smoke.py
 xcrun swiftc -swift-version 5 -parse-as-library \
   -module-cache-path desktop/build/cache/swift \
-  desktop/Sources/Models.swift desktop/Sources/AnalyzeModels.swift \
+  desktop/Sources/Models.swift desktop/Sources/AnalyzeModels.swift desktop/Sources/CleanStore.swift \
   desktop/Sources/AnalyzeStore.swift desktop/Tests/AnalyzeContract.swift \
   -o desktop/build/analyze-contract
 desktop/build/analyze-contract
-MOLE_TEST_NO_AUTH=1 go test -race ./desktop/cleaner
-shellcheck --rcfile .shellcheckrc desktop/Engine/clean.sh desktop/build.sh
+MOLE_TEST_NO_AUTH=1 go test -race -count=1 ./desktop/pathbinding ./desktop/cleaner
+xcrun swiftc -swift-version 5 -parse-as-library \
+  -module-cache-path desktop/build/cache/swift \
+  desktop/Sources/Models.swift desktop/Sources/AnalyzeModels.swift \
+  desktop/Sources/CleanStore.swift desktop/Tests/AnalyzeActionsContract.swift \
+  -o desktop/build/analyze-actions-contract
+desktop/build/analyze-actions-contract
+shellcheck --rcfile .shellcheckrc desktop/Engine/clean.sh desktop/Engine/analyze.sh desktop/build.sh
 python3 desktop/Tests/check_clean_bundle.py
 MOLE_TEST_NO_AUTH=1 go test ./cmd/status
 python3 desktop/Tests/collector_smoke.py
@@ -240,7 +291,7 @@ logging, changed target/parent identities, new whitelist protection, redirected
 roots, Deno protection, open/unknown handles, final-sink rechecks, expiry, stale
 IDs, duplicate IDs, cancellation, and protocol plan consumption. Native testing
 covers scan progress, selection, confirmation cancellation, stopping and rescanning;
-it does not perform a real cleanup of this Mac.
+it does not clean existing user files.
 
 Analyze checks exercise a fresh scan despite a saved stale-sized measurement,
 cache preservation and non-creation, Unicode and quoted paths, symbolic links,
@@ -248,4 +299,21 @@ cancellation, inaccessible/missing roots, and a deadline that cancels a folded
 `du` probe. Swift contracts cover partial/unavailable presentation, proportional
 map area and grouping, request/result binding, invalid responses, cancellation,
 and a new scan after stopping. The packaged-helper smoke test uses disposable
-files and checks source preservation. These tests do not delete user files.
+files and checks source preservation.
+
+Analyze action tests add selected-only moves and audit records, overlapping parent
+selections, credential and special-file refusal, target/parent changes, same-inode
+rewrites with restored modification times, late protected-content insertion,
+whitelist changes, cancellation after a completed move, native transport failure
+without retry, and separation from the Clean protocol. Swift contracts cover
+reviewed IDs, refusal reasons, outcome retention, cancelled reviews, and restarting.
+Use `-count=1`: the helper built by the Go test harness reads overlay templates
+at runtime, so Go's test cache cannot track those template changes.
+
+`python3 desktop/Tests/analyze_actions_smoke.py` is an explicit native-transport
+smoke test after building. It creates its own disposable files and temporary HOME,
+then moves only its newly created selected file into the real macOS Trash. It
+verifies the control file, audit record, and refusal to reuse the consumed plan.
+It leaves that fixture in Trash and never empties Trash. Native GUI verification
+also used only a named disposable fixture, covering review cancellation, protected
+folder refusal, a confirmed move, automatic map refresh, and retained results.
