@@ -114,11 +114,11 @@ compatibility code remains in `desktop/`.
   passed alone. The final full-suite rerun exited 1 only on the documented
   fallback-count audit; its Go, module loading, integration, and installation
   stages passed.
-- Hui verified the read-only explorer in the native window. Automated control of
-  the original app identifier still returns `cgWindowNotFound` on the external
-  display. The action workflow below was verified in a separately identified QA
-  copy of the same native build. No window-restoration changes or temporary
-  window diagnostics are included in the source.
+- Hui verified the read-only explorer in the native window. Earlier automation
+  could not attach to the original window on the external display. After the
+  committed application was rebuilt and reopened in the foreground, native
+  control succeeded with live readings. No window-restoration changes or
+  temporary window diagnostics are included in the source.
 
 ## Analyze selected-item actions
 
@@ -157,6 +157,10 @@ not transactionally locked, and user review of selected documents remains requir
   `.env`; cancelling left both intact. After Hui approved the exact test file,
   confirmation moved it to Trash, all controls/protected files remained, the map
   refreshed from five items to four, and **Last results** remained available.
+- The deployed original application also passed native review checks: exact
+  accepted paths, the offending protected descendant named in its refusal,
+  zero checked items disabling confirmation, and cancellation preserving all
+  controls. Its live status window was verified after foreground reopening.
 - The full suite completed with exit status 1 only on the already reproduced
   upstream fallback-count audit documented above. Go, module loading, integration, and
   installation stages passed. Core source and the failing assertion remain unchanged.

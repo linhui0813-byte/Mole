@@ -317,3 +317,5 @@ verifies the control file, audit record, and refusal to reuse the consumed plan.
 It leaves that fixture in Trash and never empties Trash. Native GUI verification
 also used only a named disposable fixture, covering review cancellation, protected
 folder refusal, a confirmed move, automatic map refresh, and retained results.
+The deployed original application also passed review cancellation and
+zero-selection disabling confirmation, with live readings in its status window.
