@@ -7,7 +7,7 @@ action="$2"
 category="$3"
 target="$4"
 shift 4
-[[ "$category" == analyze || "$category" == analyze-project || "$category" == analyze-folder ]] || exit 64
+[[ "$category" == analyze || "$category" == analyze-project || "$category" == analyze-folder || "$category" == analyze-library-folder ]] || exit 64
 binding="${!#}"
 gate="${MOLE_DASHBOARD_ANALYZE_GATE:-}"
 [[ -n "$gate" && -x "$gate" ]] || exit 64
@@ -18,6 +18,7 @@ SYSTEM_CLEAN=false
 binding_gate=--check-binding
 [[ "$category" != analyze-project ]] || binding_gate=--check-project-binding
 [[ "$category" != analyze-folder ]] || binding_gate=--check-folder-binding
+[[ "$category" != analyze-library-folder ]] || binding_gate=--check-library-folder-binding
 
 analyze_refuse() {
     if [[ "$action" == trash ]]; then log_operation analyze SKIPPED "$target" "$1"; fi
@@ -53,7 +54,7 @@ analyze_check_selection() {
         return 1
     fi
 
-    if [[ "$category" == analyze-project || "$category" == analyze-folder ]]; then
+    if [[ "$category" == analyze-project || "$category" == analyze-folder || "$category" == analyze-library-folder ]]; then
         analyze_check_folder_contents
         return $?
     fi
@@ -132,6 +133,21 @@ analyze_check_folder_contents() {
         fi
         # Links are carried as links; do not probe their destinations.
         if [[ ! -L "$member" ]] && _mole_is_sqlite_database_path "$member"; then
+            if [[ "$category" == analyze-library-folder ]]; then
+                # Library retains upstream's complete-visibility database gate.
+                # It never inherits the user-data account-scope exception.
+                local library_rc=0
+                validate_path_for_deletion "$member" || library_rc=$?
+                if mole_rc_signal "$library_rc"; then
+                    analyze_refuse 'Database check was interrupted; no move was attempted' 66
+                fi
+                if [[ $library_rc -ne 0 ]]; then
+                    ANALYZE_REASON="Library database is kept: $member (${_MOLE_VALIDATION_REASON:-use could not be verified}); close its app and inspect it in Finder"
+                    valid=false
+                    break
+                fi
+                continue
+            fi
             local state=0
             analyze_folder_database_state "$member" "$deadline" || state=$?
             if mole_rc_signal "$state"; then
@@ -149,6 +165,10 @@ analyze_check_folder_contents() {
         fi
     done < "$list"
     /bin/rm -f "$list" # SAFE: exact mktemp-created private project policy listing.
+    if [[ "$valid" == true && $SECONDS -ge $deadline ]]; then
+        ANALYZE_REASON='Folder whitelist/database checks reached their 8-second limit; choose a smaller folder'
+        valid=false
+    fi
     [[ "$valid" == true ]]
 }
 

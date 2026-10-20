@@ -37,9 +37,9 @@ struct AnalyzeReviewSheet: View {
                                 Text(item.name).font(.system(size: 13, weight: .semibold))
                                 Text(item.path).font(.system(size: 11)).foregroundStyle(Theme.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                                 if item.requiresAcknowledgement {
-                                    Label(item.isWholeProject ? "Whole Git project" : "Whole folder", systemImage: "exclamationmark.triangle")
+                                    Label(item.isWholeProject ? "Whole Git project" : item.isLibraryFolder ? "Whole Library folder" : "Whole folder", systemImage: "exclamationmark.triangle")
                                         .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.gold)
-                                    Text("Includes every file and subfolder, including Git history, uncommitted work, built apps, databases, and local settings such as .env files. Save your work and close apps and tools using this folder first. Links move as links; targets outside this folder stay in place.")
+                                    Text("Includes every file and subfolder, including Git history, uncommitted work, built apps, installed tools and SDKs, databases, and local settings such as .env files. Save your work and close apps and tools using this folder first. Links move as links; targets outside this folder stay in place.")
                                         .font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
                                     if actions.phase == .ready {
                                         Toggle("I saved my work, closed its apps and tools, and want to move this entire folder to Trash", isOn: Binding(get: { actions.acknowledgedItems.contains(item.id) }, set: { value in

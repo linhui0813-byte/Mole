@@ -275,3 +275,38 @@ outside control, audit records and one-use IDs. Trash was not emptied.
 Repository checks, upstream isolation, Go race tests and Swift contracts pass.
 The full suite finishes with the same documented upstream fallback-count failure;
 its Go, module-loading, integration and installation stages pass.
+
+## Large Library-folder review, 2026-10-21
+
+The whole-folder classifier excluded all of `Library`, so the selected Android
+SDK fell back to the older 10,000-entry review. A regression with 10,001 files
+failed on the previous route before the fix. The dashboard now classifies owned
+Library subfolders separately as `analyze-library-folder`, with the same bounded
+1,000,000-entry / eight-second metadata walk and an explicit per-item
+acknowledgement. This is a general Library routing fix, with no Android-specific
+path exception and no upstream execution changes.
+
+Library keeps upstream live-cache and complete-visibility database validation;
+it never uses the account-scoped database exception for ordinary user folders.
+Protected roots, application-state collection roots, their selected ancestors,
+whitelists, credentials, browser profiles, mounted filesystems, special files,
+identity binding, final-sink checks, one-use plans, Trash and logging remain
+enforced. The warning also names installed tools and SDKs as included contents.
+Regressions cover large Library folders, protected roots, unknown database
+visibility and a database appearing during final sizing.
+
+The real SDK's read-only review completed in 2.05 seconds and returned an eligible
+Library-folder item. Native verification displayed **Whole Library folder**, an
+unchecked acknowledgement and disabled Trash button. Cancelling preserved the
+SDK's root identity; no execution command was sent for it. Packaged native Trash
+verification moved only newly created disposable file, collection/build-app and
+Library SDK fixtures, refused missing acknowledgements, preserved the unselected
+control and recorded the audit trail. Trash was not emptied.
+
+Fresh Go race tests, analyzer-overlay regressions, Swift action/Analyze contracts,
+packaged analyzer and action smoke checks, ShellCheck, repository checks and
+upstream isolation pass. The full suite completed with exit status 1 only on the
+documented upstream fallback-count assertion; its Go, module-loading, integration
+and installation stages passed. Delivery rebuilds the committed revision and
+updates the separately requested `/Applications` installation, retaining the
+previous verified application for rollback.

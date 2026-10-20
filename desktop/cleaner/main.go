@@ -232,7 +232,7 @@ func run(input io.Reader, output io.Writer, e engine) {
 
 func acknowledgeSelections(selected []item, acknowledgements []string) error {
 	for _, v := range selected {
-		if (v.Category == "analyze-project" || v.Category == "analyze-folder") && !slices.Contains(acknowledgements, v.ID) {
+		if (v.Category == "analyze-project" || v.Category == "analyze-folder" || v.Category == "analyze-library-folder") && !slices.Contains(acknowledgements, v.ID) {
 			return errors.New("Acknowledge that the entire folder and all its contents will move to Trash. Review again.")
 		}
 	}

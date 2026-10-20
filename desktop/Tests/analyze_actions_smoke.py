@@ -130,5 +130,40 @@ with tempfile.TemporaryDirectory(prefix="mole-analyze-native-") as temp:
         assert project.name in log and "unselected-fixture.txt" not in log, log
     finally:
         service.close()
-print("Packaged native Analyze Trash passed: reviewed file and acknowledged collection with build app moved, missing acknowledgement refused, outside control preserved, audit recorded, replay refused")
-print(f"Only newly created fixtures {name} and {project.name} were moved to Trash; Trash was not emptied.")
+    # Library uses a distinct policy class, with the same per-item acknowledgement.
+    library = home / "Library/DeveloperFixture"
+    sdk = library / f"mole-library-sdk-fixture-{uuid.uuid4().hex}"
+    (sdk / "platform-tools").mkdir(parents=True)
+    (sdk / "platform-tools/disposable-tool.txt").write_text("Disposable SDK fixture; never executed.\n")
+    scanner = Helper(helpers / "mole-dashboard-analyzer", [str(library)], env)
+    try:
+        frame = scanner.until("done")[-1]
+    finally:
+        scanner.close()
+    service = Helper(helpers / "mole-dashboard-cleaner", ["--analyze-actions"], env)
+    try:
+        service.send({"action": "review", "request_id": "library-review", "candidates": [frame["bindings"][str(sdk)]]})
+        events = service.until("scan_done")
+        items = [event["item"] for event in events if event["kind"] == "item"]
+        assert len(items) == 1 and items[0]["category"] == "analyze-library-folder", events
+        selected = items[0]["id"]
+        service.send({"action": "clean", "request_id": "library-missing-ack", "ids": [selected]})
+        assert "Acknowledge" in service.until("error")[-1]["message"]
+        assert sdk.exists() and kept.exists()
+        service.send({"action": "review", "request_id": "library-new-review", "candidates": [frame["bindings"][str(sdk)]]})
+        events = service.until("scan_done")
+        items = [event["item"] for event in events if event["kind"] == "item"]
+        assert len(items) == 1 and items[0]["category"] == "analyze-library-folder", events
+        selected = items[0]["id"]
+        service.send({"action": "clean", "request_id": "library-move", "ids": [selected], "acknowledged_items": [selected]})
+        events = service.until("clean_done")
+        results = [event for event in events if event["kind"] == "result"]
+        assert len(results) == 1 and results[0]["status"] == "trashed", events
+        assert not sdk.exists() and kept.exists()
+        assert "unselected fixture" in kept.read_text()
+        log = (home / "Library/Logs/mole/operations.log").read_text()
+        assert sdk.name in log and "unselected-fixture.txt" not in log, log
+    finally:
+        service.close()
+print("Packaged native Analyze Trash passed: reviewed file, acknowledged collection with build app, and Library SDK fixture moved; missing acknowledgement refused, outside control preserved, audit recorded, replay refused")
+print(f"Only newly created fixtures {name}, {project.name}, and {sdk.name} were moved to Trash; Trash was not emptied.")

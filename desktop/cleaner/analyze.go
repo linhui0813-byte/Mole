@@ -65,6 +65,8 @@ func (e engine) review(ctx context.Context, requestID string, candidates []pathb
 			v = item{ID: token(), Category: "analyze", Path: b.Path, binding: string(serialized)}
 			if pathbinding.WholeProjectIn(e.home, b.Path) {
 				v.Category = "analyze-project"
+			} else if pathbinding.WholeLibraryFolderIn(e.home, b.Path) {
+				v.Category = "analyze-library-folder"
 			} else if pathbinding.WholeFolderIn(e.home, b.Path) {
 				v.Category = "analyze-folder"
 			}

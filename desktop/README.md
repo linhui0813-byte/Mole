@@ -110,6 +110,13 @@ Whole-folder metadata walks allow up to 1,000,000 entries within eight seconds,
 followed by bounded whitelist and database checks. Incomplete walks never authorize
 a move. Choose a smaller item if review exceeds a limit.
 
+Owned subfolders of `~/Library` use **Whole Library folder** review with the same
+large metadata budget. They do not fall through to the older 10,000-entry route.
+This class retains upstream live-cache and complete-visibility database checks;
+it does not inherit the account-scoped database exception for other user folders.
+The SDK or other folder may contain installed tools that need restoring from
+Trash or reinstalling before dependent projects work again.
+
 Entry-count and time-limit refusals name their separate limits. When every
 selected item is kept, the sheet shows **Nothing eligible**, explains that nothing
 was moved, and offers **Done** without an execution button. Each kept path has
@@ -130,7 +137,9 @@ or prove that arbitrary applications have stopped using a selected document.
 The whole-folder action permits included Git metadata, local `.env`, `.config`,
 `.codex`, and `.claude` state, nested app bundles and internal links only after the
 explicit acknowledgement. It requires an owned real directory under the user's
-home, outside hidden home roots, `Library`, and `Applications`. The standard personal
+home, outside hidden home roots and `Applications`. Library subfolders use the
+separate stricter class above; the Library root and application-state collection
+roots remain protected. The standard personal
 roots themselves (`Documents`, `Downloads`, `Desktop`, `Pictures`, `Music`, `Movies`,
 and `Public`) stay protected; choose an item inside them. System/root protection,
 whitelist matches (including descendants), account-scoped database checks, browser profiles, credential roots
@@ -139,7 +148,7 @@ checks remain enforced. macOS access failures name the inaccessible path and poi
 to Finder permissions and System Settings privacy access instead of presenting
 them as a Git protection rule.
 
-Whole-folder database probes cover handles visible in the invoking account,
+Outside Library, whole-folder database probes cover handles visible in the invoking account,
 including SQLite sidecars. An open database, diagnostic output, timeout, or failed
 probe keeps the folder. This is not administrator-wide visibility or proof that
 every service has stopped; the acknowledgement requires saving work and closing
@@ -355,7 +364,7 @@ at runtime, so Go's test cache cannot track those template changes.
 `python3 desktop/Tests/analyze_actions_smoke.py` is an explicit native-transport
 smoke test after building. It creates its own disposable files and temporary HOME,
 then moves only its newly created selected file and acknowledged project folder
-into the real macOS Trash. It
+and Library SDK fixture into the real macOS Trash. It
 verifies the control file, audit record, and refusal to reuse the consumed plan.
 It leaves that fixture in Trash and never empties Trash. Native GUI verification
 also used only a named disposable fixture, covering review cancellation, protected

@@ -33,6 +33,9 @@ func dashboardTrashPolicy(path string) error {
 		if path == root || isSameExistingPath(path, root) || isPathWithinExistingRoot(path, root) {
 			return fmt.Errorf("protected state root is kept: %s; inspect it in Finder", root)
 		}
+		if strings.HasPrefix(root, path+string(filepath.Separator)) || isPathWithinExistingRoot(root, path) {
+			return fmt.Errorf("folder contains protected state root %s; choose an item inside the folder instead", root)
+		}
 	}
 	for _, rel := range []string{"Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Public"} {
 		root := filepath.Join(home, rel)
@@ -74,14 +77,18 @@ func dashboardValidateTree(path string) error {
 // Root protection and binding remain mandatory; the shell separately retains
 // the loaded whitelist and account-scoped database checks at the final guard.
 func dashboardValidateProject(path string) error {
-	return dashboardValidateWholeFolder(path, true)
+	return dashboardValidateWholeFolder(path, "project")
 }
 
 func dashboardValidateFolder(path string) error {
-	return dashboardValidateWholeFolder(path, false)
+	return dashboardValidateWholeFolder(path, "folder")
 }
 
-func dashboardValidateWholeFolder(path string, project bool) error {
+func dashboardValidateLibraryFolder(path string) error {
+	return dashboardValidateWholeFolder(path, "library")
+}
+
+func dashboardValidateWholeFolder(path string, scope string) error {
 	if _, err := pathbinding.Read(path); err != nil {
 		return dashboardReviewError(path, err)
 	}
@@ -89,7 +96,16 @@ func dashboardValidateWholeFolder(path string, project bool) error {
 		return err
 	}
 	home, _ := os.UserHomeDir()
-	if !pathbinding.WholeFolderIn(home, path) || project && !pathbinding.WholeProject(path) {
+	supported := false
+	switch scope {
+	case "project":
+		supported = pathbinding.WholeProject(path)
+	case "folder":
+		supported = pathbinding.WholeFolderIn(home, path)
+	case "library":
+		supported = pathbinding.WholeLibraryFolderIn(home, path)
+	}
+	if !supported {
 		return errors.New("whole-folder identity changed or is unsupported; scan and review again")
 	}
 	root, err := os.Lstat(path)
@@ -229,7 +245,7 @@ func dashboardPolicyMain(args []string) (bool, error) {
 	if len(args) == 2 && args[0] == "--validate-trash" {
 		return true, dashboardValidateTree(args[1])
 	}
-	if len(args) == 3 && (args[0] == "--check-binding" || args[0] == "--check-project-binding" || args[0] == "--check-folder-binding") {
+	if len(args) == 3 && (args[0] == "--check-binding" || args[0] == "--check-project-binding" || args[0] == "--check-folder-binding" || args[0] == "--check-library-folder-binding") {
 		var b pathbinding.Binding
 		if json.Unmarshal([]byte(args[2]), &b) != nil || b.Path != args[1] || !b.Matches() {
 			return true, errors.New("item or parent changed; scan again")
@@ -239,6 +255,9 @@ func dashboardPolicyMain(args []string) (bool, error) {
 		}
 		if args[0] == "--check-folder-binding" {
 			return true, dashboardValidateFolder(b.Path)
+		}
+		if args[0] == "--check-library-folder-binding" {
+			return true, dashboardValidateLibraryFolder(b.Path)
 		}
 		return true, dashboardValidateTree(b.Path)
 	}

@@ -110,3 +110,27 @@ func TestDashboardReviewAccessCause(t *testing.T) {
 		}
 	}
 }
+
+func TestDashboardLibraryFolderScopeAndProtectedState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "Library", "DeveloperFixture", "sdk")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardValidateFolder(root); err == nil {
+		t.Fatal("Library accepted the account-scoped user-folder endpoint")
+	}
+	if err := dashboardValidateLibraryFolder(root); err != nil {
+		t.Fatalf("eligible Library folder refused: %v", err)
+	}
+	for _, name := range []string{"Library", "Library/Keychains", "Library/Logs", "Library/Application Support", "Library/Containers", "Library/Group Containers"} {
+		path := filepath.Join(home, name)
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := dashboardValidateLibraryFolder(path); err == nil {
+			t.Fatalf("protected Library root or state ancestor allowed: %s", path)
+		}
+	}
+}

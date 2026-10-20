@@ -9,7 +9,8 @@ struct CleanItem: Codable, Identifiable {
     let bytes: UInt64
     var name: String { URL(fileURLWithPath: path).lastPathComponent }
     var isWholeProject: Bool { category == "analyze-project" }
-    var requiresAcknowledgement: Bool { isWholeProject || category == "analyze-folder" }
+    var isLibraryFolder: Bool { category == "analyze-library-folder" }
+    var requiresAcknowledgement: Bool { isWholeProject || isLibraryFolder || category == "analyze-folder" }
 }
 
 struct CleanEvent: Decodable {

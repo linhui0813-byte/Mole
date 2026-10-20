@@ -12,14 +12,14 @@ enum AnalyzeActionsContract {
             if action == "review" {
                 let values = command["candidates"] as! [[String: Any]]
                 let path = values[0]["path"] as! String
-                project = path.contains("project") || path.contains("collection")
+                project = path.contains("project") || path.contains("collection") || path.contains("library")
                 if path.contains("blocked") {
                     try send(["kind": "refused", "request_id": id, "path": path, "message": "Browser profile is kept"])
                     try send(["kind": "scan_done", "request_id": id, "status": "ready", "kept": 1,
                               "message": "None of the selected items passed the safety checks. Nothing was moved."])
                     continue
                 }
-                let category = path.contains("collection") ? "analyze-folder" : path.contains("project") ? "analyze-project" : "analyze"
+                let category = path.contains("library") ? "analyze-library-folder" : path.contains("collection") ? "analyze-folder" : path.contains("project") ? "analyze-project" : "analyze"
                 try send(["kind": "item", "request_id": id, "item": ["id": "reviewed-id", "category": category, "path": path, "bytes": 4096]])
                 if path.contains("slow") { Thread.sleep(forTimeInterval: 0.25) }
                 try send(["kind": "refused", "request_id": id, "path": "/fixture/protected", "message": "Kept: protected fixture"])
@@ -78,6 +78,15 @@ enum AnalyzeActionsContract {
         precondition(store.items[0].isWholeProject && !store.canClean, "whole project did not require acknowledgement")
         store.acknowledgedItems = ["unreviewed-id"]
         precondition(!store.canClean, "acknowledgement authorized another item")
+        store.acknowledgedItems = ["reviewed-id"]
+        precondition(store.canClean)
+        store.cleanSelected()
+        try await wait { store.phase == .finished }
+        precondition(store.moved.count == 1)
+        store.resetReview()
+        store.review([candidate("/fixture/library-sdk")])
+        try await wait { store.phase == .ready }
+        precondition(store.items[0].isLibraryFolder && store.items[0].requiresAcknowledgement && !store.canClean, "Library folder did not require acknowledgement")
         store.acknowledgedItems = ["reviewed-id"]
         precondition(store.canClean)
         store.cleanSelected()
