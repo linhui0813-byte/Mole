@@ -12,21 +12,22 @@ enum AnalyzeActionsContract {
             if action == "review" {
                 let values = command["candidates"] as! [[String: Any]]
                 let path = values[0]["path"] as! String
-                project = path.contains("project")
+                project = path.contains("project") || path.contains("collection")
                 if path.contains("blocked") {
                     try send(["kind": "refused", "request_id": id, "path": path, "message": "Browser profile is kept"])
                     try send(["kind": "scan_done", "request_id": id, "status": "ready", "kept": 1,
                               "message": "None of the selected items passed the safety checks. Nothing was moved."])
                     continue
                 }
-                try send(["kind": "item", "request_id": id, "item": ["id": "reviewed-id", "category": path.contains("project") ? "analyze-project" : "analyze", "path": path, "bytes": 4096]])
+                let category = path.contains("collection") ? "analyze-folder" : path.contains("project") ? "analyze-project" : "analyze"
+                try send(["kind": "item", "request_id": id, "item": ["id": "reviewed-id", "category": category, "path": path, "bytes": 4096]])
                 if path.contains("slow") { Thread.sleep(forTimeInterval: 0.25) }
                 try send(["kind": "refused", "request_id": id, "path": "/fixture/protected", "message": "Kept: protected fixture"])
                 try send(["kind": "refused", "request_id": id, "path": "/fixture/covered-child", "status": "covered", "message": "Included with reviewed parent"])
                 try send(["kind": "scan_done", "request_id": id, "status": "ready", "kept": 1])
             } else if action == "clean" {
                 precondition(command["ids"] as? [String] == ["reviewed-id"], "UI sent an unreviewed identity")
-                precondition(command["acknowledged_projects"] as? [String] == (project ? ["reviewed-id"] : []), "UI did not send the reviewed project acknowledgement")
+                precondition(command["acknowledged_items"] as? [String] == (project ? ["reviewed-id"] : []), "UI did not send the reviewed project acknowledgement")
                 try send(["kind": "result", "request_id": id, "item_id": "reviewed-id", "status": "trashed", "message": "Simulated fixture outcome"])
                 try send(["kind": "clean_done", "request_id": id, "status": "finished"])
             }
@@ -75,15 +76,24 @@ enum AnalyzeActionsContract {
         store.review([candidate("/fixture/project")])
         try await wait { store.phase == .ready }
         precondition(store.items[0].isWholeProject && !store.canClean, "whole project did not require acknowledgement")
-        store.acknowledgedProjects = ["unreviewed-id"]
+        store.acknowledgedItems = ["unreviewed-id"]
         precondition(!store.canClean, "acknowledgement authorized another item")
-        store.acknowledgedProjects = ["reviewed-id"]
+        store.acknowledgedItems = ["reviewed-id"]
         precondition(store.canClean)
         store.cleanSelected()
         try await wait { store.phase == .finished }
         precondition(store.moved.count == 1)
         store.resetReview()
-        precondition(store.acknowledgedProjects.isEmpty, "new review retained earlier consent")
+        precondition(store.acknowledgedItems.isEmpty, "new review retained earlier consent")
+        store.review([candidate("/fixture/collection")])
+        try await wait { store.phase == .ready }
+        precondition(!store.items[0].isWholeProject && store.items[0].requiresAcknowledgement && !store.canClean, "generic folder did not require acknowledgement")
+        store.acknowledgedItems = ["reviewed-id"]
+        precondition(store.canClean)
+        store.cleanSelected()
+        try await wait { store.phase == .finished }
+        precondition(store.moved.count == 1)
+        store.resetReview()
         print("Analyze action UI contracts passed: reviewed IDs, refusal details, outcomes, late-cancel rejection, restart, reset")
     }
 }

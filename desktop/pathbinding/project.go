@@ -22,18 +22,13 @@ func WholeProject(path string) bool {
 
 // WholeProjectIn uses the helper's fixed home, also used by isolated tests.
 func WholeProjectIn(home, path string) bool {
-	rel, err := filepath.Rel(home, path)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
-		return false
-	}
-	first := strings.Split(rel, string(filepath.Separator))[0]
-	if strings.HasPrefix(first, ".") || strings.EqualFold(first, "Library") {
+	if !WholeFolderIn(home, path) {
 		return false
 	}
 	for _, entry := range []struct {
 		name string
 		dir  bool
-	}{{"", true}, {".git", true}, {".git/objects", true}, {".git/HEAD", false}} {
+	}{{".git", true}, {".git/objects", true}, {".git/HEAD", false}} {
 		info, err := os.Lstat(filepath.Join(path, entry.name))
 		if err != nil || info.IsDir() != entry.dir || !entry.dir && !info.Mode().IsRegular() {
 			return false
@@ -44,4 +39,29 @@ func WholeProjectIn(home, path string) bool {
 		}
 	}
 	return true
+}
+
+// WholeFolderIn classifies user-data folder moves, independently of Git layout.
+// Actual path/root protection and a complete physical review remain mandatory.
+func WholeFolderIn(home, path string) bool {
+	rel, err := filepath.Rel(home, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return false
+	}
+	first := strings.Split(rel, string(filepath.Separator))[0]
+	if strings.HasPrefix(first, ".") || strings.EqualFold(first, "Library") || strings.EqualFold(first, "Applications") {
+		return false
+	}
+	if rel == first {
+		switch strings.ToLower(first) {
+		case "desktop", "documents", "downloads", "pictures", "movies", "music", "public":
+			return false
+		}
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	s, ok := info.Sys().(*syscall.Stat_t)
+	return ok && s.Uid == uint32(os.Geteuid())
 }

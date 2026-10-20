@@ -25,13 +25,19 @@ func dashboardTrashPolicy(path string) error {
 	if err != nil {
 		return errors.New("home identity unavailable")
 	}
-	roots := []string{".ssh", ".gnupg", ".aws", ".azure", ".codex", ".claude", ".config", ".local/share",
+	roots := []string{"Applications", ".ssh", ".gnupg", ".aws", ".azure", ".codex", ".claude", ".config", ".local/share",
 		"Library/Keychains", "Library/Accounts", "Library/Mail", "Library/Calendars", "Library/Contacts",
 		"Library/Logs/mole", "Library/Mobile Documents", "Library/CloudStorage"}
 	for _, rel := range roots {
 		root := filepath.Join(home, rel)
 		if path == root || isSameExistingPath(path, root) || isPathWithinExistingRoot(path, root) {
 			return fmt.Errorf("protected state root is kept: %s; inspect it in Finder", root)
+		}
+	}
+	for _, rel := range []string{"Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Public"} {
+		root := filepath.Join(home, rel)
+		if path == root || isSameExistingPath(path, root) {
+			return fmt.Errorf("personal folder root is kept: %s; choose an item inside it", root)
 		}
 	}
 	if path == filepath.Join(home, "Library") || path == filepath.Join(home, "Library/Application Support") || path == filepath.Join(home, "Library/Containers") || path == filepath.Join(home, "Library/Group Containers") {
@@ -62,27 +68,35 @@ func dashboardValidateTree(path string) error {
 	return dashboardValidateTreeWithin(ctx, path, 10000)
 }
 
-// A whole checkout is an explicit user-data action, separate from automatic
-// cleanup. It includes local Git history and project-local settings. Walk
+// A whole user folder is an explicit data action, separate from automatic
+// cleanup. It includes nested projects, build bundles and local settings. Walk
 // physically: moving a directory carries links without visiting their targets.
 // Root protection and binding remain mandatory; the shell separately retains
 // the loaded whitelist and account-scoped database checks at the final guard.
 func dashboardValidateProject(path string) error {
+	return dashboardValidateWholeFolder(path, true)
+}
+
+func dashboardValidateFolder(path string) error {
+	return dashboardValidateWholeFolder(path, false)
+}
+
+func dashboardValidateWholeFolder(path string, project bool) error {
 	if _, err := pathbinding.Read(path); err != nil {
 		return dashboardReviewError(path, err)
 	}
 	if err := dashboardTrashPolicy(path); err != nil {
 		return err
 	}
-	if !pathbinding.WholeProject(path) {
-		return errors.New("whole-project identity changed or is unsupported; scan and review again")
+	home, _ := os.UserHomeDir()
+	if !pathbinding.WholeFolderIn(home, path) || project && !pathbinding.WholeProject(path) {
+		return errors.New("whole-folder identity changed or is unsupported; scan and review again")
 	}
 	root, err := os.Lstat(path)
 	if err != nil {
 		return dashboardReviewError(path, err)
 	}
 	device := root.Sys().(*syscall.Stat_t).Dev
-	home, _ := os.UserHomeDir()
 	auth, _ := os.Stat(filepath.Join(home, "Library/Caches/aws_credentials_cache.json"))
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -92,31 +106,33 @@ func dashboardValidateProject(path string) error {
 			return dashboardReviewError(p, walkErr)
 		}
 		if ctx.Err() != nil || count >= 1000000 {
-			return errors.New("whole-project review reached its 8-second or 1,000,000-entry limit; choose a smaller folder")
+			return errors.New("whole-folder review reached its 8-second or 1,000,000-entry limit; choose a smaller folder")
 		}
 		count++
 		if strings.IndexFunc(p, unicode.IsControl) >= 0 {
-			return errors.New("project contains a control character in a path; inspect it in Finder")
+			return errors.New("folder contains a control character in a path; inspect it in Finder")
 		}
 		info, err := d.Info() // Lstat: internal links never resolve to outside data.
 		if err != nil {
 			return dashboardReviewError(p, err)
 		}
 		if info.Sys().(*syscall.Stat_t).Dev != device {
-			return fmt.Errorf("project contains another mounted filesystem: %s; inspect it in Finder", p)
+			return fmt.Errorf("folder contains another mounted filesystem: %s; inspect it in Finder", p)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
 		if !info.IsDir() && !info.Mode().IsRegular() {
-			return fmt.Errorf("project contains a socket or special file: %s; close its owner and review again", p)
+			return fmt.Errorf("folder contains a socket or special file: %s; close its owner and review again", p)
 		}
 		if auth != nil && os.SameFile(auth, info) {
 			return errors.New("authentication cache alias is kept")
 		}
 		name := strings.ToLower(d.Name())
-		if strings.HasSuffix(name, ".app") || name == ".ssh" || name == ".gnupg" || name == ".aws" || name == ".azure" {
-			return dashboardTrashPolicy(p)
+		// A nested app moves intact with its reviewed parent. Selecting an app
+		// or any of its contents directly still fails dashboardTrashPolicy above.
+		if name == ".ssh" || name == ".gnupg" || name == ".aws" || name == ".azure" {
+			return fmt.Errorf("recognized credentials or session state are kept: %s; inspect it in Finder", p)
 		}
 		if strings.Contains(p, string(filepath.Separator)+".git"+string(filepath.Separator)) && strings.HasSuffix(name, ".lock") {
 			return fmt.Errorf("Git operation lock is present: %s; finish or close Git operations before reviewing again", p)
@@ -213,13 +229,16 @@ func dashboardPolicyMain(args []string) (bool, error) {
 	if len(args) == 2 && args[0] == "--validate-trash" {
 		return true, dashboardValidateTree(args[1])
 	}
-	if len(args) == 3 && (args[0] == "--check-binding" || args[0] == "--check-project-binding") {
+	if len(args) == 3 && (args[0] == "--check-binding" || args[0] == "--check-project-binding" || args[0] == "--check-folder-binding") {
 		var b pathbinding.Binding
 		if json.Unmarshal([]byte(args[2]), &b) != nil || b.Path != args[1] || !b.Matches() {
 			return true, errors.New("item or parent changed; scan again")
 		}
 		if args[0] == "--check-project-binding" {
 			return true, dashboardValidateProject(b.Path)
+		}
+		if args[0] == "--check-folder-binding" {
+			return true, dashboardValidateFolder(b.Path)
 		}
 		return true, dashboardValidateTree(b.Path)
 	}

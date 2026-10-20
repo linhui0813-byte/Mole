@@ -7,7 +7,7 @@ action="$2"
 category="$3"
 target="$4"
 shift 4
-[[ "$category" == analyze || "$category" == analyze-project ]] || exit 64
+[[ "$category" == analyze || "$category" == analyze-project || "$category" == analyze-folder ]] || exit 64
 binding="${!#}"
 gate="${MOLE_DASHBOARD_ANALYZE_GATE:-}"
 [[ -n "$gate" && -x "$gate" ]] || exit 64
@@ -17,6 +17,7 @@ export MOLE_DELETE_MODE=trash
 SYSTEM_CLEAN=false
 binding_gate=--check-binding
 [[ "$category" != analyze-project ]] || binding_gate=--check-project-binding
+[[ "$category" != analyze-folder ]] || binding_gate=--check-folder-binding
 
 analyze_refuse() {
     if [[ "$action" == trash ]]; then log_operation analyze SKIPPED "$target" "$1"; fi
@@ -52,8 +53,8 @@ analyze_check_selection() {
         return 1
     fi
 
-    if [[ "$category" == analyze-project ]]; then
-        analyze_check_project_contents
+    if [[ "$category" == analyze-project || "$category" == analyze-folder ]]; then
+        analyze_check_folder_contents
         return $?
     fi
 
@@ -99,12 +100,12 @@ analyze_check_selection() {
     [[ "$valid" == true ]]
 }
 
-analyze_check_project_contents() {
+analyze_check_folder_contents() {
     # The Go gate has completed a no-follow metadata walk. User-owned whole
-    # projects carry their Git history, local settings and internal links;
+    # folders carry their Git history, local settings and internal links;
     # automatic-cleanup name heuristics do not classify their source/test data.
     # Keep whitelist matches and account-scoped SQLite probes, including sidecars.
-    # This manual whole-project contract requires closing project tools; it does
+    # This manual whole-folder contract requires closing project tools; it does
     # not assert the administrator-wide visibility required by automated Clean.
     # BSD find's -path uses shell patterns without following symbolic links.
     local list member pattern valid=true deadline=$((SECONDS + 8))
@@ -112,15 +113,15 @@ analyze_check_project_contents() {
     for pattern in "${WHITELIST_PATTERNS[@]}"; do
         predicates+=(-o -path "${pattern%/}")
     done
-    list=$(mktemp "${TMPDIR:-/tmp}/mole-project-policy.XXXXXX") || return 1
+    list=$(mktemp "${TMPDIR:-/tmp}/mole-folder-policy.XXXXXX") || return 1
     if ! run_with_timeout 6 "$FIND_BSD" "$target" \( "${predicates[@]}" -o -type f \( -iname '*.db*' -o -iname '*.sqlite*' \) \) -print0 > "$list" 2> /dev/null; then
-        ANALYZE_REASON='Project listing was incomplete; check folder access or choose a smaller folder'
+        ANALYZE_REASON='Folder listing was incomplete; check folder access or choose a smaller folder'
         /bin/rm -f "$list" # SAFE: exact mktemp-created private project policy listing.
         return 1
     fi
     while IFS= read -r -d '' member; do
         if [[ $SECONDS -ge $deadline ]]; then
-            ANALYZE_REASON='Project whitelist/database checks reached their 8-second limit; choose a smaller folder'
+            ANALYZE_REASON='Folder whitelist/database checks reached their 8-second limit; choose a smaller folder'
             valid=false
             break
         fi
@@ -132,7 +133,7 @@ analyze_check_project_contents() {
         # Links are carried as links; do not probe their destinations.
         if [[ ! -L "$member" ]] && _mole_is_sqlite_database_path "$member"; then
             local state=0
-            analyze_project_database_state "$member" "$deadline" || state=$?
+            analyze_folder_database_state "$member" "$deadline" || state=$?
             if mole_rc_signal "$state"; then
                 analyze_refuse 'Database check was interrupted; no move was attempted' 66
             fi
@@ -140,7 +141,7 @@ analyze_check_project_contents() {
                 if [[ $state -eq 0 ]]; then
                     ANALYZE_REASON="A database is open in your account: $member; close its app or project tools and review again"
                 else
-                    ANALYZE_REASON="Could not check database use in your account: $member; close project tools and check folder access before reviewing again"
+                    ANALYZE_REASON="Could not check database use in your account: $member; close its apps and tools and check folder access before reviewing again"
                 fi
                 valid=false
                 break
@@ -152,9 +153,9 @@ analyze_check_project_contents() {
 }
 
 # 0 = open in the invoking account, 1 = no matching account handle, 2 = unknown.
-# The account scope is only for an explicitly acknowledged whole checkout under
-# HOME, outside Library/hidden home roots. It is never used by automatic Clean.
-analyze_project_database_state() {
+# The account scope is only for an explicitly acknowledged whole folder under
+# HOME, outside Applications/Library/hidden home roots. It is never used by automatic Clean.
+analyze_folder_database_state() {
     local base candidate output errors_file probe_timeout rc=0
     local -a family=()
     base=$(_mole_sqlite_family_base_path "${1%-journal}")
@@ -163,7 +164,7 @@ analyze_project_database_state() {
     done
     [[ ${#family[@]} -gt 0 ]] || return 2
     probe_timeout=$(_mole_timeout_with_deadline 3 "$2") || return 2
-    errors_file=$(mktemp "${TMPDIR:-/tmp}/mole-project-handles.XXXXXX") || return 2
+    errors_file=$(mktemp "${TMPDIR:-/tmp}/mole-folder-handles.XXXXXX") || return 2
     output=$(run_with_timeout "$probe_timeout" lsof -nP -a -u "$UID" -F fn -- "${family[@]}" < /dev/null 2> "$errors_file") || rc=$?
     local known=true
     [[ ! -s "$errors_file" ]] || known=false

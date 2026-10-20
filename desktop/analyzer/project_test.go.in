@@ -1,11 +1,57 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tw93/mole/desktop/pathbinding"
 )
+
+func TestDashboardWholeFolderCollectionWithBuiltApp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "Documents", "project collection")
+	app := filepath.Join(root, "first", ".build", "Demo.app")
+	for _, dir := range []string{filepath.Join(app, "Contents/Frameworks"), filepath.Join(root, "first/.git/objects"), filepath.Join(root, "second/.git/objects")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"first/.git/HEAD", "second/.git/HEAD", "first/.env", "first/.build/Demo.app/Contents/Info.plist"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("disposable fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(home, filepath.Join(app, "Contents/Frameworks/outside-link")); err != nil {
+		t.Fatal(err)
+	}
+	check := func(path string) (bool, error) {
+		t.Helper()
+		b, err := pathbinding.Read(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serialized, _ := json.Marshal(b)
+		return dashboardPolicyMain([]string{"--check-folder-binding", path, string(serialized)})
+	}
+	if handled, err := check(root); !handled || err != nil {
+		t.Fatalf("whole collection with nested app was not reviewable: handled=%v error=%v", handled, err)
+	}
+	for _, path := range []string{app, filepath.Join(app, "Contents"), home, filepath.Join(home, "Documents")} {
+		if handled, err := check(path); !handled || err == nil {
+			t.Fatalf("protected standalone app, bundle content, or collection root was allowed: %s %v %v", path, handled, err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(app, "Contents/.ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if handled, err := check(root); !handled || err == nil || !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("nested credential protection was lost or mislabelled as an app refusal: %v %v", handled, err)
+	}
+}
 
 func TestDashboardWholeProjectReview(t *testing.T) {
 	home := t.TempDir()
@@ -45,8 +91,11 @@ func TestDashboardWholeProjectReview(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "Demo.app"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := dashboardValidateProject(root); err == nil || !strings.Contains(err.Error(), "application bundles") {
-		t.Fatalf("bundle protection lost: %v", err)
+	if err := dashboardValidateProject(root); err != nil {
+		t.Fatalf("whole project with a nested build bundle refused: %v", err)
+	}
+	if err := dashboardValidateProject(filepath.Join(root, "Demo.app")); err == nil {
+		t.Fatal("a standalone bundle became a project")
 	}
 }
 

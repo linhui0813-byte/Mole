@@ -239,3 +239,39 @@ revision and refreshes the separately requested `/Applications` installation.
 The packaged native Trash smoke also passed for a newly created file and an
 acknowledged project folder, preserving the outside control and audit records.
 Only those disposable fixtures entered Trash; Trash was not emptied.
+
+## General whole-folder Analyze review, 2026-10-20
+
+The previous fix recognized selected Git roots only and still rejected a parent
+collection containing a nested build app. The reported `xiaolai` folder contains
+several repositories, including `XiaolaiDict/.build/HuiDict.app`; it is a user-data
+folder rather than an app-uninstall target. The new collection regression was
+observed failing before the fix and passes after it.
+
+Owned real user folders now receive the same explicit acknowledgement without
+requiring a Git marker. Nested projects, local settings, internal links and whole
+build app bundles travel with the reviewed parent. A standalone app or a selected
+path inside one still refuses; bundles are never patched or partially removed.
+`~/Applications`, hidden home roots, `Library`, HOME/system roots, and the standard
+personal collection roots remain outside this action. The existing whitelist,
+account-scoped database, browser-profile, credential-root, special-file, mount,
+identity and final-sink checks remain in force. Automatic Clean is unchanged.
+
+The private protocol now uses `acknowledged_items` for both project and folder
+IDs. Missing acknowledgement consumes the private plan without starting a move;
+new review IDs are required. Swift contracts cover both categories and cleared
+consent. Fixture tests verify a collection with multiple repositories, local
+settings and a nested app moves intact, its link remains a link, and its outside
+control stays untouched. Tests also retain standalone credential refusal and
+late credential-root insertion at the final guard.
+
+The reported collection passed read-only review in 9.13 seconds. Native UI
+verification displayed **Whole folder**, the complete-contents warning, an
+unchecked acknowledgement and disabled Trash button; cancelling preserved the
+folder. No execution command was sent for user folders. Packaged native Trash
+verification used a newly created collection containing a build-app fixture and
+verified missing acknowledgement refusal, a fresh acknowledged move, preserved
+outside control, audit records and one-use IDs. Trash was not emptied.
+Repository checks, upstream isolation, Go race tests and Swift contracts pass.
+The full suite finishes with the same documented upstream fallback-count failure;
+its Go, module-loading, integration and installation stages pass.

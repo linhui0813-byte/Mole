@@ -59,10 +59,10 @@ func TestAnalyzeWholeProjectLargeAndLinks(t *testing.T) {
 		}
 	}
 	v := projectItem(t, e, root)
-	if err := acknowledgeProjects([]item{v}, nil); err == nil {
+	if err := acknowledgeSelections([]item{v}, nil); err == nil {
 		t.Fatal("project executable without acknowledgement")
 	}
-	if err := acknowledgeProjects([]item{v}, []string{v.ID}); err != nil {
+	if err := acknowledgeSelections([]item{v}, []string{v.ID}); err != nil {
 		t.Fatal(err)
 	}
 	events := collectClean(e, []item{v})
@@ -255,7 +255,7 @@ func TestAnalyzeProjectProtocolRequiresAcknowledgementAndConsumesPlan(t *testing
 		t.Fatalf("missing acknowledgement accepted: %+v", ev)
 	}
 	assertExists(t, root, true)
-	if err := encoder.Encode(command{Action: "clean", ID: "replay", IDs: []string{v.ID}, AcknowledgedProjects: []string{v.ID}}); err != nil {
+	if err := encoder.Encode(command{Action: "clean", ID: "replay", IDs: []string{v.ID}, AcknowledgedItems: []string{v.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	if ev := read("error"); !strings.Contains(ev.Message, "expired") {
@@ -267,7 +267,7 @@ func TestAnalyzeProjectProtocolRequiresAcknowledgementAndConsumesPlan(t *testing
 	}
 	v = read("item").Item
 	read("scan_done")
-	if err := encoder.Encode(command{Action: "clean", ID: "with-ack", IDs: []string{v.ID}, AcknowledgedProjects: []string{v.ID}}); err != nil {
+	if err := encoder.Encode(command{Action: "clean", ID: "with-ack", IDs: []string{v.ID}, AcknowledgedItems: []string{v.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	read("clean_done")

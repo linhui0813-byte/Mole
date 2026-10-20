@@ -86,14 +86,17 @@ choose **Move checked items to Trash**. Moving a folder includes its contents;
 an accepted selected parent covers selected children without counting them twice.
 Cancel discards the plan. Zero checked items disables execution.
 
-A selected, user-owned Git checkout has a **Whole Git project** review. It names
-the included source, local history, uncommitted work, build files, and local settings
-(including `.env` files). Check the separate acknowledgement for each project
-before confirming its Trash move. Stop tools using the project and save your work
-first. Internal symbolic links move as links; their destinations are not traversed
-or moved. The helper enforces the acknowledgement against that review's private
-IDs, and a new review clears it. This is an explicit whole-project action, separate
-from automatic Clean. Selecting Git metadata on its own remains protected.
+A selected, user-owned data folder has a **Whole folder** review. A recognized Git
+root is labelled **Whole Git project**. Neither a Git marker nor a particular
+project layout is required: collections of projects and ordinary folders use the
+same explicit review. It includes all files and subfolders, local history,
+uncommitted work, built app bundles, databases, and local settings such as `.env`
+files. Check the separate acknowledgement for each folder before confirming its
+Trash move. Save your work and close apps and tools using that folder first.
+Symbolic links move as links and are not followed. Targets outside the selected
+folder are not moved. Nested app bundles move intact with the parent; their contents are not
+patched or selectively removed. The helper enforces acknowledgement against the
+private review IDs, and a new review clears it. Automatic Clean remains separate.
 
 Review binds each selection to its file version and physical parent. The private
 helper accepts only opaque IDs from that review, expires plans after 15 minutes,
@@ -103,7 +106,7 @@ before each move and at the final Trash guard. A changed object, incomplete
 size, inaccessible tree, unknown required visibility, or exceeded budget keeps
 the item. Reviews have a two-minute total budget, a 20-second per-item subprocess
 budget, and ordinary physical tree checks capped at 10,000 entries and eight seconds.
-Whole-project metadata walks allow up to 1,000,000 entries within eight seconds,
+Whole-folder metadata walks allow up to 1,000,000 entries within eight seconds,
 followed by bounded whitelist and database checks. Incomplete walks never authorize
 a move. Choose a smaller item if review exceeds a limit.
 
@@ -113,7 +116,7 @@ was moved, and offers **Done** without an execution button. Each kept path has
 **Reveal in Finder** for inspection. This state does not mean the folder is empty.
 
 The desktop policy supplements upstream Analyze's protected-root rules. It keeps
-application bundles, Git metadata, recognized credential/session locations,
+standalone app bundles and their selected internals, standalone Git metadata, recognized credential/session locations,
 cloud-document roots, broad application-state collection roots, symbolic links
 and redirected user ancestors, sockets and special files, compiled-model state,
 Deno stores, and the protected authentication cache and its file aliases. Chromium
@@ -124,24 +127,25 @@ contents. Folder
 checks inspect descendants rather than relying on the scan's filtered totals.
 This recognizes known sensitive state; it does not classify every personal file
 or prove that arbitrary applications have stopped using a selected document.
-The whole-project exception permits included Git metadata, project-local `.env`,
-`.config`, `.codex`, and `.claude` state and internal links only after the explicit
-acknowledgement. It requires a real owned `.git` directory, `HEAD`, and object store
-under the user's home, outside hidden home roots and `Library`. Linked worktrees
-are not supported. System/root protection, whitelist matches (including descendants),
-account-scoped database checks, application bundles, browser profiles, credential roots
+The whole-folder action permits included Git metadata, local `.env`, `.config`,
+`.codex`, and `.claude` state, nested app bundles and internal links only after the
+explicit acknowledgement. It requires an owned real directory under the user's
+home, outside hidden home roots, `Library`, and `Applications`. The standard personal
+roots themselves (`Documents`, `Downloads`, `Desktop`, `Pictures`, `Music`, `Movies`,
+and `Public`) stay protected; choose an item inside them. System/root protection,
+whitelist matches (including descendants), account-scoped database checks, browser profiles, credential roots
 such as `.ssh` and `.aws`, Git operation locks, mounted filesystems, and identity
 checks remain enforced. macOS access failures name the inaccessible path and point
 to Finder permissions and System Settings privacy access instead of presenting
 them as a Git protection rule.
 
-Whole-project database probes cover handles visible in the invoking account,
+Whole-folder database probes cover handles visible in the invoking account,
 including SQLite sidecars. An open database, diagnostic output, timeout, or failed
-probe keeps the project. This is not administrator-wide visibility or proof that
+probe keeps the folder. This is not administrator-wide visibility or proof that
 every service has stopped; the acknowledgement requires saving work and closing
-project tools. Automatic Clean and ordinary Analyze selections keep their original
+its apps and tools. Automatic Clean and ordinary Analyze selections keep their original
 upstream process-visibility contract. The distinction is deliberate: a manual
-whole-checkout move includes authored data rather than certifying it as disposable.
+whole-folder move includes authored data rather than certifying it as disposable.
 Review the exact paths yourself. Checks are point-in-time observations, not a
 filesystem transaction or a lock on folder contents.
 

@@ -90,12 +90,15 @@ with tempfile.TemporaryDirectory(prefix="mole-analyze-native-") as temp:
         assert kept.exists()
     finally:
         service.close()
-    # Exercise native directory Trash and an internal link to the kept file.
-    project = folder / f"mole-project-fixture-{uuid.uuid4().hex}"
-    (project / ".git/objects").mkdir(parents=True)
-    (project / ".git/HEAD").write_text("ref: refs/heads/disposable-fixture\n")
-    (project / ".env").write_text("DUMMY_FIXTURE=1\n")
-    (project / "outside-link").symlink_to(kept)
+    # Exercise a collection without its own Git marker and a nested build app.
+    project = folder / f"mole-folder-fixture-{uuid.uuid4().hex}"
+    (project / "nested-project/.git/objects").mkdir(parents=True)
+    (project / "nested-project/.git/HEAD").write_text("ref: refs/heads/disposable-fixture\n")
+    (project / "nested-project/.env").write_text("DUMMY_FIXTURE=1\n")
+    app = project / "nested-project/.build/Disposable.app/Contents"
+    app.mkdir(parents=True)
+    (app / "Info.plist").write_text("Disposable build fixture; never launched.\n")
+    (app / "outside-link").symlink_to(kept)
     scanner = Helper(helpers / "mole-dashboard-analyzer", [str(folder)], env)
     try:
         frame = scanner.until("done")[-1]
@@ -106,9 +109,18 @@ with tempfile.TemporaryDirectory(prefix="mole-analyze-native-") as temp:
         service.send({"action": "review", "request_id": "project-review", "candidates": [frame["bindings"][str(project)]]})
         events = service.until("scan_done")
         projects = [event["item"] for event in events if event["kind"] == "item"]
-        assert len(projects) == 1 and projects[0]["category"] == "analyze-project", events
+        assert len(projects) == 1 and projects[0]["category"] == "analyze-folder", events
         project_id = projects[0]["id"]
-        service.send({"action": "clean", "request_id": "project-move", "ids": [project_id], "acknowledged_projects": [project_id]})
+        service.send({"action": "clean", "request_id": "folder-missing-ack", "ids": [project_id]})
+        assert "Acknowledge" in service.until("error")[-1]["message"]
+        assert project.exists() and kept.exists()
+        # The missing acknowledgement consumed the plan. Obtain fresh IDs.
+        service.send({"action": "review", "request_id": "folder-new-review", "candidates": [frame["bindings"][str(project)]]})
+        events = service.until("scan_done")
+        projects = [event["item"] for event in events if event["kind"] == "item"]
+        assert len(projects) == 1 and projects[0]["category"] == "analyze-folder", events
+        project_id = projects[0]["id"]
+        service.send({"action": "clean", "request_id": "project-move", "ids": [project_id], "acknowledged_items": [project_id]})
         events = service.until("clean_done")
         results = [event for event in events if event["kind"] == "result"]
         assert len(results) == 1 and results[0]["status"] == "trashed", events
@@ -118,5 +130,5 @@ with tempfile.TemporaryDirectory(prefix="mole-analyze-native-") as temp:
         assert project.name in log and "unselected-fixture.txt" not in log, log
     finally:
         service.close()
-print("Packaged native Analyze Trash passed: reviewed file and acknowledged project moved, outside control preserved, audit recorded, replay refused")
+print("Packaged native Analyze Trash passed: reviewed file and acknowledged collection with build app moved, missing acknowledgement refused, outside control preserved, audit recorded, replay refused")
 print(f"Only newly created fixtures {name} and {project.name} were moved to Trash; Trash was not emptied.")

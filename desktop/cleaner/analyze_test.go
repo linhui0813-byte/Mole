@@ -109,9 +109,9 @@ func TestAnalyzeSelectedOnlyTrashAndAudit(t *testing.T) {
 
 func TestAnalyzeAllRefusedReviewSummary(t *testing.T) {
 	e := analyzeFixture(t)
-	secret := analyzeFile(t, e, "profile/.env")
+	secret := analyzeFile(t, e, "profile/.ssh/private.key")
 	var final event
-	p := e.review(context.Background(), "all-kept", []pathbinding.Binding{binding(t, filepath.Dir(secret))}, func(v event) {
+	p := e.review(context.Background(), "all-kept", []pathbinding.Binding{binding(t, filepath.Dir(filepath.Dir(secret)))}, func(v event) {
 		if v.Kind == "scan_done" {
 			final = v
 		}
@@ -183,11 +183,11 @@ func TestAnalyzeReviewRejectsChangedBindingAndParentOverlap(t *testing.T) {
 	}
 }
 
-func TestAnalyzeFolderKeepsRecognizedCredentialsAndLinks(t *testing.T) {
+func TestAnalyzeKeepsStandaloneCredentialsAndCredentialRoots(t *testing.T) {
 	e := analyzeFixture(t)
 	path := analyzeFile(t, e, "folder/.env")
 	var events []event
-	p := e.review(context.Background(), "blocked", []pathbinding.Binding{binding(t, filepath.Dir(path))}, func(v event) { events = append(events, v) })
+	p := e.review(context.Background(), "blocked", []pathbinding.Binding{binding(t, path)}, func(v event) { events = append(events, v) })
 	if p == nil || len(p.items) != 0 || !strings.Contains(events[1].Message, "credentials") {
 		t.Fatalf("credentials allowed: %+v", events)
 	}
@@ -195,14 +195,14 @@ func TestAnalyzeFolderKeepsRecognizedCredentialsAndLinks(t *testing.T) {
 	if err := os.Rename(path, filepath.Join(filepath.Dir(path), "normal.txt")); err != nil {
 		t.Fatal(err)
 	}
-	// A symlink subtree is kept, with a distinct useful refusal.
-	if err := os.Symlink(e.home, filepath.Join(filepath.Dir(path), "link")); err != nil {
+	// A whole-folder review still keeps credential stores, including nested ones.
+	if err := os.Mkdir(filepath.Join(filepath.Dir(path), ".ssh"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	var linkedEvents []event
 	p = e.review(context.Background(), "linked", []pathbinding.Binding{binding(t, filepath.Dir(path))}, func(v event) { linkedEvents = append(linkedEvents, v) })
-	if p == nil || len(p.items) != 0 || !strings.Contains(linkedEvents[1].Message, "symbolic link") {
-		t.Fatal("linked subtree became executable")
+	if p == nil || len(p.items) != 0 || !strings.Contains(linkedEvents[1].Message, "credentials") {
+		t.Fatalf("credential root became executable: %+v", linkedEvents)
 	}
 }
 
@@ -296,7 +296,7 @@ func TestAnalyzeNewProtectionAtFinalSinkAndCancellation(t *testing.T) {
 		v = entry
 	}
 	bin := strings.TrimPrefix(strings.Split(e.env[1], ":")[0], "PATH=")
-	stub := "#!/bin/bash\nprintf fixture > \"$HOME/Downloads/late-folder/nested/.env\"\nexec /usr/bin/du \"$@\"\n"
+	stub := "#!/bin/bash\nmkdir -p \"$HOME/Downloads/late-folder/nested/.ssh\"\nprintf fixture > \"$HOME/Downloads/late-folder/nested/.ssh/private.key\"\nexec /usr/bin/du \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "du"), []byte(stub), 0700); err != nil {
 		t.Fatal(err)
 	}

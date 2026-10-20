@@ -37,11 +37,11 @@ type item struct {
 }
 
 type command struct {
-	Action               string                `json:"action"`
-	ID                   string                `json:"request_id"`
-	IDs                  []string              `json:"ids"`
-	AcknowledgedProjects []string              `json:"acknowledged_projects"`
-	Candidates           []pathbinding.Binding `json:"candidates"`
+	Action            string                `json:"action"`
+	ID                string                `json:"request_id"`
+	IDs               []string              `json:"ids"`
+	AcknowledgedItems []string              `json:"acknowledged_items"`
+	Candidates        []pathbinding.Binding `json:"candidates"`
 }
 
 type event struct {
@@ -215,7 +215,7 @@ func run(input io.Reader, output io.Writer, e engine) {
 				selected, err := selectItems(current, c.IDs, time.Now())
 				current = nil // Every execution attempt consumes the plan, including refusals.
 				if err == nil {
-					err = acknowledgeProjects(selected, c.AcknowledgedProjects)
+					err = acknowledgeSelections(selected, c.AcknowledgedItems)
 				}
 				if err != nil {
 					emit(event{Kind: "error", RequestID: c.ID, Message: err.Error()})
@@ -230,10 +230,10 @@ func run(input io.Reader, output io.Writer, e engine) {
 	}
 }
 
-func acknowledgeProjects(selected []item, acknowledgements []string) error {
+func acknowledgeSelections(selected []item, acknowledgements []string) error {
 	for _, v := range selected {
-		if v.Category == "analyze-project" && !slices.Contains(acknowledgements, v.ID) {
-			return errors.New("Acknowledge that the whole project, including local history and project settings, will move to Trash. Review again.")
+		if (v.Category == "analyze-project" || v.Category == "analyze-folder") && !slices.Contains(acknowledgements, v.ID) {
+			return errors.New("Acknowledge that the entire folder and all its contents will move to Trash. Review again.")
 		}
 	}
 	return nil
