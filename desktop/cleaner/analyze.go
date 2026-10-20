@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -43,7 +45,10 @@ func (e engine) review(ctx context.Context, requestID string, candidates []pathb
 		emit(event{Kind: "progress", RequestID: requestID, Checked: index, Total: len(candidates), Message: b.Path})
 		reason := ""
 		covered := false
-		if seen[b.Path] || !b.Matches() {
+		current, readErr := pathbinding.Read(b.Path)
+		if errors.Is(readErr, os.ErrPermission) {
+			reason = fmt.Sprintf("macOS denied access to %s; check Finder Sharing & Permissions and Mole Dashboard access in System Settings > Privacy & Security, then scan again", b.Path)
+		} else if seen[b.Path] || readErr != nil || current != b {
 			reason = "The item or its parent changed since the scan. Scan again."
 		}
 		seen[b.Path] = true
@@ -58,6 +63,9 @@ func (e engine) review(ctx context.Context, requestID string, candidates []pathb
 		if reason == "" {
 			serialized, _ := json.Marshal(b)
 			v = item{ID: token(), Category: "analyze", Path: b.Path, binding: string(serialized)}
+			if pathbinding.WholeProjectIn(e.home, b.Path) {
+				v.Category = "analyze-project"
+			}
 			var err error
 			v, err = e.inspect(ctx, v)
 			if err != nil {

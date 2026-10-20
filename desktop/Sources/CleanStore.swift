@@ -8,6 +8,7 @@ struct CleanItem: Codable, Identifiable {
     let path: String
     let bytes: UInt64
     var name: String { URL(fileURLWithPath: path).lastPathComponent }
+    var isWholeProject: Bool { category == "analyze-project" }
 }
 
 struct CleanEvent: Decodable {
@@ -30,6 +31,7 @@ final class CleanStore: ObservableObject {
     @Published private(set) var phase = Phase.idle
     @Published private(set) var items: [CleanItem] = []
     @Published var selected = Set<String>()
+    @Published var acknowledgedProjects = Set<String>()
     @Published private(set) var results: [String: String] = [:]
     @Published private(set) var resultMessages: [String: String] = [:]
     @Published private(set) var message = "Scan user app caches and logs, then choose what to move to Trash."
@@ -58,6 +60,7 @@ final class CleanStore: ObservableObject {
         generation = UUID()
         input?.fileHandleForWriting.closeFile(); input = nil; process = nil
         phase = .idle; items = []; selected = []; results = [:]; resultMessages = [:]; refusals = [:]; coveredPaths = []; attempted = []
+        acknowledgedProjects = []
         partial = false; kept = 0; progress = 0; scannedAt = nil; stopping = false
     }
 
@@ -78,11 +81,12 @@ final class CleanStore: ObservableObject {
     var selectedBytes: UInt64 { selectedItems.reduce(0) { $0 + $1.bytes } }
     var totalBytes: UInt64 { items.reduce(0) { $0 + $1.bytes } }
     var moved: [CleanItem] { items.filter { results[$0.id] == "trashed" } }
-    var canClean: Bool { phase == .ready && !selected.isEmpty }
+    var canClean: Bool { phase == .ready && !selected.isEmpty && selectedItems.allSatisfy { !$0.isWholeProject || acknowledgedProjects.contains($0.id) } }
 
     func scan() {
         guard !analyzeMode, !busy else { return }
         items = []; selected = []; results = [:]; resultMessages = [:]; attempted = []
+        acknowledgedProjects = []
         partial = false; kept = 0; progress = 0; scannedAt = nil; stopping = false
         guard connect() else { return }
         phase = .scanning
@@ -156,7 +160,8 @@ final class CleanStore: ObservableObject {
 
     private func send(action: String, ids: [String] = []) {
         requestID = UUID().uuidString
-        write(["action": action, "request_id": requestID, "ids": ids])
+        write(["action": action, "request_id": requestID, "ids": ids,
+               "acknowledged_projects": items.filter { selected.contains($0.id) && $0.isWholeProject && acknowledgedProjects.contains($0.id) }.map(\.id)])
     }
 
     private func write(_ object: [String: Any]) {

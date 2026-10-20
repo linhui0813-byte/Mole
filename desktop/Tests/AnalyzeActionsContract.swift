@@ -6,24 +6,27 @@ enum AnalyzeActionsContract {
         try FileHandle.standardOutput.write(contentsOf: JSONSerialization.data(withJSONObject: object) + Data([10]))
     }
     static func helper() throws {
+        var project = false
         while let line = readLine(), let data = line.data(using: .utf8), let command = try JSONSerialization.jsonObject(with: data) as? [String: Any], let id = command["request_id"] as? String {
             let action = command["action"] as? String
             if action == "review" {
                 let values = command["candidates"] as! [[String: Any]]
                 let path = values[0]["path"] as! String
+                project = path.contains("project")
                 if path.contains("blocked") {
                     try send(["kind": "refused", "request_id": id, "path": path, "message": "Browser profile is kept"])
                     try send(["kind": "scan_done", "request_id": id, "status": "ready", "kept": 1,
                               "message": "None of the selected items passed the safety checks. Nothing was moved."])
                     continue
                 }
-                try send(["kind": "item", "request_id": id, "item": ["id": "reviewed-id", "category": "analyze", "path": path, "bytes": 4096]])
+                try send(["kind": "item", "request_id": id, "item": ["id": "reviewed-id", "category": path.contains("project") ? "analyze-project" : "analyze", "path": path, "bytes": 4096]])
                 if path.contains("slow") { Thread.sleep(forTimeInterval: 0.25) }
                 try send(["kind": "refused", "request_id": id, "path": "/fixture/protected", "message": "Kept: protected fixture"])
                 try send(["kind": "refused", "request_id": id, "path": "/fixture/covered-child", "status": "covered", "message": "Included with reviewed parent"])
                 try send(["kind": "scan_done", "request_id": id, "status": "ready", "kept": 1])
             } else if action == "clean" {
                 precondition(command["ids"] as? [String] == ["reviewed-id"], "UI sent an unreviewed identity")
+                precondition(command["acknowledged_projects"] as? [String] == (project ? ["reviewed-id"] : []), "UI did not send the reviewed project acknowledgement")
                 try send(["kind": "result", "request_id": id, "item_id": "reviewed-id", "status": "trashed", "message": "Simulated fixture outcome"])
                 try send(["kind": "clean_done", "request_id": id, "status": "finished"])
             }
@@ -69,6 +72,18 @@ enum AnalyzeActionsContract {
         precondition(store.items.isEmpty && store.selected.isEmpty && !store.canClean)
         precondition(store.refusals.count == 1 && store.message.contains("Nothing was moved"))
         store.resetReview()
+        store.review([candidate("/fixture/project")])
+        try await wait { store.phase == .ready }
+        precondition(store.items[0].isWholeProject && !store.canClean, "whole project did not require acknowledgement")
+        store.acknowledgedProjects = ["unreviewed-id"]
+        precondition(!store.canClean, "acknowledgement authorized another item")
+        store.acknowledgedProjects = ["reviewed-id"]
+        precondition(store.canClean)
+        store.cleanSelected()
+        try await wait { store.phase == .finished }
+        precondition(store.moved.count == 1)
+        store.resetReview()
+        precondition(store.acknowledgedProjects.isEmpty, "new review retained earlier consent")
         print("Analyze action UI contracts passed: reviewed IDs, refusal details, outcomes, late-cancel rejection, restart, reset")
     }
 }

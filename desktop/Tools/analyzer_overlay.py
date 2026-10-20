@@ -21,4 +21,5 @@ paths = {
 }
 if "--test" in sys.argv[2:]:
     paths[str(repo / "cmd/analyze/dashboard_adapter_test.go")] = str(repo / "desktop/analyzer/main_test.go.in")
+    paths[str(repo / "cmd/analyze/dashboard_project_test.go")] = str(repo / "desktop/analyzer/project_test.go.in")
 (out / "analyzer-overlay.json").write_text(json.dumps({"Replace": paths}))

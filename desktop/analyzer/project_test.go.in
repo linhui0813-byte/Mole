@@ -1,0 +1,63 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestDashboardWholeProjectReview(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(root, ".git/objects"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".git/HEAD", ".env"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(home, filepath.Join(root, "external-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardValidateTree(root); err == nil {
+		t.Fatal("ordinary review silently allowed project state")
+	}
+	if err := dashboardValidateProject(root); err != nil {
+		t.Fatalf("explicit whole-project review refused: %v", err)
+	}
+	if err := dashboardValidateProject(home); err == nil {
+		t.Fatal("repository collection became a whole project")
+	}
+	locked := filepath.Join(root, "unreadable")
+	if err := os.Mkdir(locked, 0000); err != nil {
+		t.Fatal(err)
+	}
+	blocked := dashboardValidateProject(root)
+	if err := os.Chmod(locked, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if blocked == nil || !strings.Contains(blocked.Error(), "macOS denied access") || !strings.Contains(blocked.Error(), locked) {
+		t.Fatalf("access failure was hidden as policy: %v", blocked)
+	}
+	if err := os.Mkdir(filepath.Join(root, "Demo.app"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardValidateProject(root); err == nil || !strings.Contains(err.Error(), "application bundles") {
+		t.Fatalf("bundle protection lost: %v", err)
+	}
+}
+
+func TestDashboardReviewAccessCause(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{{os.ErrPermission, "macOS denied access"}, {os.ErrNotExist, "cannot review"}} {
+		message := dashboardReviewError("/fixture/blocked", test.err).Error()
+		if !strings.Contains(message, test.want) || !strings.Contains(message, "/fixture/blocked") {
+			t.Fatalf("review error lost cause or exact path: %s", message)
+		}
+	}
+}

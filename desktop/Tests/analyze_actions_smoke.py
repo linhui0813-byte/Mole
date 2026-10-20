@@ -90,5 +90,33 @@ with tempfile.TemporaryDirectory(prefix="mole-analyze-native-") as temp:
         assert kept.exists()
     finally:
         service.close()
-print("Packaged native Analyze Trash passed: exact reviewed item moved, unselected fixture preserved, audit recorded, replay refused")
-print(f"Only newly created fixture {name} was moved to Trash; Trash was not emptied.")
+    # Exercise native directory Trash and an internal link to the kept file.
+    project = folder / f"mole-project-fixture-{uuid.uuid4().hex}"
+    (project / ".git/objects").mkdir(parents=True)
+    (project / ".git/HEAD").write_text("ref: refs/heads/disposable-fixture\n")
+    (project / ".env").write_text("DUMMY_FIXTURE=1\n")
+    (project / "outside-link").symlink_to(kept)
+    scanner = Helper(helpers / "mole-dashboard-analyzer", [str(folder)], env)
+    try:
+        frame = scanner.until("done")[-1]
+    finally:
+        scanner.close()
+    service = Helper(helpers / "mole-dashboard-cleaner", ["--analyze-actions"], env)
+    try:
+        service.send({"action": "review", "request_id": "project-review", "candidates": [frame["bindings"][str(project)]]})
+        events = service.until("scan_done")
+        projects = [event["item"] for event in events if event["kind"] == "item"]
+        assert len(projects) == 1 and projects[0]["category"] == "analyze-project", events
+        project_id = projects[0]["id"]
+        service.send({"action": "clean", "request_id": "project-move", "ids": [project_id], "acknowledged_projects": [project_id]})
+        events = service.until("clean_done")
+        results = [event for event in events if event["kind"] == "result"]
+        assert len(results) == 1 and results[0]["status"] == "trashed", events
+        assert not project.exists() and kept.exists()
+        assert "unselected fixture" in kept.read_text()
+        log = (home / "Library/Logs/mole/operations.log").read_text()
+        assert project.name in log and "unselected-fixture.txt" not in log, log
+    finally:
+        service.close()
+print("Packaged native Analyze Trash passed: reviewed file and acknowledged project moved, outside control preserved, audit recorded, replay refused")
+print(f"Only newly created fixtures {name} and {project.name} were moved to Trash; Trash was not emptied.")

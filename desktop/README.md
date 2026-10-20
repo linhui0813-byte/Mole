@@ -86,6 +86,15 @@ choose **Move checked items to Trash**. Moving a folder includes its contents;
 an accepted selected parent covers selected children without counting them twice.
 Cancel discards the plan. Zero checked items disables execution.
 
+A selected, user-owned Git checkout has a **Whole Git project** review. It names
+the included source, local history, uncommitted work, build files, and local settings
+(including `.env` files). Check the separate acknowledgement for each project
+before confirming its Trash move. Stop tools using the project and save your work
+first. Internal symbolic links move as links; their destinations are not traversed
+or moved. The helper enforces the acknowledgement against that review's private
+IDs, and a new review clears it. This is an explicit whole-project action, separate
+from automatic Clean. Selecting Git metadata on its own remains protected.
+
 Review binds each selection to its file version and physical parent. The private
 helper accepts only opaque IDs from that review, expires plans after 15 minutes,
 and consumes a plan on its first execution attempt. It checks identities,
@@ -93,8 +102,10 @@ whitelists, protected contents, and upstream live-cache/database rules again
 before each move and at the final Trash guard. A changed object, incomplete
 size, inaccessible tree, unknown required visibility, or exceeded budget keeps
 the item. Reviews have a two-minute total budget, a 20-second per-item subprocess
-budget, and physical tree checks capped at 10,000 entries and eight seconds.
-Choose a smaller item if review refuses a large folder.
+budget, and ordinary physical tree checks capped at 10,000 entries and eight seconds.
+Whole-project metadata walks allow up to 1,000,000 entries within eight seconds,
+followed by bounded whitelist and database checks. Incomplete walks never authorize
+a move. Choose a smaller item if review exceeds a limit.
 
 Entry-count and time-limit refusals name their separate limits. When every
 selected item is kept, the sheet shows **Nothing eligible**, explains that nothing
@@ -113,6 +124,24 @@ contents. Folder
 checks inspect descendants rather than relying on the scan's filtered totals.
 This recognizes known sensitive state; it does not classify every personal file
 or prove that arbitrary applications have stopped using a selected document.
+The whole-project exception permits included Git metadata, project-local `.env`,
+`.config`, `.codex`, and `.claude` state and internal links only after the explicit
+acknowledgement. It requires a real owned `.git` directory, `HEAD`, and object store
+under the user's home, outside hidden home roots and `Library`. Linked worktrees
+are not supported. System/root protection, whitelist matches (including descendants),
+account-scoped database checks, application bundles, browser profiles, credential roots
+such as `.ssh` and `.aws`, Git operation locks, mounted filesystems, and identity
+checks remain enforced. macOS access failures name the inaccessible path and point
+to Finder permissions and System Settings privacy access instead of presenting
+them as a Git protection rule.
+
+Whole-project database probes cover handles visible in the invoking account,
+including SQLite sidecars. An open database, diagnostic output, timeout, or failed
+probe keeps the project. This is not administrator-wide visibility or proof that
+every service has stopped; the acknowledgement requires saving work and closing
+project tools. Automatic Clean and ordinary Analyze selections keep their original
+upstream process-visibility contract. The distinction is deliberate: a manual
+whole-checkout move includes authored data rather than certifying it as disposable.
 Review the exact paths yourself. Checks are point-in-time observations, not a
 filesystem transaction or a lock on folder contents.
 
@@ -321,7 +350,8 @@ at runtime, so Go's test cache cannot track those template changes.
 
 `python3 desktop/Tests/analyze_actions_smoke.py` is an explicit native-transport
 smoke test after building. It creates its own disposable files and temporary HOME,
-then moves only its newly created selected file into the real macOS Trash. It
+then moves only its newly created selected file and acknowledged project folder
+into the real macOS Trash. It
 verifies the control file, audit record, and refusal to reuse the consumed plan.
 It leaves that fixture in Trash and never empties Trash. Native GUI verification
 also used only a named disposable fixture, covering review cancellation, protected
@@ -331,4 +361,7 @@ zero-selection disabling confirmation, with live readings in its status window.
 
 Refusal regressions cover a profile containing over 10,000 cache files, distinct
 entry/deadline causes, metadata-only network-cookie recognition, an all-kept review,
-and browser-profile data appearing during final sizing after review.
+and browser-profile data appearing during final sizing after review. Whole-project
+fixtures also cover account-scoped database checks without administrator visibility,
+interrupted probes stopping a later eligible item, and native folder Trash while
+preserving a linked outside control.

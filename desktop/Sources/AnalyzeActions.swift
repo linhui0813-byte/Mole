@@ -36,6 +36,17 @@ struct AnalyzeReviewSheet: View {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(item.name).font(.system(size: 13, weight: .semibold))
                                 Text(item.path).font(.system(size: 11)).foregroundStyle(Theme.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                if item.isWholeProject {
+                                    Label("Whole Git project", systemImage: "exclamationmark.triangle")
+                                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.gold)
+                                    Text("Includes source files, local Git history, uncommitted work, build files, databases, and project settings, including any .env files. Save your work and stop tools using this project first. Internal links move as links; their targets stay in place.")
+                                        .font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
+                                    if actions.phase == .ready {
+                                        Toggle("I saved my work, closed project tools, and want to move this entire project to Trash", isOn: Binding(get: { actions.acknowledgedProjects.contains(item.id) }, set: { value in
+                                            if value { actions.acknowledgedProjects.insert(item.id) } else { actions.acknowledgedProjects.remove(item.id) }
+                                        })).toggleStyle(.checkbox).font(.system(size: 12))
+                                    }
+                                }
                                 if let result = actions.resultMessages[item.id] {
                                     Text(result).font(.system(size: 11)).foregroundStyle(actions.results[item.id] == "trashed" ? Theme.green : Theme.gold)
                                 } else if actions.phase == .finished {

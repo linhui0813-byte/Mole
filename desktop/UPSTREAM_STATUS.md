@@ -197,3 +197,45 @@ with a dummy profile verified **Nothing eligible**, the specific refusal reason,
 unselected control remained unchanged. The full suite completed with exit status 1
 only on the documented upstream fallback-count audit; its Go, module-loading,
 integration, and installation stages passed.
+
+## Whole-project Analyze review, 2026-10-20
+
+The dashboard's blanket `.git` refusal conflated automatic cleanup with an
+explicit move of a selected checkout. The reported project also had about
+171,000 entries, internal links, project-local settings, and dependency SQLite
+test fixtures. Simply deleting that refusal would hit the ordinary entry cap
+and then the automated cleanup requirement for administrator process visibility.
+
+The desktop adapter now offers a separate, acknowledged whole-project review for
+owned checkouts under HOME, outside Library and hidden home roots. It physically
+walks metadata without following internal links, includes Git history and local
+settings, and retains root protection, whitelists, application/profile/credential
+root exclusions, Git locks, mount checks, exact object/parent bindings, one-use
+plans, and the upstream Trash/logging funnel. It never executes Git config or hooks.
+The helper requires the acknowledgement for each opaque project ID; the UI
+requires saving work and closing project tools before enabling confirmation.
+
+This explicit user-data action checks SQLite families within the invoking account.
+Open handles, diagnostic output, unexpected statuses, timeouts, and interrupted
+probes do not authorize a move. It does not certify administrator-wide inactivity;
+automatic Clean and ordinary Analyze retain their existing visibility contract.
+This scope is deliberate, rather than treating a missing administrator view as
+evidence that a database is idle. Real access errors name their path and the
+Finder/System Settings access checks the user can make.
+
+Regression fixtures cover over 10,000 entries, included Git/.env data, preserved
+links and outside controls, account-scoped idle/open/unknown database states,
+late whitelist patterns and final-sizing insertion, Git locks, inaccessible
+subfolders, missing acknowledgement, plan consumption, and a fresh acknowledged
+execution. Go race tests and Swift contracts pass. The required full suite
+retains its one documented upstream fallback-count failure; repository checks
+and upstream isolation pass.
+
+Read-only review of the reported project completed in 4.46 seconds and produced
+an `analyze-project` item. Native verification displayed its whole-project warning,
+unchecked acknowledgement, and disabled Trash button. Cancelling preserved the
+project. No execution command was sent for it. Delivery rebuilds the committed
+revision and refreshes the separately requested `/Applications` installation.
+The packaged native Trash smoke also passed for a newly created file and an
+acknowledged project folder, preserving the outside control and audit records.
+Only those disposable fixtures entered Trash; Trash was not emptied.
