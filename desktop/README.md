@@ -96,11 +96,20 @@ the item. Reviews have a two-minute total budget, a 20-second per-item subproces
 budget, and physical tree checks capped at 10,000 entries and eight seconds.
 Choose a smaller item if review refuses a large folder.
 
+Entry-count and time-limit refusals name their separate limits. When every
+selected item is kept, the sheet shows **Nothing eligible**, explains that nothing
+was moved, and offers **Done** without an execution button. Each kept path has
+**Reveal in Finder** for inspection. This state does not mean the folder is empty.
+
 The desktop policy supplements upstream Analyze's protected-root rules. It keeps
 application bundles, Git metadata, recognized credential/session locations,
 cloud-document roots, broad application-state collection roots, symbolic links
 and redirected user ancestors, sockets and special files, compiled-model state,
-Deno stores, and the protected authentication cache and its file aliases. Folder
+Deno stores, and the protected authentication cache and its file aliases. Chromium
+profiles are recognized from exact `Preferences` and cookie/login-store metadata;
+the usual `Local State` plus `Default` layout is checked before walking its caches.
+Profile roots and recognized private-data files are kept without reading their
+contents. Folder
 checks inspect descendants rather than relying on the scan's filtered totals.
 This recognizes known sensitive state; it does not classify every personal file
 or prove that arbitrary applications have stopped using a selected document.
@@ -319,3 +328,7 @@ also used only a named disposable fixture, covering review cancellation, protect
 folder refusal, a confirmed move, automatic map refresh, and retained results.
 The deployed original application also passed review cancellation and
 zero-selection disabling confirmation, with live readings in its status window.
+
+Refusal regressions cover a profile containing over 10,000 cache files, distinct
+entry/deadline causes, metadata-only network-cookie recognition, an all-kept review,
+and browser-profile data appearing during final sizing after review.

@@ -168,3 +168,32 @@ not transactionally locked, and user review of selected documents remains requir
 The prior verified application is preserved locally for rollback. Delivery is a
 commit on the fork's `native-dashboard` branch and a locally signed development
 app, not a public binary release.
+
+## Review refusal follow-up
+
+The reported generic folder-budget refusal combined the entry cap and deadline,
+masking a Chromium profile behind a large cache traversal. The all-kept review
+also showed zero selected bytes and continued to invite selection despite having
+no eligible items.
+
+The desktop policy now recognizes exact Chromium profile metadata before walking
+its cache, without reading credential values. It keeps profile roots and known
+private-data files, repeats that check at the final Trash boundary, and distinguishes
+entry-count limits from time limits. Existing limits remain unchanged. The sheet
+shows **Nothing eligible**, a factual all-kept summary, **Reveal in Finder**, and
+**Done** when nothing is eligible. Disabled confirmation text stays readable when
+an otherwise eligible review has zero checked items.
+
+Regression tests failed on the previous implementation at the intended assertions:
+the large profile returned the generic limit reason, and an all-kept review still
+invited a move. Fixtures also cover metadata-only cookie detection, distinct limits,
+and browser data appearing during final sizing. The reported user folder is used
+only for read-only metadata and refusal verification; no move is attempted.
+
+Fresh Go race tests and Swift action contracts passed. The metadata check on the
+reported folder returned the browser-profile refusal in 0.42 seconds. Native QA
+with a dummy profile verified **Nothing eligible**, the specific refusal reason,
+**Reveal in Finder**, **Done**, and no execution button. All dummy files and the
+unselected control remained unchanged. The full suite completed with exit status 1
+only on the documented upstream fallback-count audit; its Go, module-loading,
+integration, and installation stages passed.

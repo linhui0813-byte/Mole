@@ -89,6 +89,10 @@ func (e engine) review(ctx context.Context, requestID string, candidates []pathb
 		return nil
 	}
 	p.created = time.Now()
-	emit(event{Kind: "scan_done", RequestID: requestID, Status: "ready", Kept: kept, Total: len(p.items), Message: "Review the exact items below. Only checked items will move to Trash."})
+	message := "Review the exact items below. Only checked items will move to Trash."
+	if len(p.items) == 0 {
+		message = "None of the selected items passed the safety checks. Nothing was moved. Review the reasons below."
+	}
+	emit(event{Kind: "scan_done", RequestID: requestID, Status: "ready", Kept: kept, Total: len(p.items), Message: message})
 	return p
 }

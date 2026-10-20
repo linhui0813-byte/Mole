@@ -13,6 +13,91 @@ import (
 	"time"
 )
 
+func TestDashboardTrashPolicyBrowserProfileBeforeLargeTree(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	profile := filepath.Join(root, "Default")
+	if err := os.Mkdir(profile, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := dashboardValidateTree(root); err != nil {
+		t.Fatalf("ordinary directory named Default refused: %v", err)
+	}
+	for _, path := range []string{"Local State", "Default/Preferences", "Default/Cookies", "Default/Login Data"} {
+		if err := os.WriteFile(filepath.Join(root, path), []byte("dummy fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The root callback must identify a profile before enumerating its cache.
+	cache := filepath.Join(profile, "Cache")
+	if err := os.Mkdir(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 10001 {
+		if err := os.WriteFile(filepath.Join(cache, fmt.Sprintf("%05d", i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{root, profile, filepath.Join(profile, "Cookies"), filepath.Join(profile, "Login Data")} {
+		started := time.Now()
+		err := dashboardValidateTree(path)
+		if err == nil || !strings.Contains(err.Error(), "browser profile") {
+			t.Fatalf("browser state did not receive its actual protection reason: %v", err)
+		}
+		if time.Since(started) > 2*time.Second {
+			t.Fatal("profile identification traversed the large cache")
+		}
+	}
+}
+
+func TestDashboardTrashPolicyReviewLimitCauses(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	for _, name := range []string{"one", "two"} {
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := dashboardValidateTreeWithin(context.Background(), root, 3); err != nil {
+		t.Fatalf("completed tree refused: %v", err)
+	}
+	if err := dashboardValidateTreeWithin(context.Background(), root, 2); err == nil || !strings.Contains(err.Error(), "at most 2 entries") {
+		t.Fatalf("entry cap did not name the cause: %v", err)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if err := dashboardValidateTreeWithin(ctx, root, 3); err == nil || !strings.Contains(err.Error(), "8-second safety limit") {
+		t.Fatalf("deadline did not name the cause: %v", err)
+	}
+}
+
+func TestDashboardTrashPolicyNetworkCookiesAndIncompleteMarkers(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	profile := t.TempDir()
+	for _, name := range []string{"Preferences", "Network"} {
+		path := filepath.Join(profile, name)
+		if name == "Network" {
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := dashboardValidateTree(profile); err != nil {
+		t.Fatalf("ordinary Preferences file became profile evidence: %v", err)
+	}
+	cookies := filepath.Join(profile, "Network/Cookies")
+	if err := os.WriteFile(cookies, []byte("dummy fixture"), 0000); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{profile, cookies} {
+		if err := dashboardValidateTree(path); err == nil || !strings.Contains(err.Error(), "browser profile") {
+			t.Fatalf("metadata-only profile guard failed: %v", err)
+		}
+	}
+}
+
 func TestDashboardTrashPolicySpecialFiles(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()

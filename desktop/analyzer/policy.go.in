@@ -55,18 +55,67 @@ func dashboardTrashPolicy(path string) error {
 }
 
 func dashboardValidateTree(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	return dashboardValidateTreeWithin(ctx, path, 10000)
+}
+
+// Recognize exact profile metadata before walking a potentially huge cache.
+// Only file types and names are inspected; no credential contents are read.
+func dashboardBrowserProfile(path string) string {
+	regular := func(path string) bool {
+		info, err := os.Lstat(path)
+		return err == nil && info.Mode().IsRegular()
+	}
+	profile := func(dir string) bool {
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() {
+			return false
+		}
+		if !regular(filepath.Join(dir, "Preferences")) {
+			return false
+		}
+		if regular(filepath.Join(dir, "Cookies")) || regular(filepath.Join(dir, "Login Data")) {
+			return true
+		}
+		network, err := os.Lstat(filepath.Join(dir, "Network"))
+		return err == nil && network.IsDir() && regular(filepath.Join(dir, "Network/Cookies"))
+	}
+	dir := path
+	if info, err := os.Lstat(path); err == nil && !info.IsDir() {
+		switch filepath.Base(path) {
+		case "Local State":
+			dir = filepath.Dir(path)
+		case "Cookies", "Cookies-wal", "Cookies-shm", "Login Data", "Login Data-wal", "Login Data-shm",
+			"Preferences", "Secure Preferences", "History", "History-wal", "History-shm", "Web Data", "Web Data-wal", "Web Data-shm":
+			dir = filepath.Dir(path)
+			if filepath.Base(dir) == "Network" {
+				dir = filepath.Dir(dir)
+			}
+		default:
+			return ""
+		}
+	}
+	if profile(dir) || regular(filepath.Join(dir, "Local State")) && profile(filepath.Join(dir, "Default")) {
+		return dir
+	}
+	return ""
+}
+
+func dashboardValidateTreeWithin(ctx context.Context, path string, entryLimit int) error {
 	if _, err := pathbinding.Read(path); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
 	count := 0
 	return filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return errors.New("folder contents could not be verified")
 		}
-		if ctx.Err() != nil || count >= 10000 {
-			return errors.New("folder check exceeded its budget; choose a smaller item")
+		if ctx.Err() != nil {
+			return errors.New("folder review reached its 8-second safety limit; review a smaller subfolder")
+		}
+		if count >= entryLimit {
+			return fmt.Errorf("folder review supports at most %s entries per item; review a smaller subfolder", formatNumber(int64(entryLimit)))
 		}
 		count++
 		if d.Type()&os.ModeSymlink != 0 {
@@ -74,6 +123,9 @@ func dashboardValidateTree(path string) error {
 		}
 		if !d.IsDir() && !d.Type().IsRegular() {
 			return fmt.Errorf("folder contains a socket or special file: %s; close its owner and review it in Finder", p)
+		}
+		if profile := dashboardBrowserProfile(p); profile != "" {
+			return fmt.Errorf("browser profile is kept to protect sign-ins and session data: %s; inspect it in Finder", profile)
 		}
 		return dashboardTrashPolicy(p)
 	})

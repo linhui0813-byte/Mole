@@ -11,6 +11,12 @@ enum AnalyzeActionsContract {
             if action == "review" {
                 let values = command["candidates"] as! [[String: Any]]
                 let path = values[0]["path"] as! String
+                if path.contains("blocked") {
+                    try send(["kind": "refused", "request_id": id, "path": path, "message": "Browser profile is kept"])
+                    try send(["kind": "scan_done", "request_id": id, "status": "ready", "kept": 1,
+                              "message": "None of the selected items passed the safety checks. Nothing was moved."])
+                    continue
+                }
                 try send(["kind": "item", "request_id": id, "item": ["id": "reviewed-id", "category": "analyze", "path": path, "bytes": 4096]])
                 if path.contains("slow") { Thread.sleep(forTimeInterval: 0.25) }
                 try send(["kind": "refused", "request_id": id, "path": "/fixture/protected", "message": "Kept: protected fixture"])
@@ -58,6 +64,11 @@ enum AnalyzeActionsContract {
         precondition(store.items[0].path == "/fixture/new-selection")
         store.resetReview()
         precondition(store.phase == .idle && !store.canClean && store.items.isEmpty && store.coveredPaths.isEmpty)
+        store.review([candidate("/fixture/blocked")])
+        try await wait { store.phase == .ready }
+        precondition(store.items.isEmpty && store.selected.isEmpty && !store.canClean)
+        precondition(store.refusals.count == 1 && store.message.contains("Nothing was moved"))
+        store.resetReview()
         print("Analyze action UI contracts passed: reviewed IDs, refusal details, outcomes, late-cancel rejection, restart, reset")
     }
 }

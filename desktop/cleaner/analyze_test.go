@@ -107,6 +107,52 @@ func TestAnalyzeSelectedOnlyTrashAndAudit(t *testing.T) {
 	}
 }
 
+func TestAnalyzeAllRefusedReviewSummary(t *testing.T) {
+	e := analyzeFixture(t)
+	secret := analyzeFile(t, e, "profile/.env")
+	var final event
+	p := e.review(context.Background(), "all-kept", []pathbinding.Binding{binding(t, filepath.Dir(secret))}, func(v event) {
+		if v.Kind == "scan_done" {
+			final = v
+		}
+	})
+	if p != nil && len(p.items) != 0 {
+		t.Fatal("refused review created an executable selection")
+	}
+	if final.Total != 0 || final.Kept != 1 || !strings.Contains(final.Message, "None of the selected items") {
+		t.Fatalf("all-refused review still invites a move: %+v", final)
+	}
+	assertExists(t, secret, true)
+}
+
+func TestAnalyzeBrowserProfileAppearsAtFinalSink(t *testing.T) {
+	e := analyzeFixture(t)
+	file := analyzeFile(t, e, "browser-fixture/Default/cache.txt")
+	root := filepath.Dir(filepath.Dir(file))
+	if err := os.WriteFile(filepath.Join(root, "Local State"), []byte("dummy fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b := binding(t, root)
+	p := review(t, e, root)
+	var selected item
+	for _, v := range p.items {
+		selected = v
+	}
+	bin := strings.TrimPrefix(strings.Split(e.env[1], ":")[0], "PATH=")
+	stub := "#!/bin/bash\nfor name in Preferences Cookies 'Login Data'; do printf fixture > \"$HOME/Downloads/browser-fixture/Default/$name\"; done\nexec /usr/bin/du \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "du"), []byte(stub), 0700); err != nil {
+		t.Fatal(err)
+	}
+	events := collectClean(e, []item{selected})
+	if events[1].Status == "trashed" {
+		t.Fatalf("late browser credentials passed the final guard: %+v", events)
+	}
+	assertExists(t, filepath.Join(root, "Default/Cookies"), true)
+	if !b.Matches() {
+		t.Fatal("fixture changed the root identity instead of exercising the final descendant guard")
+	}
+}
+
 func TestAnalyzeReviewRejectsChangedBindingAndParentOverlap(t *testing.T) {
 	e := analyzeFixture(t)
 	child := analyzeFile(t, e, "folder/child.txt")

@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 
 struct AnalyzeReviewSheet: View {
     @ObservedObject var actions: CleanStore
     let close: () -> Void
+    private var noEligibleItems: Bool { actions.phase == .ready && actions.items.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -10,7 +12,7 @@ struct AnalyzeReviewSheet: View {
                 Label(actions.phase == .finished ? "Trash results" : "Review items for Trash", systemImage: "trash")
                     .font(.system(size: 22, weight: .semibold))
                 Spacer()
-                Text(actions.phase == .finished ? "\(Format.bytes(actions.moved.reduce(0) { $0 + $1.bytes })) moved" : Format.bytes(actions.selectedBytes))
+                Text(noEligibleItems ? "Nothing eligible" : actions.phase == .finished ? "\(Format.bytes(actions.moved.reduce(0) { $0 + $1.bytes })) moved" : Format.bytes(actions.selectedBytes))
                     .font(.system(size: 24, weight: .semibold, design: .rounded)).monospacedDigit()
             }
             Text("Review each exact path. Moving a folder includes its contents. Files stay in Trash until you empty it in Finder.")
@@ -46,8 +48,14 @@ struct AnalyzeReviewSheet: View {
                     }
                     ForEach(actions.refusals.keys.sorted(), id: \.self) { path in
                         VStack(alignment: .leading, spacing: 5) {
-                            Label(actions.coveredPaths.contains(path) ? "Covered by parent review" : "Kept", systemImage: actions.coveredPaths.contains(path) ? "folder" : "lock.shield")
-                                .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.gold)
+                            HStack {
+                                Label(actions.coveredPaths.contains(path) ? "Covered by parent review" : "Kept", systemImage: actions.coveredPaths.contains(path) ? "folder" : "lock.shield")
+                                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.gold)
+                                Spacer()
+                                Button("Reveal in Finder") {
+                                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                                }.font(.system(size: 11))
+                            }
                             Text(path).font(.system(size: 11)).foregroundStyle(Theme.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                             Text(actions.refusals[path] ?? "").font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
                         }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Theme.card, in: RoundedRectangle(cornerRadius: 10))
@@ -62,17 +70,17 @@ struct AnalyzeReviewSheet: View {
                 if actions.busy {
                     Button(actions.stopping ? "Stopping…" : "Stop") { actions.cancel() }.disabled(actions.stopping)
                 } else {
-                    Button(actions.phase == .ready ? "Cancel" : "Done") {
+                    Button(actions.phase == .ready && !noEligibleItems ? "Cancel" : "Done") {
                         if actions.phase == .ready { actions.resetReview() }
                         close()
                     }.keyboardShortcut(.cancelAction)
                 }
                 Spacer()
-                if actions.phase == .ready {
+                if actions.phase == .ready && !noEligibleItems {
                     Text("\(actions.selected.count) checked · \(Format.bytes(actions.selectedBytes)) estimated")
                         .font(.system(size: 11)).foregroundStyle(Theme.secondary)
                     Button("Move checked items to Trash") { actions.cleanSelected() }
-                        .buttonStyle(.borderedProminent).tint(Theme.gold).foregroundStyle(Theme.background).disabled(!actions.canClean)
+                        .buttonStyle(.borderedProminent).tint(Theme.gold).foregroundStyle(actions.canClean ? Theme.background : Theme.secondary).disabled(!actions.canClean)
                 }
             }
         }.padding(24).frame(width: 740, height: 580).background(Theme.background).foregroundStyle(Theme.text).preferredColorScheme(.dark)

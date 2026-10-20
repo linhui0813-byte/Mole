@@ -62,8 +62,13 @@ analyze_check_selection() {
     local valid=true
     while IFS= read -r -d '' member; do
         count=$((count + 1))
-        if [[ $count -gt 10000 || $SECONDS -ge $deadline ]]; then
-            ANALYZE_REASON='Folder review exceeded its budget; choose a smaller item'
+        if [[ $count -gt 10000 ]]; then
+            ANALYZE_REASON='Folder review supports at most 10,000 entries per item; review a smaller subfolder'
+            valid=false
+            break
+        fi
+        if [[ $SECONDS -ge $deadline ]]; then
+            ANALYZE_REASON='Detailed safety checks reached their 8-second limit; review a smaller subfolder'
             valid=false
             break
         fi
