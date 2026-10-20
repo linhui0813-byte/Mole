@@ -14,6 +14,7 @@ class UpstreamIsolation(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "desktop").mkdir()
         (self.root / "cmd/status").mkdir(parents=True)
+        (self.root / "cmd/analyze").mkdir(parents=True)
         (self.root / "cmd/status/metrics.go").write_text("package main\n")
         self.agents = self.root / "AGENTS.md"
         self.upstream_rules = "# Upstream rules\n\nPreserve the execution core.\n"
@@ -80,11 +81,14 @@ class UpstreamIsolation(unittest.TestCase):
         self.check_guard("agent-policy-diff")
 
     def test_untracked_and_ignored_go_source_are_refused(self):
-        extra = self.root / "cmd/status/local.go"
-        extra.write_text("package main\n")
-        self.check_guard("untracked-source")
-        (self.root / ".git/info/exclude").write_text("local.go\n")
-        self.check_guard("untracked-source")
+        for area in ("status", "analyze"):
+            with self.subTest(area=area):
+                extra = self.root / f"cmd/{area}/local.go"
+                extra.write_text("package main\n")
+                self.check_guard("untracked-source")
+                (self.root / ".git/info/exclude").write_text("local.go\n")
+                self.check_guard("untracked-source")
+                extra.unlink()
 
     def test_missing_and_invalid_pin_have_distinct_diagnostics(self):
         self.pin_file.unlink()

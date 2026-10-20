@@ -72,13 +72,13 @@ PY
 # Untracked Go files can be compiled even when Git ignores them. Include those
 # files in this check, while leaving unrelated files such as .vmark/ alone.
 if ! extra_sources="$(git -C "$REPO_DIR" ls-files --others -- \
-    ':(glob)cmd/status/*.go' ':(glob)internal/**/*.go')"; then
+    ':(glob)cmd/status/*.go' ':(glob)cmd/analyze/*.go' ':(glob)internal/**/*.go')"; then
     printf '%s\n' '[git-error] Git could not inspect untracked collector source.' >&2
     printf '%s\n' 'Run git status, resolve the Git error, then retry desktop/check-upstream.sh.' >&2
     exit 1
 fi
 if [[ -n "$extra_sources" ]]; then
-    printf '%s\n' '[untracked-source] Extra Go source exists in the upstream collector or internal packages.' >&2
+    printf '%s\n' '[untracked-source] Extra Go source exists in the upstream collector, analyzer, or internal packages.' >&2
     printf '%s\n' "$extra_sources" >&2
     printf '%s\n' 'Move fork-specific source into desktop/, then retry the build.' >&2
     exit 1

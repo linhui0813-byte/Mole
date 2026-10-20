@@ -1,7 +1,8 @@
 # Mole Dashboard
 
-An independent, native SwiftUI dashboard for macOS 14 or later, using this
-repository's status collectors. This is a separate local app, inspired by the
+An independent, native SwiftUI dashboard for macOS 14 or later, with live
+status, read-only disk analysis, and selected-item cleanup powered by this
+repository. This is a separate local app, inspired by the
 provided status-screen reference. It is not the commercial Mole Mac app.
 
 ```bash
@@ -36,8 +37,47 @@ it. The menu also shows collection status and CPU/memory readings, with
 Pause stops collection; Resume and Reconnect start a fresh collector. Quit
 stops the app and its helper; the helper also exits if its parent disappears.
 There is no login item, launch agent, network server, telemetry,
-process termination, or fan control. Clean is an explicit user action described
-below. Subprocesses use fixed arguments and never request administrator access.
+process termination, or fan control. Clean and Analyze are explicit user actions
+described below. Subprocesses use fixed arguments and never request administrator access.
+
+## Analyze
+
+Choose **Analyze**, then **Scan folder**, or use **Choose folder…**, **Home**,
+**User Library**, or **Applications**. The first page waits for an explicit scan.
+The space map assigns area in proportion to measured bytes. Click a folder in
+the map or list to scan inside it; the parent button and breadcrumbs navigate
+back out. Direct items support name/path filtering and size/name sorting.
+Files and each row's reveal button show the item in Finder without opening it.
+The **Large files** view shows the engine's discovery list, up to 20 files of at
+least 1 MiB; upstream filters omit some file types and files in folded folders.
+It is not a complete inventory of every large file.
+
+This version is read-only: it offers no Trash or deletion actions. Measurements
+reuse the pinned upstream analyzer traversal, hardlink handling, concurrency
+budgets, directory filters, and JSON coverage states. The dashboard adapter
+runs a fresh scan on each navigation, bypasses saved measurements, and denies
+cache publication, so inspecting a folder does not create, replace, prune, or
+remove the CLI's scan caches. Symbolic links are measured as links and are not
+followed by traversal; selecting an explicit folder path can resolve a link.
+Measured size is an estimate within Mole's filters, not an atomic filesystem
+snapshot, a whole-volume accounting total, or reclaimable space.
+
+Partial measurements remain marked as lower bounds. Unavailable sizes show
+**Unavailable** and receive no map area. Empty folders remain valid zero-size
+results. The map groups items after the largest 24; all direct items remain in
+the list. A scan reports checked-file/folder counts, has a two-minute budget,
+and supports **Stop**. Cancellation and timeouts discard the unfinished result;
+choose a smaller folder to retry. Navigation stays disabled until the helper
+has stopped, and result identity is bound to the requested path. Closing the
+window leaves an explicitly started scan running; quitting cancels it. The
+helper also cancels on stdin closure or loss of its parent, with a bounded exit.
+There are no administrator requests or new background services.
+
+The Go build overlay retains the upstream main file's helper definitions while
+renaming its unused CLI entrypoint and supplying the desktop entrypoint from
+`desktop/analyzer/`. No original source file is modified. The upstream-isolation
+guard covers both analyzer and collector sources, including ignored extra Go
+files that could otherwise enter a build.
 
 ## Clean
 
@@ -162,6 +202,16 @@ Keep unrelated work intact and report any blocked stage separately.
 
 ```bash
 python3 desktop/Tests/test_upstream_isolation.py
+python3 desktop/Tools/analyzer_overlay.py desktop/build/analyzer-tests --test
+MOLE_TEST_NO_AUTH=1 go test -race -overlay desktop/build/analyzer-tests/analyzer-overlay.json \
+  ./cmd/analyze -run '^TestDashboardAnalyze' -count=1
+python3 desktop/Tests/analyzer_smoke.py
+xcrun swiftc -swift-version 5 -parse-as-library \
+  -module-cache-path desktop/build/cache/swift \
+  desktop/Sources/Models.swift desktop/Sources/AnalyzeModels.swift \
+  desktop/Sources/AnalyzeStore.swift desktop/Tests/AnalyzeContract.swift \
+  -o desktop/build/analyze-contract
+desktop/build/analyze-contract
 MOLE_TEST_NO_AUTH=1 go test -race ./desktop/cleaner
 shellcheck --rcfile .shellcheckrc desktop/Engine/clean.sh desktop/build.sh
 python3 desktop/Tests/check_clean_bundle.py
@@ -191,3 +241,11 @@ roots, Deno protection, open/unknown handles, final-sink rechecks, expiry, stale
 IDs, duplicate IDs, cancellation, and protocol plan consumption. Native testing
 covers scan progress, selection, confirmation cancellation, stopping and rescanning;
 it does not perform a real cleanup of this Mac.
+
+Analyze checks exercise a fresh scan despite a saved stale-sized measurement,
+cache preservation and non-creation, Unicode and quoted paths, symbolic links,
+cancellation, inaccessible/missing roots, and a deadline that cancels a folded
+`du` probe. Swift contracts cover partial/unavailable presentation, proportional
+map area and grouping, request/result binding, invalid responses, cancellation,
+and a new scan after stopping. The packaged-helper smoke test uses disposable
+files and checks source preservation. These tests do not delete user files.

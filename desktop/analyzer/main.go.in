@@ -1,0 +1,123 @@
+// This desktop-only entrypoint compiles with the unmodified upstream analyzer.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"sync/atomic"
+	"syscall"
+	"time"
+)
+
+const dashboardScanBudget = 2 * time.Minute
+
+type dashboardAnalyzeEvent struct {
+	Kind        string      `json:"kind"`
+	Files       int64       `json:"files,omitempty"`
+	Directories int64       `json:"directories,omitempty"`
+	Bytes       int64       `json:"bytes,omitempty"`
+	Result      *jsonOutput `json:"result,omitempty"`
+	Message     string      `json:"message,omitempty"`
+}
+
+func dashboardAnalyze(ctx context.Context, path string, output io.Writer) error {
+	encoder := json.NewEncoder(output)
+	var files, dirs, bytes int64
+	current := &atomic.Value{}
+	current.Store("")
+	// Bypass persisted measurements and close every cache-publication gate.
+	// The scan context stays live; this separate canceled publication context
+	// prevents upstream cache creation, removal, or changes during inspection.
+	denied, deny := context.WithCancel(context.Background())
+	deny()
+	publication := newScanPublication(denied, nil)
+	type outcome struct {
+		result scanResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := scanPathConcurrentWithLimiter(ctx, path, &files, &dirs, &bytes, current,
+			false, 0, nil, scanCacheBypass, publication)
+		done <- outcome{result, err}
+	}()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := encoder.Encode(dashboardAnalyzeEvent{Kind: "progress",
+				Files: atomic.LoadInt64(&files), Directories: atomic.LoadInt64(&dirs),
+				Bytes: atomic.LoadInt64(&bytes)}); err != nil {
+				return err
+			}
+		case result := <-done:
+			if ctx.Err() != nil {
+				result.err = ctx.Err()
+			}
+			if result.err != nil {
+				message := "This folder could not be read. It may be missing or access may be restricted."
+				switch {
+				case errors.Is(result.err, context.DeadlineExceeded):
+					message = "The scan reached its two-minute limit. Choose a smaller folder and scan again."
+				case errors.Is(result.err, context.Canceled):
+					message = "Scan stopped. No completed result was published."
+				}
+				if err := encoder.Encode(dashboardAnalyzeEvent{Kind: "error", Message: message}); err != nil {
+					return err
+				}
+				return result.err
+			}
+			payload := jsonOutput{Path: path, ScanStatus: result.result.State,
+				Entries:    jsonEntriesFromDirEntries(result.result.Entries, false, nil),
+				LargeFiles: jsonFileEntriesFromFileEntries(result.result.LargeFiles),
+				TotalSize:  result.result.TotalSize, TotalFiles: result.result.TotalFiles}
+			return encoder.Encode(dashboardAnalyzeEvent{Kind: "done", Result: &payload})
+		}
+	}
+}
+
+func main() {
+	if len(os.Args) != 2 || !filepath.IsAbs(os.Args[1]) {
+		fmt.Fprintln(os.Stderr, "Analyze requires exactly one absolute folder path")
+		os.Exit(2)
+	}
+	path := filepath.Clean(os.Args[1])
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		_ = json.NewEncoder(os.Stdout).Encode(dashboardAnalyzeEvent{Kind: "error", Message: "Choose an accessible folder, then scan again."})
+		os.Exit(1)
+	}
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(signalCtx, dashboardScanBudget)
+	defer cancel()
+	// EOF and parent loss both cancel a scan if the window process disappears.
+	go func() { _, _ = io.Copy(io.Discard, os.Stdin); cancel() }()
+	parent := os.Getppid()
+	go func() {
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				// A blocked filesystem call must not leave a persistent helper.
+				time.AfterFunc(3*time.Second, func() { os.Exit(1) })
+				return
+			case <-tick.C:
+				if parent == 1 || os.Getppid() != parent {
+					cancel()
+				}
+			}
+		}
+	}()
+	if dashboardAnalyze(ctx, path, os.Stdout) != nil {
+		os.Exit(1)
+	}
+}

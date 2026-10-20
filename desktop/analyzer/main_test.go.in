@@ -1,0 +1,214 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+type dashboardReadEvent struct {
+	Kind   string `json:"kind"`
+	Result *struct {
+		Path       string `json:"path"`
+		ScanStatus string `json:"scan_status"`
+		TotalSize  int64  `json:"total_size"`
+		Entries    []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+			Size int64  `json:"size"`
+		} `json:"entries"`
+	} `json:"result"`
+}
+
+func dashboardEvents(t *testing.T, data []byte) []dashboardReadEvent {
+	t.Helper()
+	var events []dashboardReadEvent
+	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+		var event dashboardReadEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func TestDashboardAnalyzeFreshReadOnlyScan(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	sub := filepath.Join(root, "reports ' spaces 分析")
+	if err := os.Mkdir(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 110 {
+		if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("%03d fixture 分析.txt", i)), []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This valid but stale-sized upstream cache must neither influence the
+	// desktop result nor be rewritten/removed by its cache-bypassing scan.
+	fake := scanResult{State: scanComplete, TotalSize: 777_777_777, TotalFiles: 110}
+	if err := saveCacheToDisk(sub, fake); err != nil {
+		t.Fatal(err)
+	}
+	cachePath, err := getCachePath(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "symbolic-link")
+	if err := os.Symlink(sub, link); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := dashboardAnalyze(ctx, root, &output); err != nil {
+		t.Fatal(err)
+	}
+	events := dashboardEvents(t, output.Bytes())
+	final := events[len(events)-1]
+	if final.Kind != "done" || final.Result == nil {
+		t.Fatalf("no result: %+v", final)
+	}
+	result := final.Result
+	if result.Path != root || result.ScanStatus != "complete" || len(result.Entries) != 2 {
+		t.Fatalf("unexpected scan: %+v", result)
+	}
+	if result.TotalSize <= 0 || result.TotalSize >= fake.TotalSize {
+		t.Fatalf("did not take a fresh measurement: %d", result.TotalSize)
+	}
+	found := false
+	for _, entry := range result.Entries {
+		if entry.Path == link {
+			found = strings.HasSuffix(entry.Name, " →") && entry.Size < result.TotalSize/2
+		}
+	}
+	if !found {
+		t.Fatal("symbolic link was not retained as a link-only measurement")
+	}
+	after, err := os.ReadFile(cachePath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("inspection changed existing cache: %v", err)
+	}
+	files, err := os.ReadDir(sub)
+	if err != nil || len(files) != 110 {
+		t.Fatalf("inspection changed source files: %v", err)
+	}
+}
+
+func TestDashboardAnalyzeDoesNotCreateCache(t *testing.T) {
+	home, root := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	sub := filepath.Join(root, "nested")
+	if err := os.Mkdir(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 110 {
+		if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("%03d", i)), []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	if err := dashboardAnalyze(context.Background(), root, &output); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(moleCacheRoot(home)); !os.IsNotExist(err) {
+		t.Fatalf("read-only scan created Mole cache: %v", err)
+	}
+}
+
+func TestDashboardAnalyzeCancellationAndUnavailable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, test := range []struct {
+		ctx  context.Context
+		path string
+	}{
+		{ctx, t.TempDir()}, {context.Background(), filepath.Join(t.TempDir(), "missing")},
+	} {
+		var output bytes.Buffer
+		if err := dashboardAnalyze(test.ctx, test.path, &output); err == nil {
+			t.Fatal("failed scan reported success")
+		}
+		for _, event := range dashboardEvents(t, output.Bytes()) {
+			if event.Kind == "done" || event.Result != nil {
+				t.Fatal("failed scan published a usable result")
+			}
+		}
+	}
+}
+
+func TestDashboardAnalyzeDeadlineReapsFoldedProbe(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "node_modules"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	stub := filepath.Join(t.TempDir(), "du")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec /bin/sleep 30\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := duBinary
+	duBinary = stub
+	defer func() { duBinary = original }()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	var output bytes.Buffer
+	if err := dashboardAnalyze(ctx, root, &output); err == nil {
+		t.Fatal("deadline unexpectedly succeeded")
+	}
+	if time.Since(started) > 2*time.Second {
+		t.Fatal("folded probe did not stop on cancellation")
+	}
+	final := dashboardEvents(t, output.Bytes())
+	if final[len(final)-1].Kind != "error" {
+		t.Fatal("deadline published a result")
+	}
+}
+
+func TestDashboardAnalyzePreservesPartialCoverage(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission fixture requires regular user")
+	}
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	denied := filepath.Join(root, "restricted")
+	if err := os.Mkdir(denied, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(denied, "kept.txt"), []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(denied, 0000); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(denied, 0700) }()
+	if err := os.WriteFile(filepath.Join(root, "readable.txt"), []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := dashboardAnalyze(context.Background(), root, &output); err != nil {
+		t.Fatal(err)
+	}
+	frames := dashboardEvents(t, output.Bytes())
+	result := frames[len(frames)-1].Result
+	if result == nil || result.ScanStatus != "partial" || len(result.Entries) != 2 {
+		t.Fatalf("coverage was hidden: %+v", result)
+	}
+	if !bytes.Contains(output.Bytes(), []byte(`"scan_status":"unavailable"`)) {
+		t.Fatal("unreadable child became a zero-size complete item")
+	}
+}

@@ -4,8 +4,9 @@ Reviewed on 2026-10-20.
 
 - Source: **Mole CLI (macOS)**, `tw93/Mole`, commit
   `7b2a196061e1be7fae4ba422cd9102313fcb321d`.
-- Source entry points: the collectors in `cmd/status/`, plus `bin/clean.sh`
-  and its shared protection and Trash helpers for the separate Clean adapter.
+- Source entry points: the collectors in `cmd/status/`, traversal and JSON
+  contracts in `cmd/analyze/`, plus `bin/clean.sh` and its shared protection and
+  Trash helpers for the separate Clean adapter.
 - Destination: the independent local dashboard in `desktop/`, branch
   `native-dashboard` of `linhui0813-byte/Mole`.
 - Synchronization: **Implemented**. All tracked files outside `desktop/` match
@@ -83,3 +84,38 @@ and Trash helpers; no upstream code or assertion was changed to silence the fail
 Next check: rerun the case after the next upstream update. Any remediation of
 the cleanup implementation or its audited baseline belongs upstream and must
 be reviewed there. Keep the execution code identical in this fork.
+
+## Analyze integration
+
+The read-only Analyze page adds a proportional space map, fresh folder scans,
+parent/breadcrumb navigation, direct-item filtering and sorting, the upstream
+large-file discovery list, and Finder reveal. Partial and unavailable coverage
+stay distinct from measured zero. The separate entrypoint uses upstream scan
+budgets and filters, bypasses stored results, denies cache publication, and
+cancels on Stop, timeout, stdin closure, or parent loss. All implementation and
+compatibility code remains in `desktop/`.
+
+- Desktop Go adapter tests passed with race detection, including saved-cache
+  bypass, cache preservation/non-creation, symbolic links, partial permissions,
+  failed roots, cancellation, and a bounded folded-directory probe.
+- Negative checks: allowing cache publication made both read-only cache tests
+  fail; the previous isolation guard failed the new analyzer-source case.
+- Swift contract checks passed for coverage labels, proportional non-overlapping
+  map areas, grouping, path validation, invalid responses, cancellation, late
+  responses, edited paths, and restarting after Stop.
+- Packaged helper smoke passed against disposable files, including Unicode,
+  quoted paths, large-file discovery, missing paths, and source preservation.
+- All Go packages, lint/safety checks, seven isolation tests, native build,
+  signature, exact Clean bundle, and live collector smoke passed. The linter
+  used the configured `go vet` fallback.
+- The first full-suite run caught a generated `.go` overlay input being treated
+  as an independent package; it now uses `.go.in`. That run also failed the
+  known fallback audit and a firmware open-file timing fixture; the latter
+  passed alone. The final full-suite rerun exited 1 only on the documented
+  fallback-count audit; its Go, module loading, integration, and installation
+  stages passed.
+- Native interactive verification remains unverified: the control tool returns
+  `cgWindowNotFound` for the dashboard window on the external display. A main
+  display handoff is pending. Signed-build and helper checks above are verified;
+  the previous verified app is preserved for rollback. No window-restoration
+  changes or temporary window diagnostics are included in the source.

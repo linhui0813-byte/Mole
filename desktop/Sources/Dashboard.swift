@@ -121,7 +121,7 @@ private struct Meter: View {
 struct DashboardView: View {
     @EnvironmentObject var store: DashboardStore
     @State private var processOnly = false
-    @State private var showClean = false
+    @State private var page = "Status"
     @State private var query = ""
     @State private var sort: ProcessSort = .cpu
     @State private var selectedPID: Int?
@@ -133,8 +133,10 @@ struct DashboardView: View {
         GeometryReader { geometry in
             VStack(spacing: 18) {
                 header
-                if showClean {
+                if page == "Clean" {
                     CleanView()
+                } else if page == "Analyze" {
+                    AnalyzeView()
                 } else {
                     if let error = store.error {
                         HStack(spacing: 10) {
@@ -183,9 +185,10 @@ struct DashboardView: View {
             }
             Spacer()
             HStack(spacing: 4) {
-                navButton("Clean", selected: showClean) { showClean = true }
-                navButton("Status", selected: !showClean && !processOnly) { showClean = false; processOnly = false }
-                navButton("Processes", selected: !showClean && processOnly) { showClean = false; processOnly = true }
+                navButton("Clean", selected: page == "Clean") { page = "Clean" }
+                navButton("Analyze", selected: page == "Analyze") { page = "Analyze" }
+                navButton("Status", selected: page == "Status" && !processOnly) { page = "Status"; processOnly = false }
+                navButton("Processes", selected: page == "Status" && processOnly) { page = "Status"; processOnly = true }
             }.padding(4).background(Color.white.opacity(0.05), in: Capsule())
             Spacer()
             HStack(spacing: 10) {

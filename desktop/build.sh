@@ -33,6 +33,11 @@ echo 'Building the read-only Mole collector...'
 CGO_ENABLED=0 GOWORK=off GOCACHE="$BUILD_DIR/cache/go" go build -overlay "$BUILD_DIR/overlay.json" \
     -trimpath -ldflags='-s -w' -o "$APP_DIR/Contents/Helpers/mole-dashboard-collector" ./cmd/status
 
+echo 'Building the read-only Analyze adapter...'
+python3 "$DESKTOP_DIR/Tools/analyzer_overlay.py" "$BUILD_DIR/analyzer"
+CGO_ENABLED=0 GOWORK=off GOCACHE="$BUILD_DIR/cache/go" go build -overlay "$BUILD_DIR/analyzer/analyzer-overlay.json" \
+    -trimpath -ldflags='-s -w' -o "$APP_DIR/Contents/Helpers/mole-dashboard-analyzer" ./cmd/analyze
+
 echo 'Building the selected-item Clean adapter...'
 CGO_ENABLED=0 GOWORK=off GOCACHE="$BUILD_DIR/cache/go" go build -trimpath -ldflags='-s -w' \
     -o "$APP_DIR/Contents/Helpers/mole-dashboard-cleaner" ./desktop/cleaner
@@ -73,6 +78,7 @@ cp "$DESKTOP_DIR/UPSTREAM_COMMIT" "$APP_DIR/Contents/Resources/MoleSourceCommit.
 git rev-parse HEAD > "$APP_DIR/Contents/Resources/DashboardSourceCommit.txt"
 codesign --force --sign - "$APP_DIR/Contents/Helpers/mole-dashboard-collector"
 codesign --force --sign - "$APP_DIR/Contents/Helpers/mole-dashboard-cleaner"
+codesign --force --sign - "$APP_DIR/Contents/Helpers/mole-dashboard-analyzer"
 codesign --force --sign - "$APP_DIR/Contents/Helpers/TrashTool/trash"
 codesign --force --sign - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
