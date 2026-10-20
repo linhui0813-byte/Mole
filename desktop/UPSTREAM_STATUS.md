@@ -1,6 +1,6 @@
 # Upstream integration status
 
-Reviewed on 2026-10-19.
+Reviewed on 2026-10-20.
 
 - Source: **Mole CLI (macOS)**, `tw93/Mole`, commit
   `7b2a196061e1be7fae4ba422cd9102313fcb321d`.
@@ -53,6 +53,21 @@ Reviewed on 2026-10-19.
   Go, module loading, integration, and installation stages passed. An earlier
   run inherited `CARGO_HOME`/`RUSTUP_HOME` from another project and failed four
   unrelated Rust fixture assertions; removing those overrides resolved them.
+
+## User-run log review
+
+The 2026-10-20 user-run log review matched 84 successful Trash moves between
+08:39:42 and 08:40:10 across both audit logs, with no recorded failures or
+permanent-delete actions. The run exposed an authentication-cache path inside
+the generic cache root. The desktop adapter now retains that exact path and
+file aliases at preview, execution, and final-sink checks; credential contents
+were not inspected. This extra protection is local to the dashboard.
+Both authentication-cache regression tests passed with race detection; the
+initial test failed against the previous adapter, and disabling the final
+check made the late-alias test fail. All Go packages, lint, upstream isolation,
+native build, signature, and exact bundled-source checks passed.
+The safeguard's full-suite rerun exited 1 only on the existing fallback-audit
+case below; Go, module loading, integration, and installation stages passed.
 
 ## Known upstream audit failure
 

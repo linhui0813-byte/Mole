@@ -200,6 +200,65 @@ func TestNewWhitelistIsRespectedAtExecution(t *testing.T) {
 	assertExists(t, v.Path, true)
 }
 
+func TestAuthenticationCacheIsKeptInPreviewAndExecution(t *testing.T) {
+	e := fixture(t)
+	_ = inspect(t, e, cacheFile(t, e, "ordinary-cache-positive"))
+	v := cacheFile(t, e, "aws_credentials_cache.json")
+	for _, action := range []string{"inspect", "trash"} {
+		_, err := e.invoke(context.Background(), action, v)
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 65 ||
+			!strings.Contains(string(exit.Stderr), "CLEAN_REASON:Authentication cache is kept") {
+			t.Fatalf("authentication cache was not protected in %s: %v %+v", action, err, exit)
+		}
+		assertExists(t, v.Path, true)
+	}
+	// Aliases of the same object cannot bypass the exact-path protection.
+	alias := filepath.Join(e.home, "Library/Caches/auth-cache-alias")
+	if err := os.Link(v.Path, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.inspect(context.Background(), item{Category: "caches", Path: alias}); err == nil {
+		t.Fatal("authentication cache hard link was accepted")
+	}
+}
+
+func TestAuthenticationAliasAppearingDuringSizingIsKept(t *testing.T) {
+	e := fixture(t)
+	v := inspect(t, e, cacheFile(t, e, "ordinary-cache"))
+	// Inject the external stat dependency after loading the actual adapter.
+	// The sizing probe creates an authentication-path hard link after the
+	// initial check, so only the final guard can preserve the selected alias.
+	data, err := os.ReadFile(e.script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := `source "$engine_root/bin/clean.sh" > /dev/null`
+	if strings.Count(string(data), anchor) != 1 {
+		t.Fatal("adapter source seam changed")
+	}
+	e.script = filepath.Join(t.TempDir(), "adapter.sh")
+	if err := os.WriteFile(e.script, []byte(strings.Replace(string(data), anchor,
+		anchor+"\nSTAT_BSD=\"$HOME/fixture-stat\"", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stat := `#!/bin/bash
+if [[ "$1" == '-f%b' && ! -e "$HOME/Library/Caches/aws_credentials_cache.json" ]]; then
+    /bin/ln "$HOME/Library/Caches/ordinary-cache" "$HOME/Library/Caches/aws_credentials_cache.json" || exit 1
+fi
+exec /usr/bin/stat "$@"
+`
+	if err := os.WriteFile(filepath.Join(e.home, "fixture-stat"), []byte(stat), 0700); err != nil {
+		t.Fatal(err)
+	}
+	events := collectClean(e, []item{v})
+	if events[1].Status == "trashed" {
+		t.Fatalf("late authentication alias was moved: %+v", events)
+	}
+	assertExists(t, v.Path, true)
+	assertExists(t, filepath.Join(e.home, "Library/Caches/aws_credentials_cache.json"), true)
+}
+
 func TestUnsafeScopesAndOpenOrUnknownItemsAreKept(t *testing.T) {
 	e := fixture(t)
 	positive := cacheFile(t, e, "positive-cache")

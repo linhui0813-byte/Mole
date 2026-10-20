@@ -24,6 +24,14 @@ refuse() {
     exit "${2:-65}"
 }
 
+# A real user run exposed this authentication state inside the broad cache
+# root. Its location is not proof of regenerability. Keep the exact path and
+# aliases of its current object without opening or parsing credential values.
+dashboard_auth_cache_is_kept() {
+    [[ "$target" == "$HOME/Library/Caches/aws_credentials_cache.json" ||
+        "$target" -ef "$HOME/Library/Caches/aws_credentials_cache.json" ]]
+}
+
 # The UI cannot submit an arbitrary path or a containing directory. These are
 # existing upstream clean_user_essentials / diagnostic-report targets only.
 parent="${target%/*}"
@@ -45,6 +53,8 @@ while [[ "$ancestor" != "$HOME" ]]; do
     [[ "$ancestor" == "$HOME/"* && ! -L "$ancestor" ]] || refuse 'Redirected parent directory'
     ancestor="${ancestor%/*}"
 done
+
+if dashboard_auth_cache_is_kept; then refuse 'Authentication cache is kept'; fi
 
 if should_protect_path "$target"; then refuse 'Protected by Mole'; fi
 if is_path_whitelisted "$target"; then refuse 'Protected by your whitelist'; fi
@@ -85,6 +95,7 @@ case "$action" in
         [[ "$original_guard" == '_mole_trash_target_still_safe ()'* ]] || refuse 'Unsupported engine guard' 66
         eval "${original_guard/#_mole_trash_target_still_safe /_dashboard_original_trash_guard }"
         _mole_trash_target_still_safe() {
+            if dashboard_auth_cache_is_kept; then return 1; fi
             _dashboard_original_trash_guard "$@" || return $?
             validate_path_for_deletion "$target" || return $?
             local ancestor="$parent"

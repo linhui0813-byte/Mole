@@ -54,6 +54,9 @@ directories. It excludes system/admin cleanup, app leftovers, sandbox/group
 containers, browser profiles, developer/package-manager stores, snapshots,
 recent-item preferences, mail attachments, downloads, and external volumes.
 It does not claim full Clean parity with the commercial Mac app or CLI.
+The exact `~/Library/Caches/aws_credentials_cache.json` authentication-cache
+path and aliases of that file are kept in preview and execution, including
+the final Trash boundary. The adapter never reads its credential values.
 
 The native adapter keeps an opaque, private plan in its helper process. Only
 IDs from that scan can be executed; plans expire after 15 minutes and are
