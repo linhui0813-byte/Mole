@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -24,15 +25,18 @@ import (
 )
 
 type application struct {
-	ID         string              `json:"id"`
-	Path       string              `json:"path"`
-	Name       string              `json:"name"`
-	BundleID   string              `json:"bundle_id"`
-	Version    string              `json:"version"`
-	Reason     string              `json:"reason,omitempty"`
-	Binding    pathbinding.Binding `json:"binding"`
-	PlistHash  string              `json:"plist_hash"`
-	Executable string              `json:"executable"`
+	ID              string              `json:"id"`
+	Path            string              `json:"path"`
+	Name            string              `json:"name"`
+	BundleID        string              `json:"bundle_id"`
+	Version         string              `json:"version"`
+	Reason          string              `json:"reason,omitempty"`
+	Binding         pathbinding.Binding `json:"binding"`
+	PlistHash       string              `json:"plist_hash"`
+	Executable      string              `json:"executable"`
+	SizeBytes       *uint64             `json:"size_bytes"`
+	LastActive      *int64              `json:"last_active"`
+	MetadataPending bool                `json:"metadata_pending"`
 }
 
 func cleanText(s string) bool {
@@ -123,6 +127,7 @@ func (e engine) applications(ctx context.Context, id string, emit func(event)) *
 	p := &plan{apps: map[string]application{}, items: map[string]item{}}
 	partial := false
 	count := 0
+	var metadata []application
 	var scan func(string, int)
 	scan = func(root string, depth int) {
 		if ctx.Err() != nil {
@@ -159,6 +164,10 @@ func (e engine) applications(ctx context.Context, id string, emit func(event)) *
 				if strings.HasPrefix(strings.ToLower(app.BundleID), "com.apple.") || app.BundleID == "local.hui.mole-dashboard" {
 					app.Reason = "Protected app. Remove supported Apple apps through macOS."
 				}
+				app.MetadataPending = app.Binding.Path != ""
+				if app.MetadataPending {
+					metadata = append(metadata, app)
+				}
 				p.apps[app.ID] = app
 				copy := app
 				emit(event{Kind: "app", RequestID: id, App: &copy})
@@ -173,6 +182,38 @@ func (e engine) applications(ctx context.Context, id string, emit func(event)) *
 	}
 	for _, root := range roots {
 		scan(root, 1)
+	}
+	jobs := make(chan application)
+	results := make(chan application, 4)
+	var workers sync.WaitGroup
+	for range 4 {
+		workers.Go(func() {
+			for app := range jobs {
+				results <- readAppMetadata(ctx, app, appMetadataCommand)
+			}
+		})
+	}
+	go func() {
+		defer close(jobs)
+		for _, app := range metadata {
+			select {
+			case jobs <- app:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() { workers.Wait(); close(results) }()
+	checked := 0
+	for app := range results {
+		if ctx.Err() != nil {
+			continue
+		}
+		checked++
+		p.apps[app.ID] = app
+		copy := app
+		emit(event{Kind: "app", RequestID: id, App: &copy})
+		emit(event{Kind: "progress", RequestID: id, Checked: checked, Total: len(metadata), Message: app.Name})
 	}
 	if ctx.Err() != nil {
 		emit(event{Kind: "scan_done", RequestID: id, Status: "cancelled", Message: "App scan stopped. Refresh before reviewing."})

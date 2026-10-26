@@ -370,3 +370,36 @@ Checks are point-in-time observations and do not lock an app against concurrent
 changes. The previous signed application is retained under desktop/build/rollback.
 Delivery remains the fork's native-dashboard source and a locally signed app,
 not a public release or a replacement of the separate Applications installation.
+
+## App size and last active metadata, 2026-10-26
+
+The initial Apps page omitted the list's bundle size and last active date.
+Both now appear in aligned columns and in the selected-app detail panel,
+with name, largest-size, and oldest-known-activity sorting. Unknown values
+sort after measured values and are shown as Unavailable. Zero bytes remains
+a real measurement, and a missing last-used date never becomes Never used.
+
+Fresh read-only enrichment uses four workers, a five-second /usr/bin/du
+budget and a one-second /usr/bin/mdls budget per app inside the existing
+inventory deadline. Last active comes only from kMDItemLastUsedDate, with
+local-time presentation; it is macOS last-used metadata rather than foreground
+activity tracking. Size includes only the app bundle, with associated data
+measured separately during the unchanged removal review. No size cache is
+persisted. Completed updates replace the same request-bound row ID; failed or
+changed-identity measurements remain unknown and never authorize removal.
+
+Fresh Go race tests and Swift contracts pass for measured zero versus unknown,
+partial command failures, invalid dates and time zones, per-command
+deadlines, changed app identity, cancellation, fresh rescans after bundle growth,
+progressive updates without duplicate rows, old-request rejection, and sorting.
+Repository checks, upstream isolation, native build/signature, and exact bundle
+checks pass. The full suite finished with exit 1 only on the documented upstream
+fallback-count assertion; Go, module loading, integration and installation passed.
+
+The packaged read-only inventory completed in 4.26 seconds for 59 apps, returning
+55 measured sizes and 25 available macOS dates. A fresh independent du check
+matched Google Chrome's listed size. Native verification showed the aligned
+columns, measured and Unavailable rows, largest-size and oldest-known-date
+sorting, and a detail panel with the same size and local date/time. No existing
+app or app data was moved during this follow-up. The prior signed app at commit
+790db227 is retained under desktop/build/rollback for local rollback.

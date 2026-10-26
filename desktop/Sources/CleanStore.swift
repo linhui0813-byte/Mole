@@ -20,6 +20,39 @@ struct InstalledApplication: Decodable, Identifiable {
     let bundle_id: String
     let version: String
     let reason: String?
+    let size_bytes: UInt64?
+    let last_active: Double?
+    let metadata_pending: Bool?
+
+    var sizeText: String { size_bytes.map(Format.bytes) ?? (metadata_pending == true ? "Measuring…" : "Unavailable") }
+    var lastActiveDate: Date? {
+        guard let last_active, last_active.isFinite, last_active > 0 else { return nil }
+        return Date(timeIntervalSince1970: last_active)
+    }
+    var lastActiveText: String {
+        lastActiveDate?.formatted(.dateTime.year().month(.abbreviated).day()) ?? (metadata_pending == true ? "Checking…" : "Unavailable")
+    }
+}
+
+enum ApplicationSort: String, CaseIterable, Identifiable {
+    case name = "Name"
+    case size = "Size (largest)"
+    case lastActive = "Last active (oldest)"
+    var id: String { rawValue }
+
+    func precedes(_ a: InstalledApplication, _ b: InstalledApplication) -> Bool {
+        switch self {
+        case .name: break
+        case .size:
+            if let lhs = a.size_bytes, let rhs = b.size_bytes, lhs != rhs { return lhs > rhs }
+            if (a.size_bytes == nil) != (b.size_bytes == nil) { return a.size_bytes != nil }
+        case .lastActive:
+            if let lhs = a.lastActiveDate, let rhs = b.lastActiveDate, lhs != rhs { return lhs < rhs }
+            if (a.lastActiveDate == nil) != (b.lastActiveDate == nil) { return a.lastActiveDate != nil }
+        }
+        let order = a.name.localizedStandardCompare(b.name)
+        return order == .orderedSame ? a.path < b.path : order == .orderedAscending
+    }
 }
 
 struct CleanEvent: Decodable {
@@ -213,7 +246,10 @@ final class CleanStore: ObservableObject {
     private func apply(_ event: CleanEvent) {
         switch event.kind {
         case "app":
-            if let app = event.app { applications.append(app) }
+            if let app = event.app {
+                if let index = applications.firstIndex(where: { $0.id == app.id }) { applications[index] = app }
+                else { applications.append(app) }
+            }
         case "progress":
             let total = event.total ?? 0
             progress = total > 0 ? Double(event.checked ?? 0) / Double(total) : 0

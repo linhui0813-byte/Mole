@@ -45,8 +45,23 @@ described below. Subprocesses use fixed arguments and never request administrato
 Choose **Apps**, search by name, bundle ID, or path, select an app, and choose
 **Review uninstall…**. The inventory reads real bundles in `/Applications` and
 `~/Applications`, including one level of category folders. It shows app icons,
-versions, exact paths, and blocked linked/invalid/protected apps. Refresh starts
-a new inventory; Stop discards authorization from an unfinished scan.
+versions, exact paths, and blocked linked/invalid/protected apps. Each row and
+the app detail panel also show **App size** and **Last active**. Sort by name,
+largest app size, or oldest known activity; unavailable values sort last.
+
+App size is a fresh allocated-size estimate of the bundle alone, measured with
+`/usr/bin/du -skP`; associated data is sized separately in the removal review.
+Last active is macOS Spotlight's `kMDItemLastUsedDate`, shown in the local time
+zone with the time available in the detail panel. It is the recorded last-used
+date, not continuous foreground tracking, and macOS may omit or delay it.
+**Unavailable** means the measurement or date could not be obtained; it never
+means zero bytes or never used. Pending rows show **Measuring…** / **Checking…**.
+
+Four bounded workers enrich the initial app rows. Size probes allow five seconds
+and date probes one second, within the inventory's two-minute deadline. Metadata
+updates keep each row's original ID and request identity. Refresh starts a fresh
+measurement without a directory-size cache; incomplete or changed app identities
+discard their measurements. Stop discards authorization from an unfinished scan.
 
 The review measures the app bundle and exact bundle-ID paths in user Caches,
 Logs, Application Support, WebKit, HTTPStorages, Preferences, and Saved

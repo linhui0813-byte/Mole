@@ -4,12 +4,13 @@ import SwiftUI
 struct UninstallView: View {
     @ObservedObject var store: CleanStore
     @State private var query = ""
+    @State private var sort = ApplicationSort.name
     @State private var chosen: InstalledApplication?
     @State private var review: InstalledApplication?
 
     private var visible: [InstalledApplication] {
         store.applications.filter { query.isEmpty || "\($0.name) \($0.bundle_id) \($0.path)".localizedCaseInsensitiveContains(query) }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .sorted(by: sort.precedes)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -26,6 +27,9 @@ struct UninstallView: View {
             HStack(spacing: 12) {
                 TextField("Search apps, bundle IDs, or paths", text: $query).textFieldStyle(.roundedBorder).frame(maxWidth: 420)
                 Spacer()
+                Picker("Sort", selection: $sort) {
+                    ForEach(ApplicationSort.allCases) { Text($0.rawValue).tag($0) }
+                }.frame(width: 215).accessibilityLabel("Sort apps")
                 if store.busy && review == nil {
                     ProgressView().controlSize(.small)
                     Button(store.stopping ? "Stopping…" : "Stop") { store.cancel() }.disabled(store.stopping)
@@ -34,6 +38,16 @@ struct UninstallView: View {
                 }
             }
             HStack(alignment: .top, spacing: 18) {
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        Text("App").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("App size").frame(width: 85, alignment: .trailing)
+                            .help("Allocated size of the app bundle. Associated data is measured separately during review.")
+                        Text("Last active").frame(width: 125, alignment: .trailing)
+                            .help("Last-used date recorded by macOS. It can be delayed or unavailable.")
+                        Color.clear.frame(width: 16, height: 1)
+                    }.font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.secondary).padding(.horizontal, 20).padding(.vertical, 12)
+                    Divider()
                 ScrollView {
                     LazyVStack(spacing: 4) {
                         ForEach(visible) { app in
@@ -45,8 +59,13 @@ struct UninstallView: View {
                                         Text(app.version.isEmpty ? app.bundle_id : "\(app.version) · \(app.bundle_id)")
                                             .font(.system(size: 10)).foregroundStyle(Theme.secondary).lineLimit(1)
                                     }
-                                    Spacer()
-                                    if app.reason != nil { Image(systemName: "lock.shield").foregroundStyle(Theme.gold) }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    Text(app.sizeText).font(.system(size: 12)).monospacedDigit()
+                                        .frame(width: 85, alignment: .trailing)
+                                    Text(app.lastActiveText).font(.system(size: 11)).foregroundStyle(Theme.secondary)
+                                        .frame(width: 125, alignment: .trailing)
+                                    Image(systemName: "lock.shield").foregroundStyle(Theme.gold)
+                                        .frame(width: 16).opacity(app.reason == nil ? 0 : 1)
                                 }.padding(12).contentShape(Rectangle())
                                     .background(chosen?.id == app.id ? Theme.green.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
                             }.buttonStyle(.plain).disabled(store.busy)
@@ -56,13 +75,17 @@ struct UninstallView: View {
                                 .foregroundStyle(Theme.secondary).padding(40)
                         }
                     }.padding(8)
+                }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Theme.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
                 VStack(alignment: .leading, spacing: 16) {
-                    if let app = chosen {
+                    if let app = store.applications.first(where: { $0.id == chosen?.id }) {
                         Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 64, height: 64)
                         Text(app.name).font(.system(size: 23, weight: .semibold))
                         Text(app.bundle_id).font(.system(size: 12)).foregroundStyle(Theme.secondary).textSelection(.enabled)
                         Text(app.path).font(.system(size: 11)).foregroundStyle(Theme.secondary).textSelection(.enabled)
+                        LabeledContent("App size", value: app.sizeText).font(.system(size: 12))
+                        LabeledContent("Last active", value: app.lastActiveDate?.formatted(date: .abbreviated, time: .shortened) ?? app.lastActiveText)
+                            .font(.system(size: 12)).help("macOS last-used metadata; may be delayed or unavailable.")
                         if let reason = app.reason { Label(reason, systemImage: "lock.shield").font(.system(size: 12)).foregroundStyle(Theme.gold) }
                         Button("Review uninstall…") { review = app; store.reviewApplication(app) }
                             .buttonStyle(.borderedProminent).tint(Theme.green).disabled(store.busy || app.reason != nil)
