@@ -310,3 +310,63 @@ documented upstream fallback-count assertion; its Go, module-loading, integratio
 and installation stages passed. Delivery rebuilds the committed revision and
 updates the separately requested `/Applications` installation, retaining the
 previous verified application for rollback.
+
+## Apps uninstall, 2026-10-26
+
+The independent dashboard now has an Apps page with installed-app discovery,
+search, icons, versions, exact-path details, a bounded file review, optional
+app-data selection, explicit data acknowledgement, final confirmation, Stop,
+and per-file results. Only the bundle starts selected. Refresh and cancelled
+reviews clear authorization. Closing an action review refreshes the inventory.
+
+The adapter owns this complete path inside `desktop/`:
+
+| Stage | Evidence and refusal behavior |
+| --- | --- |
+| Inventory | Real Applications roots, one category level, bounded plist reads, no link traversal; invalid and linked apps are shown as blocked. |
+| Review | Exact bundle path and bundle-ID data locations only; no vendor/name fallback, containers, system helpers, or Keychain. |
+| App policy | Upstream protected-app and official-uninstaller rules, Apple/dashboard protection, literal process probes; running and unknown states retain the app. |
+| Package ownership | Exact Caskroom app/reverse-link identities; managed or unknown apps use the existing package-manager uninstall path. No brew process runs. |
+| Shared data | Upstream live sibling/family guard in preview and final execution; incomplete ownership and a reappeared app retain data. |
+| Binding | Strong target/physical-parent bindings and app plist hash repeated inside the final Trash guard; changed identity refuses. |
+| Contents | Completed bounded whitelist/database listing; unknown SQLite visibility retains data. |
+| Execution | Private IDs, expiry, consumed plans, explicit data acknowledgements, bundle first; bundle failure, cancellation, or uncertain transport stops later moves. |
+| Sink | Unmodified upstream mole_delete plus one native Trash attempt; no Finder, administrator, retry, or permanent fallback. Fixture routing exists only in isolated tests. |
+| Results | Per-path moved/kept/unverified/unprocessed outcomes and upstream operations.log. Trash-pending bytes are never reported as freed space. |
+
+Line-by-line review covered discovery, primary and final guards, shared-owner
+checks, identity binding, acknowledgement enforcement, ordering, cancellation,
+the native transport, fixture-only routing, and accounting. There is no
+production deletion fallback and no new dependency, preference, or service.
+The upstream execution files and assertions remain unchanged.
+
+Verification includes fresh Go race tests, Swift uninstall and existing Analyze
+action contracts, all Go packages, repository lint/safety checks, and upstream
+isolation. Regressions exercise unchecked data, exact neighboring paths,
+running/unknown processes, changed metadata, whitelist descendants, shared
+owners, app reappearance, Homebrew reverse links and unrelated app links,
+linked apps, cancellation, and an app launching during final sizing.
+
+Native UI checks verified live inventory/search, exact-path review, zero checked
+items disabling execution, the final confirmation, cancellation preserving the
+existing app, and refusal of a running app. The packaged native smoke moved
+only its newly created disposable app to Trash, verified its original device
+and inode there, preserved unchecked settings and a control file, checked the
+uninstall audit record, and rejected consumed IDs. No existing app was removed
+and Trash was not emptied.
+
+The full repository rerun, without inherited Cargo/Rust home overrides, finished
+with exit 1 solely on the documented upstream fallback-count assertion. Its Go,
+module-loading, integration, and installation stages passed. The first run's
+additional Rust fixture failures came from another project's inherited
+CARGO_HOME; those disappeared in the clean-environment rerun. The missing
+formatter was installed under ignored desktop/build/tools; its incidental
+upstream formatting change was reverted and upstream parity reverified.
+
+Residual limits are intentional: this flow supports app bundles and exact
+bundle-ID user data, rather than complete vendor teardown. Shared containers,
+name-only data, drivers/helpers, login items, receipts and credentials remain.
+Checks are point-in-time observations and do not lock an app against concurrent
+changes. The previous signed application is retained under desktop/build/rollback.
+Delivery remains the fork's native-dashboard source and a locally signed app,
+not a public release or a replacement of the separate Applications installation.

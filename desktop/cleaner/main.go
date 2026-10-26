@@ -34,6 +34,7 @@ type item struct {
 	Bytes                                uint64 `json:"bytes"`
 	identity, parent, parentID, targetID string
 	binding                              string
+	owner                                *application
 }
 
 type command struct {
@@ -42,31 +43,36 @@ type command struct {
 	IDs               []string              `json:"ids"`
 	AcknowledgedItems []string              `json:"acknowledged_items"`
 	Candidates        []pathbinding.Binding `json:"candidates"`
+	AppID             string                `json:"app_id"`
 }
 
 type event struct {
-	Path      string `json:"path,omitempty"`
-	Kind      string `json:"kind"`
-	RequestID string `json:"request_id"`
-	Item      *item  `json:"item,omitempty"`
-	ItemID    string `json:"item_id,omitempty"`
-	Status    string `json:"status,omitempty"`
-	Message   string `json:"message,omitempty"`
-	Checked   int    `json:"checked,omitempty"`
-	Total     int    `json:"total,omitempty"`
-	Kept      int    `json:"kept,omitempty"`
-	Partial   bool   `json:"partial,omitempty"`
+	Path      string       `json:"path,omitempty"`
+	Kind      string       `json:"kind"`
+	RequestID string       `json:"request_id"`
+	Item      *item        `json:"item,omitempty"`
+	ItemID    string       `json:"item_id,omitempty"`
+	Status    string       `json:"status,omitempty"`
+	Message   string       `json:"message,omitempty"`
+	Checked   int          `json:"checked,omitempty"`
+	Total     int          `json:"total,omitempty"`
+	Kept      int          `json:"kept,omitempty"`
+	Partial   bool         `json:"partial,omitempty"`
+	App       *application `json:"app,omitempty"`
 }
 
 type engine struct {
 	root, script, home, trashBin string
 	analyze                      bool
+	uninstall                    bool
+	appRoots                     []string // Test-only discovery roots; no protocol override.
 	env                          []string
 }
 
 type plan struct {
 	items   map[string]item
 	created time.Time
+	apps    map[string]application
 }
 
 func token() string {
@@ -78,8 +84,16 @@ func token() string {
 }
 
 func main() {
+	if len(os.Args) == 5 && os.Args[1] == "--uninstall-check" {
+		if err := checkUninstall(os.Args[2], os.Args[3], os.Args[4]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(65)
+		}
+		return
+	}
 	analyze := len(os.Args) == 2 && os.Args[1] == "--analyze-actions"
-	if len(os.Args) != 1 && !analyze {
+	uninstall := len(os.Args) == 2 && os.Args[1] == "--uninstall"
+	if len(os.Args) != 1 && !analyze && !uninstall {
 		os.Exit(64)
 	}
 	if os.Geteuid() == 0 {
@@ -102,9 +116,16 @@ func main() {
 		e.analyze = true
 		e.script = filepath.Join(resources, ".Analyze/actions.sh")
 	}
+	if uninstall {
+		e.uninstall = true
+		e.script = filepath.Join(resources, ".Uninstall/actions.sh")
+	}
 	e.env = []string{"HOME=" + home, "PATH=" + e.trashBin + ":/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C", "LANG=C", "TERM=xterm-256color"}
 	if analyze {
 		e.env = append(e.env, "MOLE_DASHBOARD_ANALYZE_GATE="+filepath.Join(helperDir, "mole-dashboard-analyzer"))
+	}
+	if uninstall {
+		e.env = append(e.env, "MOLE_DASHBOARD_UNINSTALL_GATE="+exe)
 	}
 	if deno := os.Getenv("DENO_DIR"); deno != "" {
 		e.env = append(e.env, "DENO_DIR="+deno)
@@ -195,6 +216,34 @@ func run(input io.Reader, output io.Writer, e engine) {
 			}
 			var ctx context.Context
 			switch c.Action {
+			case "apps":
+				if !e.uninstall {
+					emit(event{Kind: "error", RequestID: c.ID, Message: "Apps inventory is unavailable in this mode."})
+					continue
+				}
+				current = nil
+				ctx, cancel = context.WithTimeout(context.Background(), 2*time.Minute)
+				launch(func(events func(event)) *plan { return e.applications(ctx, c.ID, events) })
+			case "app_review":
+				if !e.uninstall || current == nil || time.Since(current.created) > 15*time.Minute {
+					emit(event{Kind: "error", RequestID: c.ID, Message: "Refresh the app list before reviewing."})
+					continue
+				}
+				app, found := current.apps[c.AppID]
+				if !found {
+					emit(event{Kind: "error", RequestID: c.ID, Message: "The app is not in this inventory. Refresh the app list."})
+					continue
+				}
+				apps := current.apps
+				current = nil
+				ctx, cancel = context.WithTimeout(context.Background(), 2*time.Minute)
+				launch(func(events func(event)) *plan {
+					p := e.reviewApplication(ctx, c.ID, app, events)
+					if p != nil {
+						p.apps = apps
+					}
+					return p
+				})
 			case "review":
 				if !e.analyze {
 					emit(event{Kind: "error", RequestID: c.ID, Message: "Analyze review is unavailable in Clean."})
@@ -204,7 +253,7 @@ func run(input io.Reader, output io.Writer, e engine) {
 				ctx, cancel = context.WithTimeout(context.Background(), 2*time.Minute)
 				launch(func(events func(event)) *plan { return e.review(ctx, c.ID, c.Candidates, events) })
 			case "scan":
-				if e.analyze {
+				if e.analyze || e.uninstall {
 					emit(event{Kind: "error", RequestID: c.ID, Message: "Select Analyze items and review them first."})
 					continue
 				}
@@ -216,6 +265,9 @@ func run(input io.Reader, output io.Writer, e engine) {
 				current = nil // Every execution attempt consumes the plan, including refusals.
 				if err == nil {
 					err = acknowledgeSelections(selected, c.AcknowledgedItems)
+				}
+				if err == nil && e.uninstall {
+					selected, err = uninstallOrder(selected)
 				}
 				if err != nil {
 					emit(event{Kind: "error", RequestID: c.ID, Message: err.Error()})
@@ -232,6 +284,9 @@ func run(input io.Reader, output io.Writer, e engine) {
 
 func acknowledgeSelections(selected []item, acknowledgements []string) error {
 	for _, v := range selected {
+		if v.Category == "uninstall-data" && !slices.Contains(acknowledgements, v.ID) {
+			return errors.New("Acknowledge removal of the checked app data, including settings and saved work. Review again.")
+		}
 		if (v.Category == "analyze-project" || v.Category == "analyze-folder" || v.Category == "analyze-library-folder") && !slices.Contains(acknowledgements, v.ID) {
 			return errors.New("Acknowledge that the entire folder and all its contents will move to Trash. Review again.")
 		}
@@ -386,6 +441,13 @@ func (e engine) invoke(ctx context.Context, action string, v item, extra ...stri
 	if e.analyze {
 		extra = append(extra, v.binding)
 	}
+	if e.uninstall {
+		owner, err := json.Marshal(v.owner)
+		if err != nil || v.owner == nil {
+			return nil, errors.New("missing app ownership")
+		}
+		extra = append(extra, v.owner.Path, v.owner.BundleID, string(owner), v.binding)
+	}
 	args := append([]string{e.script, e.root, action, v.Category, v.Path}, extra...)
 	cmd := exec.CommandContext(ctx, "/bin/bash", args...)
 	cmd.Env = e.env
@@ -444,6 +506,7 @@ func (e engine) clean(ctx context.Context, requestID string, selected []item, em
 				for _, line := range strings.Split(string(exit.Stderr), "\n") {
 					if reason, ok := strings.CutPrefix(line, "CLEAN_REASON:"); ok {
 						message = reason + ". Scan again to review the current item."
+						break
 					}
 				}
 			}
@@ -451,6 +514,9 @@ func (e engine) clean(ctx context.Context, requestID string, selected []item, em
 		emit(event{Kind: "result", RequestID: requestID, ItemID: v.ID, Status: status, Message: message})
 		// An uncertain result stops later mutations rather than guessing.
 		if status == "unverified" {
+			break
+		}
+		if e.uninstall && v.Category == "uninstall-bundle" && status != "trashed" {
 			break
 		}
 	}

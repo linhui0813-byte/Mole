@@ -120,6 +120,7 @@ private struct Meter: View {
 
 struct DashboardView: View {
     @EnvironmentObject var store: DashboardStore
+    @ObservedObject var uninstall: CleanStore
     @State private var processOnly = false
     @State private var page = "Status"
     @State private var query = ""
@@ -135,6 +136,8 @@ struct DashboardView: View {
                 header
                 if page == "Clean" {
                     CleanView()
+                } else if page == "Apps" {
+                    UninstallView(store: uninstall)
                 } else if page == "Analyze" {
                     AnalyzeView()
                 } else {
@@ -186,6 +189,7 @@ struct DashboardView: View {
             Spacer()
             HStack(spacing: 4) {
                 navButton("Clean", selected: page == "Clean") { page = "Clean" }
+                navButton("Apps", selected: page == "Apps") { page = "Apps" }
                 navButton("Analyze", selected: page == "Analyze") { page = "Analyze" }
                 navButton("Status", selected: page == "Status" && !processOnly) { page = "Status"; processOnly = false }
                 navButton("Processes", selected: page == "Status" && processOnly) { page = "Status"; processOnly = true }

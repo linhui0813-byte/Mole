@@ -10,7 +10,16 @@ struct CleanItem: Codable, Identifiable {
     var name: String { URL(fileURLWithPath: path).lastPathComponent }
     var isWholeProject: Bool { category == "analyze-project" }
     var isLibraryFolder: Bool { category == "analyze-library-folder" }
-    var requiresAcknowledgement: Bool { isWholeProject || isLibraryFolder || category == "analyze-folder" }
+    var requiresAcknowledgement: Bool { isWholeProject || isLibraryFolder || category == "analyze-folder" || category == "uninstall-data" }
+}
+
+struct InstalledApplication: Decodable, Identifiable {
+    let id: String
+    let path: String
+    let name: String
+    let bundle_id: String
+    let version: String
+    let reason: String?
 }
 
 struct CleanEvent: Decodable {
@@ -25,6 +34,7 @@ struct CleanEvent: Decodable {
     let kept: Int?
     let partial: Bool?
     let path: String?
+    let app: InstalledApplication?
 }
 
 @MainActor
@@ -32,6 +42,7 @@ final class CleanStore: ObservableObject {
     enum Phase { case idle, scanning, ready, cleaning, finished, stopped, failed }
     @Published private(set) var phase = Phase.idle
     @Published private(set) var items: [CleanItem] = []
+    @Published private(set) var applications: [InstalledApplication] = []
     @Published var selected = Set<String>()
     @Published var acknowledgedItems = Set<String>()
     @Published private(set) var results: [String: String] = [:]
@@ -51,10 +62,21 @@ final class CleanStore: ObservableObject {
     private var requestID = ""
     private var attempted = Set<String>()
     private let analyzeMode: Bool
+    let uninstallMode: Bool
     private let helperOverride: URL?
 
-    init(analyze: Bool = false, helper: URL? = nil) {
-        analyzeMode = analyze; helperOverride = helper
+    init(analyze: Bool = false, uninstall: Bool = false, helper: URL? = nil) {
+        analyzeMode = analyze; uninstallMode = uninstall; helperOverride = helper
+    }
+
+    func reviewApplication(_ app: InstalledApplication) {
+        guard uninstallMode, !busy else { return }
+        items = []; selected = []; acknowledgedItems = []; results = [:]; resultMessages = [:]
+        refusals = [:]; attempted = []; progress = 0; stopping = false; partial = false
+        guard connect() else { return }
+        phase = .scanning; message = "Checking the app and its exact associated paths…"
+        requestID = UUID().uuidString
+        write(["action": "app_review", "request_id": requestID, "app_id": app.id])
     }
 
     func resetReview() {
@@ -83,17 +105,21 @@ final class CleanStore: ObservableObject {
     var selectedBytes: UInt64 { selectedItems.reduce(0) { $0 + $1.bytes } }
     var totalBytes: UInt64 { items.reduce(0) { $0 + $1.bytes } }
     var moved: [CleanItem] { items.filter { results[$0.id] == "trashed" } }
-    var canClean: Bool { phase == .ready && !selected.isEmpty && selectedItems.allSatisfy { !$0.requiresAcknowledgement || acknowledgedItems.contains($0.id) } }
+    var canClean: Bool { phase == .ready && !selected.isEmpty &&
+        (!uninstallMode || selectedItems.contains { $0.category == "uninstall-bundle" }) &&
+        selectedItems.allSatisfy { !$0.requiresAcknowledgement || acknowledgedItems.contains($0.id) } }
 
     func scan() {
         guard !analyzeMode, !busy else { return }
         items = []; selected = []; results = [:]; resultMessages = [:]; attempted = []
+        refusals = [:]
+        if uninstallMode { applications = [] }
         acknowledgedItems = []
         partial = false; kept = 0; progress = 0; scannedAt = nil; stopping = false
         guard connect() else { return }
         phase = .scanning
-        message = "Checking user caches and logs…"
-        send(action: "scan")
+        message = uninstallMode ? "Finding installed apps…" : "Checking user caches and logs…"
+        send(action: uninstallMode ? "apps" : "scan")
     }
 
     func cleanSelected() {
@@ -131,6 +157,7 @@ final class CleanStore: ObservableObject {
         let child = Process()
         child.executableURL = helper
         if analyzeMode { child.arguments = ["--analyze-actions"] }
+        if uninstallMode { child.arguments = ["--uninstall"] }
         child.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"]
         if let deno = ProcessInfo.processInfo.environment["DENO_DIR"] { child.environment?["DENO_DIR"] = deno }
         let stdin = Pipe(), stdout = Pipe()
@@ -185,10 +212,14 @@ final class CleanStore: ObservableObject {
 
     private func apply(_ event: CleanEvent) {
         switch event.kind {
+        case "app":
+            if let app = event.app { applications.append(app) }
         case "progress":
             let total = event.total ?? 0
             progress = total > 0 ? Double(event.checked ?? 0) / Double(total) : 0
-            if !stopping { message = "\(phase == .scanning ? "Checking" : "Processing") \(min((event.checked ?? 0) + 1, total)) of \(total) · \(event.message ?? "item")" }
+            if !stopping {
+                message = total > 0 ? "\(phase == .scanning ? "Checking" : "Processing") \(min((event.checked ?? 0) + 1, total)) of \(total) · \(event.message ?? "item")" : "Checking \(event.message ?? "apps")…"
+            }
         case "item":
             if let item = event.item { items.append(item) }
         case "refused":
@@ -200,6 +231,7 @@ final class CleanStore: ObservableObject {
             if event.status == "ready" && !wasStopping {
                 phase = .ready; scannedAt = Date(); progress = 1
                 if analyzeMode { selected = Set(items.map(\.id)) }
+                if uninstallMode { selected = Set(items.filter { $0.category == "uninstall-bundle" }.map(\.id)) }
                 message = items.isEmpty ? "No items passed the scan checks in these folders." : "Scan complete. Review the items and select what to move to Trash."
                 if let note = event.message, !note.isEmpty { message = note }
             } else {

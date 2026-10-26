@@ -21,6 +21,7 @@ for path in sorted(expected):
     assert (engine / path).read_bytes() == original, f"bundled engine differs: {path}"
 assert (app / "Resources/.Clean/clean.sh").read_bytes() == (repo / "desktop/Engine/clean.sh").read_bytes()
 assert (app / "Resources/.Analyze/actions.sh").read_bytes() == (repo / "desktop/Engine/analyze.sh").read_bytes()
+assert (app / "Resources/.Uninstall/actions.sh").read_bytes() == (repo / "desktop/Engine/uninstall.sh").read_bytes()
 for path in [app / "Helpers/mole-dashboard-cleaner", app / "Helpers/TrashTool/trash", app / "Helpers/mole-dashboard-analyzer"]:
     assert path.is_file() and path.stat().st_mode & 0o111, f"missing executable: {path}"
     subprocess.run(["codesign", "--verify", "--strict", str(path)], check=True)

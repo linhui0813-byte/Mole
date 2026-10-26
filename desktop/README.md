@@ -40,6 +40,46 @@ There is no login item, launch agent, network server, telemetry,
 process termination, or fan control. Clean and Analyze are explicit user actions
 described below. Subprocesses use fixed arguments and never request administrator access.
 
+## Apps / uninstall
+
+Choose **Apps**, search by name, bundle ID, or path, select an app, and choose
+**Review uninstall…**. The inventory reads real bundles in `/Applications` and
+`~/Applications`, including one level of category folders. It shows app icons,
+versions, exact paths, and blocked linked/invalid/protected apps. Refresh starts
+a new inventory; Stop discards authorization from an unfinished scan.
+
+The review measures the app bundle and exact bundle-ID paths in user Caches,
+Logs, Application Support, WebKit, HTTPStorages, Preferences, and Saved
+Application State. Only the bundle starts selected. Data starts unchecked;
+including it requires acknowledging that settings and saved work will also move.
+Uncheck any item to keep it. **Uninstall…** opens a final confirmation showing
+the checked count and size. Cancelling either step removes nothing.
+
+Uninstall moves the complete bundle first, then only the checked data. Data-only
+requests are refused. An unsuccessful bundle move stops later data removal.
+Opaque IDs, 15-minute expiry, one-use execution, strong object/parent bindings,
+plist identity, literal process probes, whitelist and database checks, and final
+Trash rechecks prevent a changed or running app from inheriting a review. Shared
+or unknown ownership keeps the data, using the pinned upstream sibling guard,
+including mounted-volume and package-receipt evidence. A replacement app at the
+original path also keeps its data. A cancelled or uncertain move stops later
+moves; outcomes distinguish moved, kept, unverified, and unprocessed files.
+
+Apple apps, this dashboard, security tools requiring official uninstallers,
+redirected apps, and apps linked from Homebrew Caskroom cannot use this generic
+removal flow. The Homebrew check includes reverse links to a real Applications
+bundle and never invokes Homebrew. Use `mo uninstall` for its package-manager
+integration. Shared containers, group containers, name-only/vendor matches,
+Keychain, system helpers, login items, and package receipts are retained. This
+is an explicit bundle-and-exact-data uninstall, not vendor-wide removal.
+
+All execution stays inside `desktop/` and uses the unmodified upstream
+`mole_delete` logging/protection funnel in Trash mode, with one native transport
+attempt and no authorization prompt or permanent fallback. The app never empties
+Trash. Restoring an app may require putting both its bundle and selected data
+back in their original locations. Checks are bounded, point-in-time observations;
+they do not lock third-party app state against concurrent writes.
+
 ## Analyze
 
 Choose **Analyze**, then **Scan folder**, or use **Choose folder…**, **Home**,
@@ -315,8 +355,15 @@ xcrun swiftc -swift-version 5 -parse-as-library \
   desktop/Sources/CleanStore.swift desktop/Tests/AnalyzeActionsContract.swift \
   -o desktop/build/analyze-actions-contract
 desktop/build/analyze-actions-contract
-shellcheck --rcfile .shellcheckrc desktop/Engine/clean.sh desktop/Engine/analyze.sh desktop/build.sh
+shellcheck --rcfile .shellcheckrc desktop/Engine/clean.sh desktop/Engine/analyze.sh desktop/Engine/uninstall.sh desktop/build.sh
 python3 desktop/Tests/check_clean_bundle.py
+python3 desktop/Tests/uninstall_smoke.py
+xcrun swiftc -swift-version 5 -parse-as-library \
+  -module-cache-path desktop/build/cache/swift \
+  desktop/Sources/Models.swift desktop/Sources/AnalyzeModels.swift \
+  desktop/Sources/CleanStore.swift desktop/Tests/UninstallContract.swift \
+  -o desktop/build/uninstall-contract
+desktop/build/uninstall-contract
 MOLE_TEST_NO_AUTH=1 go test ./cmd/status
 python3 desktop/Tests/collector_smoke.py
 xcrun swiftc -swift-version 5 -parse-as-library \
@@ -378,3 +425,12 @@ and browser-profile data appearing during final sizing after review. Whole-proje
 fixtures also cover account-scoped database checks without administrator visibility,
 interrupted probes stopping a later eligible item, and native folder Trash while
 preserving a linked outside control.
+
+Uninstall tests use isolated homes, mocked process/receipt visibility, and fixture
+Trash for exact selection, optional data, shared owners, app reappearance,
+metadata changes, running/unknown processes, whitelist descendants, final-sink
+activity, linked apps, Homebrew reverse links, cancellation, and protocol rules.
+The packaged smoke creates its own disposable app, moves only that bundle with
+the real native Trash transport, verifies object identity and audit history,
+keeps unchecked settings and a control file, and rejects plan reuse. It leaves
+the disposable bundle in Trash without emptying it.

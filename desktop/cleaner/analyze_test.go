@@ -16,6 +16,7 @@ import (
 )
 
 var analyzeTestGate string
+var uninstallTestGate string
 
 func TestMain(m *testing.M) {
 	wd, _ := os.Getwd()
@@ -27,6 +28,7 @@ func TestMain(m *testing.M) {
 	for _, args := range [][]string{
 		{"python3", filepath.Join(root, "desktop/Tools/analyzer_overlay.py"), temp},
 		{"go", "build", "-overlay", filepath.Join(temp, "analyzer-overlay.json"), "-o", filepath.Join(temp, "gate"), "./cmd/analyze"},
+		{"go", "build", "-o", filepath.Join(temp, "uninstall-gate"), "./desktop/cleaner"},
 	} {
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = root
@@ -36,6 +38,7 @@ func TestMain(m *testing.M) {
 		}
 	}
 	analyzeTestGate = filepath.Join(temp, "gate")
+	uninstallTestGate = filepath.Join(temp, "uninstall-gate")
 	code := m.Run()
 	_ = os.RemoveAll(temp)
 	os.Exit(code)

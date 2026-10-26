@@ -12,10 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func connect(_ store: DashboardStore, clean: CleanStore, analyze: AnalyzeStore) {
+    func connect(_ store: DashboardStore, clean: CleanStore, analyze: AnalyzeStore, uninstall: CleanStore) {
         // Reopening the window must preserve a deliberate pause and one collector.
         guard onTerminate == nil else { return }
-        onTerminate = { store.stop(); clean.stop(); analyze.stop() }
+        onTerminate = { store.stop(); clean.stop(); analyze.stop(); uninstall.stop() }
         store.start()
     }
 }
@@ -26,11 +26,12 @@ struct MoleDashboardApp: App {
     @StateObject private var store = DashboardStore()
     @StateObject private var clean = CleanStore()
     @StateObject private var analyze = AnalyzeStore()
+    @StateObject private var uninstall = CleanStore(uninstall: true)
     var body: some Scene {
         Window("Mole Dashboard", id: "dashboard") {
-            DashboardView().environmentObject(store).environmentObject(clean).environmentObject(analyze)
+            DashboardView(uninstall: uninstall).environmentObject(store).environmentObject(clean).environmentObject(analyze)
                 .task {
-                    delegate.connect(store, clean: clean, analyze: analyze)
+                    delegate.connect(store, clean: clean, analyze: analyze, uninstall: uninstall)
                 }
         }
         .defaultSize(width: 1380, height: 940)

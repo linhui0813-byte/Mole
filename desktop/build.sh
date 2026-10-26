@@ -8,7 +8,7 @@ BUILD_DIR="$DESKTOP_DIR/build"
 APP_DIR="$BUILD_DIR/Mole Dashboard.app"
 "$DESKTOP_DIR/check-upstream.sh"
 mkdir -p "$BUILD_DIR/cache/go" "$BUILD_DIR/cache/swift" \
-    "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Helpers/TrashTool" "$APP_DIR/Contents/Resources/.Clean" "$APP_DIR/Contents/Resources/.Analyze"
+    "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Helpers/TrashTool" "$APP_DIR/Contents/Resources/.Clean" "$APP_DIR/Contents/Resources/.Analyze" "$APP_DIR/Contents/Resources/.Uninstall"
 
 echo 'Preparing the upstream Mole artwork...'
 xcrun swiftc -O -module-cache-path "$BUILD_DIR/cache/swift" \
@@ -45,6 +45,7 @@ xcrun swiftc -O -target "$(uname -m)-apple-macos14.0" -module-cache-path "$BUILD
     "$DESKTOP_DIR/Tools/Trash.swift" -o "$APP_DIR/Contents/Helpers/TrashTool/trash"
 cp "$DESKTOP_DIR/Engine/clean.sh" "$APP_DIR/Contents/Resources/.Clean/clean.sh"
 cp "$DESKTOP_DIR/Engine/analyze.sh" "$APP_DIR/Contents/Resources/.Analyze/actions.sh"
+cp "$DESKTOP_DIR/Engine/uninstall.sh" "$APP_DIR/Contents/Resources/.Uninstall/actions.sh"
 /bin/rm -rf "$APP_DIR/Contents/Resources/.MoleEngine" # SAFE: Generated bundled source under desktop/build is rebuilt from the verified upstream pin.
 mkdir -p "$APP_DIR/Contents/Resources/.MoleEngine"
 git archive "$(cat "$DESKTOP_DIR/UPSTREAM_COMMIT")" bin/clean.sh lib |
