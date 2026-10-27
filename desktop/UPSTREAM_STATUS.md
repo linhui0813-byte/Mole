@@ -325,7 +325,7 @@ The adapter owns this complete path inside `desktop/`:
 | --- | --- |
 | Inventory | Real Applications roots, one category level, bounded plist reads, no link traversal; invalid and linked apps are shown as blocked. |
 | Review | Exact bundle path and bundle-ID data locations only; no vendor/name fallback, containers, system helpers, or Keychain. |
-| App policy | Upstream protected-app and official-uninstaller rules, Apple/dashboard protection, literal process probes; running and unknown states retain the app. |
+| App policy | Upstream protected-app and official-uninstaller rules; the upstream removable Apple list is shared by inventory and final execution, other Apple apps and this dashboard stay protected. Literal process probes retain running and unknown states. |
 | Package ownership | Exact Caskroom app/reverse-link identities; managed or unknown apps use the existing package-manager uninstall path. No brew process runs. |
 | Shared data | Upstream live sibling/family guard in preview and final execution; incomplete ownership and a reappeared app retain data. |
 | Binding | Strong target/physical-parent bindings and app plist hash repeated inside the final Trash guard; changed identity refuses. |
@@ -403,3 +403,36 @@ columns, measured and Unavailable rows, largest-size and oldest-known-date
 sorting, and a detail panel with the same size and local date/time. No existing
 app or app data was moved during this follow-up. The prior signed app at commit
 790db227 is retained under desktop/build/rollback for local rollback.
+
+## Optional Apple app policy, 2026-10-27
+
+The dashboard's blanket Apple-bundle refusal incorrectly blocked GarageBand,
+which is explicitly included in the pinned upstream removable-app list.
+Inventory now runs a read-only policy action sharing that exact upstream list
+with review and the final Trash guard. Unknown Apple apps, system components,
+and this dashboard remain protected. Pattern matching retains upstream's
+case-sensitive semantics. Protection text wraps in the app detail panel.
+
+The regression failed against the previous inventory policy, then passed with
+the actual review and fixture Trash paths exercised. It covers GarageBand,
+iMovie and Pages allowance, protected Finder, an unknown Apple ID, a near match,
+an unsupported case variant, and dashboard self-protection. Fresh Go race tests,
+Swift uninstall and Analyze action contracts, lint/safety checks, upstream
+isolation, native build/signature and exact packaged-source checks pass.
+The native disposable-app smoke verified Trash object identity, unchecked data,
+audit logging and consumed-plan refusal; no existing app was removed.
+
+Live GarageBand verification showed the enabled Review uninstall button and
+the unchanged database guard retaining its bundled LoopChunksDatabaseV01.sqlite.
+The unprivileged root-process visibility probe returned status 1 with no records,
+so complete database idleness could not be established. Eligibility is not proof
+that removal will pass all guards. This remains a limitation of the no-prompt
+dashboard flow; no database guard was weakened and GarageBand remains installed.
+The signed prior dashboard at 97f24fa8 is retained under desktop/build/rollback.
+
+The full repository suite exited 1: the documented upstream fallback-count
+assertion failed, and the unrelated nested-login-helper optimize case failed
+during that run. Both the isolated case and the complete optimize test file
+passed on independent reruns. Go, module loading, integration and installation
+stages passed. The full-suite result remains failed; upstream code and its
+assertions were not changed.

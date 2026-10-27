@@ -86,7 +86,10 @@ struct UninstallView: View {
                         LabeledContent("App size", value: app.sizeText).font(.system(size: 12))
                         LabeledContent("Last active", value: app.lastActiveDate?.formatted(date: .abbreviated, time: .shortened) ?? app.lastActiveText)
                             .font(.system(size: 12)).help("macOS last-used metadata; may be delayed or unavailable.")
-                        if let reason = app.reason { Label(reason, systemImage: "lock.shield").font(.system(size: 12)).foregroundStyle(Theme.gold) }
+                        if let reason = app.reason {
+                            Label(reason, systemImage: "lock.shield").font(.system(size: 12)).foregroundStyle(Theme.gold)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         Button("Review uninstall…") { review = app; store.reviewApplication(app) }
                             .buttonStyle(.borderedProminent).tint(Theme.green).disabled(store.busy || app.reason != nil)
                             .accessibilityLabel("Review uninstall for \(app.name)")

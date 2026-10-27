@@ -86,6 +86,70 @@ func appItems(p *plan) []item {
 	return out
 }
 
+func TestUninstallApplePolicy(t *testing.T) {
+	cases := []struct {
+		id      string
+		allowed bool
+	}{
+		{"com.apple.garageband10", true},
+		{"com.apple.iMovie", true},
+		{"com.apple.iWork.Pages", true},
+		{"com.apple.finder", false},
+		{"com.apple.unknownfixture", false},
+		{"com.apple.garageban", false},
+		{"COM.APPLE.garageband10", false},
+		{"local.hui.mole-dashboard", false},
+	}
+	for _, c := range cases {
+		t.Run(c.id, func(t *testing.T) {
+			e := uninstallFixture(t)
+			makeApplication(t, e, "ApplePolicy", c.id)
+			p := e.applications(context.Background(), "inventory", func(event) {})
+			if p == nil || len(p.apps) != 1 {
+				t.Fatalf("incomplete inventory: %+v", p)
+			}
+			var a application
+			for _, candidate := range p.apps {
+				if candidate.BundleID == c.id {
+					a = candidate
+				}
+			}
+			if a.Path == "" || (a.Reason == "") != c.allowed {
+				t.Fatalf("inventory policy: allowed=%v app=%+v", c.allowed, a)
+			}
+			// Bypass the inventory reason to exercise the actual review/sink policy.
+			a.Reason = ""
+			data := appData(t, e, a)
+			review := reviewApp(t, e, a)
+			if !c.allowed {
+				if len(review.items) != 0 {
+					t.Fatalf("protected app entered review: %+v", review.items)
+				}
+				assertExists(t, a.Path, true)
+				assertExists(t, data, true)
+				return
+			}
+			if len(review.items) != 2 {
+				t.Fatalf("optional Apple app/data refused: %+v", review.items)
+			}
+			if c.id == "com.apple.garageband10" {
+				ordered, err := uninstallOrder(appItems(review))
+				if err != nil {
+					t.Fatal(err)
+				}
+				events := collectClean(e, ordered)
+				for _, ev := range events {
+					if ev.Kind == "result" && ev.Status != "trashed" {
+						t.Fatalf("optional Apple app move refused: %+v", events)
+					}
+				}
+				assertExists(t, a.Path, false)
+				assertExists(t, data, false)
+			}
+		})
+	}
+}
+
 func TestUninstallExactBundleAndOptionalData(t *testing.T) {
 	e := uninstallFixture(t)
 	a := makeApplication(t, e, "Fixture space ' quote $(literal)", "com.molefixture.uninstall")

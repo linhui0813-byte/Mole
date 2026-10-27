@@ -80,13 +80,21 @@ including mounted-volume and package-receipt evidence. A replacement app at the
 original path also keeps its data. A cancelled or uncertain move stops later
 moves; outcomes distinguish moved, kept, unverified, and unprocessed files.
 
-Apple apps, this dashboard, security tools requiring official uninstallers,
+Optional Apple apps on the pinned upstream `APPLE_UNINSTALLABLE_APPS` list,
+including GarageBand, can use the normal review. Inventory and the final Trash
+guard consult that same list; other Apple apps remain protected. This dashboard,
+security tools requiring official uninstallers,
 redirected apps, and apps linked from Homebrew Caskroom cannot use this generic
 removal flow. The Homebrew check includes reverse links to a real Applications
 bundle and never invokes Homebrew. Use `mo uninstall` for its package-manager
 integration. Shared containers, group containers, name-only/vendor matches,
 Keychain, system helpers, login items, and package receipts are retained. This
 is an explicit bundle-and-exact-data uninstall, not vendor-wide removal.
+
+Eligibility does not override process or database guards. A review can still
+retain an optional app when database use cannot be verified, including databases
+inside the bundle. **Reveal in Finder** shows that item for manual inspection;
+the dashboard does not elevate access to bypass the refusal.
 
 All execution stays inside `desktop/` and uses the unmodified upstream
 `mole_delete` logging/protection funnel in Trash mode, with one native transport

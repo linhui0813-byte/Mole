@@ -4,7 +4,7 @@ set -euo pipefail
 [[ "$EUID" -ne 0 && $# -ge 8 ]] || exit 64
 engine_root="$1" action="$2" category="$3" target="$4"
 shift 4
-case "$action" in inspect) [[ $# -eq 4 ]] ;; trash) [[ $# -eq 8 ]] ;; *) exit 64 ;; esac || exit 64
+case "$action" in policy | inspect) [[ $# -eq 4 ]] ;; trash) [[ $# -eq 8 ]] ;; *) exit 64 ;; esac || exit 64
 if [[ "$action" == trash ]]; then
     expected_identity="$1" expected_parent="$2" expected_parent_id="$3" expected_target_id="$4"
     shift 4
@@ -12,8 +12,8 @@ fi
 app_path="$1" bundle_id="$2" owner="$3" binding="$4"
 gate="${MOLE_DASHBOARD_UNINSTALL_GATE:-}"
 [[ -x "$gate" ]] || exit 64
-source "$engine_root/lib/core/common.sh" >/dev/null
-source "$engine_root/lib/uninstall/batch.sh" >/dev/null
+source "$engine_root/lib/core/common.sh" > /dev/null
+source "$engine_root/lib/uninstall/batch.sh" > /dev/null
 export MOLE_UNINSTALL_MODE=1 MOLE_CURRENT_COMMAND=uninstall MOLE_DELETE_MODE=trash
 load_mole_whitelist "$HOME" || exit 65
 
@@ -23,12 +23,44 @@ uninstall_refuse() {
     exit "${2:-65}"
 }
 
+# Inventory and every review/final guard share the pinned upstream Apple list.
+# Namespace detection is case-insensitive; allowlist patterns stay case-sensitive.
+uninstall_app_policy_safe() {
+    local lower_id pattern allowed=false
+    if [[ "$bundle_id" == local.hui.mole-dashboard ]]; then
+        printf 'CLEAN_REASON:This dashboard cannot uninstall itself. Quit it and remove it in Finder.\n' >&2
+        return 1
+    fi
+    mole_ascii_lowercase lower_id "$bundle_id"
+    if [[ "$lower_id" == com.apple.* ]]; then
+        for pattern in "${APPLE_UNINSTALLABLE_APPS[@]}"; do
+            if bundle_matches_pattern "$bundle_id" "$pattern"; then
+                allowed=true
+                break
+            fi
+        done
+        if [[ "$allowed" != true ]]; then
+            printf "CLEAN_REASON:Protected Apple app. It is not on Mole's removable-app list; check Apple's removal instructions.\n" >&2
+            return 1
+        fi
+    fi
+    if should_protect_from_uninstall "$bundle_id" || should_protect_path "$target"; then
+        printf 'CLEAN_REASON:Protected by Mole; use the app vendor or macOS removal instructions\n' >&2
+        return 1
+    fi
+}
+
+if [[ "$action" == policy ]]; then
+    uninstall_app_policy_safe || uninstall_refuse 'App protection policy could not be verified'
+    exit 0
+fi
+
 uninstall_contents_safe() {
     local list member pattern count=0 deadline=$((SECONDS + 8)) valid=true
     local -a predicates=(-false)
     for pattern in "${WHITELIST_PATTERNS[@]}"; do predicates+=(-o -path "${pattern%/}"); done
     list=$(mktemp "${TMPDIR:-/tmp}/mole-uninstall-policy.XXXXXX") || return 1
-    if ! run_with_timeout 6 "$FIND_BSD" "$target" \( "${predicates[@]}" -o -type f \( -iname '*.db*' -o -iname '*.sqlite*' \) \) -print0 >"$list" 2>/dev/null; then
+    if ! run_with_timeout 6 "$FIND_BSD" "$target" \( "${predicates[@]}" -o -type f \( -iname '*.db*' -o -iname '*.sqlite*' \) \) -print0 > "$list" 2> /dev/null; then
         /bin/rm -f "$list" # SAFE: Exact mktemp-created private policy listing.
         printf 'CLEAN_REASON:Contents could not be completely checked; inspect access in Finder\n' >&2
         return 1
@@ -50,7 +82,7 @@ uninstall_contents_safe() {
             valid=false
             break
         fi
-    done <"$list"
+    done < "$list"
     /bin/rm -f "$list" # SAFE: Exact mktemp-created private policy listing.
     if [[ "$valid" == true && $SECONDS -ge $deadline ]]; then
         printf 'CLEAN_REASON:Content checks reached their time limit; inspect this item in Finder\n' >&2
@@ -67,6 +99,7 @@ fi
 
 uninstall_selection_safe() {
     local reason vendor sibling_rc=0
+    uninstall_app_policy_safe || return 1
     reason=$("$gate" --uninstall-check "$owner" "$binding" "$action" 2>&1) || {
         printf 'CLEAN_REASON:%s\n' "${reason:-App identity or running state is unknown; review again}" >&2
         return 1
@@ -76,10 +109,6 @@ uninstall_selection_safe() {
         uninstall-data) [[ "$target" != "$app_path" ]] || return 1 ;;
         *) return 1 ;;
     esac
-    if should_protect_from_uninstall "$bundle_id" || should_protect_path "$target"; then
-        printf 'CLEAN_REASON:Protected by Mole; use the app vendor or macOS removal instructions\n' >&2
-        return 1
-    fi
     vendor=$(official_uninstaller_vendor "$bundle_id" "${app_path##*/}" "$app_path") || vendor=''
     if [[ -n "$vendor" ]]; then
         printf 'CLEAN_REASON:Use the official %s uninstaller for this app\n' "$vendor" >&2
@@ -90,7 +119,7 @@ uninstall_selection_safe() {
         return 1
     fi
     if [[ "$category" == uninstall-data ]]; then
-        uninstall_live_bundle_has_other_install "$bundle_id" "$app_path" >/dev/null 2>&1 || sibling_rc=$?
+        uninstall_live_bundle_has_other_install "$bundle_id" "$app_path" > /dev/null 2>&1 || sibling_rc=$?
         if [[ $sibling_rc -ne 1 ]]; then
             printf 'CLEAN_REASON:App data is shared with another install or ownership is unknown; data is kept\n' >&2
             return 1
@@ -139,7 +168,7 @@ case "$action" in
             [[ "$2" == false ]] || return 1
             _mole_trash_target_still_safe "$1" "$3" "$4" "$5" "${6:-}" || return $?
             # One native attempt; no Finder, authorization, or permanent fallback.
-            run_with_timeout "$MOLE_TIMEOUT_DISK_VERIFY_SEC" trash "$1" >/dev/null 2>&1
+            run_with_timeout "$MOLE_TIMEOUT_DISK_VERIFY_SEC" trash "$1" > /dev/null 2>&1
         }
         export MOLE_DRY_RUN=0
         DRY_RUN=false

@@ -161,8 +161,10 @@ func (e engine) applications(ctx context.Context, id string, emit func(event)) *
 				if err != nil {
 					app.Reason = err.Error()
 				}
-				if strings.HasPrefix(strings.ToLower(app.BundleID), "com.apple.") || app.BundleID == "local.hui.mole-dashboard" {
-					app.Reason = "Protected app. Remove supported Apple apps through macOS."
+				if app.Reason == "" && (strings.HasPrefix(strings.ToLower(app.BundleID), "com.apple.") || app.BundleID == "local.hui.mole-dashboard") {
+					if _, err := e.invoke(ctx, "policy", item{Category: "uninstall-bundle", Path: app.Path, owner: &app}); err != nil {
+						app.Reason = inspectionReason(err)
+					}
 				}
 				app.MetadataPending = app.Binding.Path != ""
 				if app.MetadataPending {
@@ -412,8 +414,10 @@ func checkUninstall(ownerJSON, bindingJSON, stage string) error {
 	if b.Path != a.Path && !slices.Contains(dataPaths(home, a.BundleID), b.Path) {
 		return errors.New("Outside the exact app-data scope.")
 	}
-	if strings.HasPrefix(strings.ToLower(a.BundleID), "com.apple.") || a.BundleID == "local.hui.mole-dashboard" {
-		return errors.New("Protected app. Use macOS to manage it.")
+	// Apple eligibility belongs to the shared shell policy, repeated inside the
+	// final Trash guard. This gate owns object identity and literal process state.
+	if a.BundleID == "local.hui.mole-dashboard" {
+		return errors.New("This dashboard cannot uninstall itself. Quit it and remove it in Finder.")
 	}
 	// A literal executable-name probe conservatively retains shared runtime names.
 	// Unexpected status and diagnostic output mean unknown, never absence.
