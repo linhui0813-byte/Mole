@@ -76,6 +76,15 @@ type dirEntry struct {
 	Size       int64
 	IsDir      bool
 	LastAccess time.Time
+	// IsMount marks a directory on another file system than the scan root.
+	// Its size is not counted here, but the row stays browsable (#1979).
+	IsMount bool
+}
+
+// hiddenWhenEmpty reports whether a finished entry with no bytes is noise
+// that listings drop. A mount point reads 0 on purpose and stays visible.
+func (e dirEntry) hiddenWhenEmpty() bool {
+	return e.Size == 0 && e.State == scanComplete && !e.IsMount
 }
 
 type fileEntry struct {
@@ -243,7 +252,7 @@ type model struct {
 	totalFiles          int64           // Total files found in current/last scan
 	lastTotalFiles      int64           // Total files from previous scan (for progress bar)
 	diskFree            int64           // Free disk space for the analyzed volume
-	localSnapshotCount  int             // Read-only Time Machine snapshot count for overview context
+	localSnapshotCount  int             // Read-only local snapshot count for overview context
 	localSnapshotFresh  bool            // False after the latest matching probe failed
 	snapshotProbeID     int64
 	snapshotRunner      localSnapshotCommandRunner
@@ -265,8 +274,13 @@ type model struct {
 	liveScanCancel      context.CancelFunc
 	liveScanEvents      <-chan liveScanEventMsg
 	liveScanningPaths   map[string]bool
+	liveEntryIndex      map[string]int
+	liveEntriesDirty    bool
 	autoSortLiveEntries bool
 	liveSortMode        liveSortMode
+	simulators          map[string]simulatorInfo
+	simulatorProbeID    uint64
+	simulatorCancel     context.CancelFunc
 }
 
 func (m model) inOverviewMode() bool {
@@ -320,10 +334,56 @@ func (m *model) hydrateOverviewEntries() {
 	m.totalSize = sumKnownEntrySizes(m.entries)
 	m.scanState = entryScanState(m.entries)
 	m.scanTransient = false
+	m.ensureVisibleOverviewSelection()
 }
 
 func (m *model) sortOverviewEntriesBySize() {
 	sortDirEntriesBySize(m.entries)
+	m.ensureVisibleOverviewSelection()
+}
+
+// ensureVisibleOverviewSelection moves overview selection onto a rendered row
+// when at least one non-hidden entry exists.
+func (m *model) ensureVisibleOverviewSelection() {
+	if !m.inOverviewMode() || len(m.entries) == 0 {
+		return
+	}
+	if m.selected >= 0 && m.selected < len(m.entries) && !m.entries[m.selected].hiddenWhenEmpty() {
+		return
+	}
+	for i := range m.entries {
+		if !m.entries[i].hiddenWhenEmpty() {
+			m.selected = i
+			return
+		}
+	}
+}
+
+func (m *model) moveEntrySelection(delta int) {
+	if len(m.entries) == 0 || (delta != -1 && delta != 1) {
+		return
+	}
+	// Only the overview hides empty rows; a directory listing renders every
+	// entry, zero-byte files included, so the cursor visits each one.
+	next := m.selected + delta
+	for m.inOverviewMode() && next >= 0 && next < len(m.entries) && m.entries[next].hiddenWhenEmpty() {
+		next += delta
+	}
+	if next < 0 || next >= len(m.entries) {
+		return
+	}
+	m.noteLiveCursorMove()
+	m.selected = next
+	if delta < 0 {
+		if m.selected < m.offset {
+			m.offset = m.selected
+		}
+		return
+	}
+	viewport := calculateViewport(m.height, false)
+	if m.selected >= m.offset+viewport {
+		m.offset = m.selected - viewport + 1
+	}
 }
 
 func (m *model) getScanProgress() (files, dirs, bytes int64) {
@@ -430,6 +490,7 @@ func (m *model) removePathFromView(path string) {
 	// shift the shared array twice and corrupt it; rebuilding via the filters
 	// keeps the view, the query, and the selection consistent.
 	m.entriesAll = removeByPath(m.entriesAll, path, dirEntryPath)
+	m.liveEntryIndex = nil
 	m.largeFilesAll = removeByPath(m.largeFilesAll, path, fileEntryPath)
 
 	if removedSize > 0 {
@@ -479,7 +540,6 @@ func markRemovedOverviewRowsPending(entries []dirEntry, removedPaths []string) {
 
 func fileEntryName(f fileEntry) string { return f.Name }
 func fileEntryPath(f fileEntry) string { return f.Path }
-func dirEntryName(e dirEntry) string   { return e.Name }
 func dirEntryPath(e dirEntry) string   { return e.Path }
 
 // filterMatches reports whether an item with the given name and path matches a
@@ -538,7 +598,7 @@ func (m *model) resetLargeFilter() {
 // the current query. The directory view is the drill-down list (m.entries) in
 // non-overview mode.
 func (m *model) applyEntryFilter() {
-	m.entries = filterByQuery(m.entriesAll, m.entryFilter, dirEntryName, dirEntryPath)
+	m.entries = filterByQuery(m.entriesAll, m.entryFilter, m.entryDisplayName, dirEntryPath)
 	m.clampEntrySelection()
 }
 

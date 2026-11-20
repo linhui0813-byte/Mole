@@ -60,7 +60,7 @@ HISTORY_ACTIVE_START_SEQ=0
 HISTORY_START_SEQ_COUNTER=0
 
 history_operations_log_file() {
-    printf '%s\n' "${MOLE_OPERATIONS_LOG:-${OPERATIONS_LOG_FILE:-$HOME/Library/Logs/mole/operations.log}}"
+    printf '%s\n' "${OPERATIONS_LOG_FILE:-$HOME/Library/Logs/mole/operations.log}"
 }
 
 history_deletions_log_file() {
@@ -511,19 +511,117 @@ history_reset_deletions() {
     HISTORY_DELETE_PATHS=()
 }
 
+# Add a coalesced run of operation records to the active session. Every record
+# in the run had the identity of the operation line just before it, which made
+# that identity active, so this is what history_record_operation would add.
+history_add_operation_counts() {
+    [[ -n "$HISTORY_ACTIVE_COMMAND" ]] || return 0
+    # Seven decimal counts printed by awk; split them without a here-string,
+    # which costs Bash 3.2 a temporary file per call.
+    # shellcheck disable=SC2086  # intentional word splitting of digits
+    set -- $1
+    local removed=$1 trashed=$2 skipped=$3 failed=$4 failed_tasks=$5 rebuilt=$6 other=$7
+    HISTORY_ACTIVE_REMOVED=$((HISTORY_ACTIVE_REMOVED + removed))
+    HISTORY_ACTIVE_TRASHED=$((HISTORY_ACTIVE_TRASHED + trashed))
+    HISTORY_ACTIVE_SKIPPED=$((HISTORY_ACTIVE_SKIPPED + skipped))
+    HISTORY_ACTIVE_FAILED=$((HISTORY_ACTIVE_FAILED + failed))
+    HISTORY_ACTIVE_FAILED_TASKS=$((HISTORY_ACTIVE_FAILED_TASKS + failed_tasks))
+    HISTORY_ACTIVE_REBUILT=$((HISTORY_ACTIVE_REBUILT + rebuilt))
+    HISTORY_ACTIVE_OTHER=$((HISTORY_ACTIVE_OTHER + other))
+    HISTORY_ACTIVE_OPERATIONS=$((HISTORY_ACTIVE_OPERATIONS + removed + trashed + skipped + failed + failed_tasks + rebuilt + other))
+}
+
+# One awk pass shrinks the log before the Bash parser sees it, since a log
+# near its 5MB rotation took seconds line by line. Lines no parser accepts
+# (neither "[" nor a session marker prefix) are dropped. A run of canonical
+# operation lines, "[time] [identity] ACTION ...", with one valid identity is
+# kept as its first line ("L" + line) followed by one "C" record of per-action
+# counts for the rest. Every other line passes through unchanged as "L" + line.
+# Canonical means neither bracket holds "]" or a byte above 127, so the Bash
+# parser splits it the same way awk does in every locale.
+history_condense_operations_log() {
+    LC_ALL=C awk '
+        function valid_identity(field, p) {
+            p = index(field, " run=")
+            if (p == 0) return field != ""
+            if (p == 1) return 0
+            return substr(field, p + 5) ~ /^[A-Za-z0-9._-]+$/
+        }
+        function flush() {
+            if (pending) printf "C%d %d %d %d %d %d %d\n", n_removed, n_trashed, n_skipped, n_failed, n_task_failed, n_rebuilt, n_other
+            pending = 0
+            n_removed = n_trashed = n_skipped = n_failed = n_task_failed = n_rebuilt = n_other = 0
+        }
+        function pass(line) {
+            flush()
+            run_identity = ""
+            print "L" line
+        }
+        {
+            line = $0
+            if (substr(line, 1, 1) != "[") {
+                if (substr(line, 1, 13) == "# ========== ") pass(line)
+                next
+            }
+            if (line !~ /^\[[^]]+\] \[[^]]+\] [^ ]/) {
+                pass(line)
+                next
+            }
+            rest = substr(line, index(line, "]") + 3)
+            field = substr(rest, 1, index(rest, "]") - 1)
+            if (!valid_identity(field)) {
+                pass(line)
+                next
+            }
+            # awk splits bytes; Bash splits characters of the user locale, where
+            # a "]" byte can be the tail of a GBK or Shift-JIS character. Only a
+            # prefix of plain ASCII is split the same way by both.
+            if (substr(line, 1, index(line, "]") + 2 + length(field)) ~ /[\200-\377]/) {
+                pass(line)
+                next
+            }
+            if (field != run_identity) {
+                pass(line)
+                run_identity = field
+                next
+            }
+            action = substr(rest, index(rest, "]") + 2)
+            space = index(action, " ")
+            if (space > 0) action = substr(action, 1, space - 1)
+            if (action == "REMOVED") n_removed++
+            else if (action == "TRASHED") n_trashed++
+            else if (action == "SKIPPED") n_skipped++
+            else if (action == "FAILED") n_failed++
+            else if (action == "TASK_FAILED") n_task_failed++
+            else if (action == "REBUILT") n_rebuilt++
+            else n_other++
+            pending = 1
+        }
+        END { flush() }
+    '
+}
+
 history_load_operations() {
     local log_file="$1"
-    local line
+    local line condensed
 
     history_reset_sessions
 
     [[ -f "$log_file" ]] || return 0
 
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        history_parse_session_start "$line" && continue
-        history_parse_session_end "$line" && continue
-        history_parse_operation_line "$line" && continue
-    done < "$log_file"
+    # An unreadable log reads as empty, as the line loop's redirect did.
+    condensed=$(history_condense_operations_log < "$log_file") || condensed=""
+    while IFS= read -r line; do
+        case "$line" in
+            L*)
+                line="${line#L}"
+                history_parse_session_start "$line" && continue
+                history_parse_session_end "$line" && continue
+                history_parse_operation_line "$line" && continue
+                ;;
+            C*) history_add_operation_counts "${line#C}" ;;
+        esac
+    done <<< "$condensed"
 
     history_finish_all_sessions
 }
@@ -591,7 +689,7 @@ history_size_label() {
 history_json_escape() {
     local value="${1:-}"
     local LC_ALL=C
-    local char code idx
+    local char code idx width offset byte second_min second_max
 
     idx=0
     while [[ "$idx" -lt "${#value}" ]]; do
@@ -611,8 +709,43 @@ history_json_escape() {
                 fi
                 if [[ "$code" -lt 32 ]]; then
                     printf '\\u%04x' "$code"
-                else
+                elif [[ "$code" -lt 128 ]]; then
                     printf '%s' "$char"
+                else
+                    # Bash holds filename bytes, but JSON strings require UTF-8.
+                    # Keep canonical scalar sequences; replace each invalid byte.
+                    width=0
+                    second_min=128
+                    second_max=191
+                    if [[ "$code" -ge 194 && "$code" -le 223 ]]; then
+                        width=2
+                    elif [[ "$code" -ge 224 && "$code" -le 239 ]]; then
+                        width=3
+                        [[ "$code" -ne 224 ]] || second_min=160
+                        [[ "$code" -ne 237 ]] || second_max=159
+                    elif [[ "$code" -ge 240 && "$code" -le 244 ]]; then
+                        width=4
+                        [[ "$code" -ne 240 ]] || second_min=144
+                        [[ "$code" -ne 244 ]] || second_max=143
+                    fi
+                    if [[ $((idx + width)) -gt "${#value}" ]]; then
+                        width=0
+                    fi
+                    for ((offset = 1; offset < width; offset++)); do
+                        printf -v byte '%d' "'${value:$((idx + offset)):1}"
+                        byte=$((byte & 255))
+                        if [[ "$byte" -lt 128 || "$byte" -gt 191 ]] ||
+                            { [[ "$offset" -eq 1 ]] && [[ "$byte" -lt "$second_min" || "$byte" -gt "$second_max" ]]; }; then
+                            width=0
+                            break
+                        fi
+                    done
+                    if [[ "$width" -gt 0 ]]; then
+                        printf '%s' "${value:$idx:$width}"
+                        idx=$((idx + width))
+                        continue
+                    fi
+                    printf '%s' '\ufffd'
                 fi
                 ;;
         esac

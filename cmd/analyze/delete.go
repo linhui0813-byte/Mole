@@ -335,6 +335,12 @@ func isProtectedAnalyzeDeletePath(path string) bool {
 	if isCriticalAnalyzeDeletePath(cleanPath) {
 		return true
 	}
+	if isSessionSocketFolderPath(cleanPath) {
+		return true
+	}
+	if isLibraryHeadFolder(cleanPath, "/Library") {
+		return true
+	}
 
 	homeRoots := protectedAnalyzeHomeRoots()
 	if len(homeRoots) == 0 {
@@ -345,12 +351,17 @@ func isProtectedAnalyzeDeletePath(path string) bool {
 		if cleanPath == homeRoot || isSameExistingPath(cleanPath, homeRoot) {
 			return true
 		}
+		if isAnalyzeHeadHomeFolder(cleanPath, homeRoot) ||
+			isLibraryHeadFolder(cleanPath, filepath.Join(homeRoot, "Library")) {
+			return true
+		}
 
 		dockerDesktopState := filepath.Join(homeRoot, "Library", "Containers", "com.docker.docker")
 		if cleanPath == dockerDesktopState || strings.HasPrefix(cleanPath, dockerDesktopState+string(filepath.Separator)) {
 			return true
 		}
-		if isPathWithinExistingRoot(cleanPath, dockerDesktopState) {
+		if isPathWithinExistingRoot(cleanPath, dockerDesktopState) ||
+			containsProtectedRoot(cleanPath, dockerDesktopState) {
 			return true
 		}
 
@@ -358,7 +369,12 @@ func isProtectedAnalyzeDeletePath(path string) bool {
 		if cleanPath == orbstackState || strings.HasPrefix(cleanPath, orbstackState+string(filepath.Separator)) {
 			return true
 		}
-		if isPathWithinExistingRoot(cleanPath, orbstackState) {
+		if isPathWithinExistingRoot(cleanPath, orbstackState) ||
+			containsProtectedRoot(cleanPath, orbstackState) {
+			return true
+		}
+
+		if isICloudStructuralPath(cleanPath, homeRoot) {
 			return true
 		}
 
@@ -368,7 +384,9 @@ func isProtectedAnalyzeDeletePath(path string) bool {
 				if !strings.HasSuffix(strings.ToLower(entry.Name()), "dev.orbstack") {
 					continue
 				}
-				if isPathWithinExistingRoot(cleanPath, filepath.Join(groupContainers, entry.Name())) {
+				stateRoot := filepath.Join(groupContainers, entry.Name())
+				if isPathWithinExistingRoot(cleanPath, stateRoot) ||
+					containsProtectedRoot(cleanPath, stateRoot) {
 					return true
 				}
 			}
@@ -467,6 +485,199 @@ func isCriticalAnalyzeDeletePath(path string) bool {
 	return false
 }
 
+// isSessionSocketFolderPath reports a folder in the temp directory that holds
+// a login session's sockets, or anything inside one: launchd's listeners
+// (SSH_AUTH_SOCK points into a com.apple.launchd.* folder), tmux's server
+// socket, a hand-started ssh-agent's folder and X11's. Moved to the Trash,
+// ssh-agent and tmux stay unreachable until the next login, and the folder
+// holds nothing to reclaim. The rest of the temp directory stays the user's
+// pick. Mole Mac refuses the launchd, tmux and X11 folders the same way.
+// The parent is /private/tmp or the user's $TMPDIR (where ssh-agent puts its
+// folder when TMPDIR is set), matched by name and by identity, so /tmp, a
+// different letter case and a link to either are caught too.
+func isSessionSocketFolderPath(path string) bool {
+	tempRoots := []string{"/private/tmp", "/tmp"}
+	identityRoots := []string{"/private/tmp"}
+	if userTemp, ok := sessionUserTempDir(); ok {
+		tempRoots = append(tempRoots, userTemp)
+		identityRoots = append(identityRoots, userTemp)
+	}
+	var tempInfos []os.FileInfo
+	for _, root := range identityRoots {
+		if info, err := os.Stat(root); err == nil {
+			tempInfos = append(tempInfos, info)
+		}
+	}
+	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		if isSessionSocketFolderName(filepath.Base(current)) && isTempDir(parent, tempRoots, tempInfos) {
+			return true
+		}
+	}
+}
+
+// sessionUserTempDir is $TMPDIR when it can be a temp directory: absolute, not
+// / and not a home folder, so a TMPDIR pointed at $HOME does not turn the
+// user's own ssh-* or tmux-* folders into refused ones.
+func sessionUserTempDir() (string, bool) {
+	dir := filepath.Clean(os.TempDir())
+	if !filepath.IsAbs(dir) || dir == "/" {
+		return "", false
+	}
+	for _, home := range protectedAnalyzeHomeRoots() {
+		if dir == home || isSameExistingPath(dir, home) {
+			return "", false
+		}
+	}
+	return dir, true
+}
+
+func isTempDir(dir string, roots []string, infos []os.FileInfo) bool {
+	for _, root := range roots {
+		if strings.EqualFold(dir, root) {
+			return true
+		}
+	}
+	if len(infos) == 0 {
+		return false
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		return false
+	}
+	for _, info := range infos {
+		if os.SameFile(dirInfo, info) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSessionSocketFolderName matches the names the owners actually create:
+// tmux-<uid>, ssh- plus 10 or 12 random letters and digits (OpenSSH's
+// mkdtemp template, older and current) and launchd's
+// com.apple.launchd.<random>, so a tmux-3.5a source tree stays movable.
+func isSessionSocketFolderName(name string) bool {
+	lower := strings.ToLower(name)
+	switch {
+	case lower == ".x11-unix":
+		return true
+	case strings.HasPrefix(lower, "com.apple.launchd.") && len(lower) > len("com.apple.launchd."):
+		return true
+	case strings.HasPrefix(lower, "tmux-"):
+		return isAllDigits(lower[len("tmux-"):])
+	case strings.HasPrefix(lower, "ssh-"):
+		rest := lower[len("ssh-"):]
+		return (len(rest) == 10 || len(rest) == 12) && isAllAlnum(rest)
+	}
+	return false
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllAlnum(s string) bool {
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// analyzeHeadHomeFolders are the folders macOS creates in a home and relies
+// on. Moving one whole breaks every app that keeps state there, so analyze
+// refuses the folder itself and keeps what is inside it deletable, the same
+// head-of-the-tree rule as Mole Mac's canTrashFromAnalyze.
+var analyzeHeadHomeFolders = []string{"Library", "Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music"}
+
+func isAnalyzeHeadHomeFolder(path, homeRoot string) bool {
+	for _, name := range analyzeHeadHomeFolders {
+		folder := filepath.Join(homeRoot, name)
+		// APFS is case-insensitive by default, so ~/documents names the same folder.
+		if strings.EqualFold(path, folder) || isSameExistingPath(path, folder) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLibraryHeadFolder reports a direct child of a Library folder (Caches,
+// Preferences, Application Support): analyze offers what is inside instead.
+func isLibraryHeadFolder(path, library string) bool {
+	parent := filepath.Dir(path)
+	if parent == path {
+		return false
+	}
+	return strings.EqualFold(parent, library) || isDirectChildOfExistingRoot(path, library)
+}
+
+// isICloudStructuralPath reports iCloud Drive's own folders: Mobile Documents,
+// each app container in it (com~apple~CloudDocs is iCloud Drive itself) and a
+// container's Documents folder. Trashing one of them removes that whole store
+// from every device signed in to the account. Files and folders inside them
+// stay the user's to remove, as Mole Mac's Analyze allows inside an app's
+// Documents.
+func isICloudStructuralPath(path, homeRoot string) bool {
+	mobileDocuments := filepath.Join(homeRoot, "Library", "Mobile Documents")
+	// A recursive move of an existing ancestor includes the same protected
+	// stores. Keep absent-state Library folders eligible, as with runtimes.
+	if containsProtectedRoot(path, mobileDocuments) {
+		return true
+	}
+	// These are directory boundaries, not reserved names for ordinary files.
+	// Unknown metadata keeps the conservative lexical/identity policy below.
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return false
+	}
+	rel, err := filepath.Rel(strings.ToLower(mobileDocuments), strings.ToLower(path))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return isICloudStructuralByIdentity(path, mobileDocuments)
+	}
+	if rel == "." {
+		return true
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	switch len(parts) {
+	case 1:
+		return true
+	case 2:
+		return parts[1] == "documents"
+	}
+	return false
+}
+
+// isICloudStructuralByIdentity applies the same depth rule when the path names
+// Mobile Documents another way (/System/Volumes/Data/Users/..., a symlinked
+// parent): it compares the path and its two parents with the real folder by
+// file identity.
+func isICloudStructuralByIdentity(path, mobileDocuments string) bool {
+	if _, err := os.Stat(mobileDocuments); err != nil {
+		return false
+	}
+	if isSameExistingPath(path, mobileDocuments) {
+		return true
+	}
+	parent := filepath.Dir(path)
+	if isSameExistingPath(parent, mobileDocuments) {
+		return true
+	}
+	return strings.EqualFold(filepath.Base(path), "Documents") &&
+		isSameExistingPath(filepath.Dir(parent), mobileDocuments)
+}
+
 func protectedAnalyzeHomeRoots() []string {
 	var homeRoots []string
 	seenHomeRoots := make(map[string]bool)
@@ -490,6 +701,19 @@ func protectedAnalyzeHomeRoots() []string {
 		addHomeRoot(currentUser.HomeDir)
 	}
 	return homeRoots
+}
+
+func containsProtectedRoot(path, protectedRoot string) bool {
+	// An absent runtime must not make an otherwise empty container directory
+	// undeletable. Unknown visibility still keeps its structural ancestors.
+	if _, err := os.Lstat(protectedRoot); os.IsNotExist(err) {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(protectedRoot); err == nil &&
+		isPathWithinExistingRoot(resolved, path) {
+		return true
+	}
+	return isPathWithinExistingRoot(protectedRoot, path)
 }
 
 func isPathWithinExistingRoot(path, protectedRoot string) bool {
@@ -547,6 +771,13 @@ func isEndpointSecurityCachePath(path string) bool {
 	lowerPath := strings.ToLower(path)
 	if !strings.HasPrefix(lowerPath, "/private/var/folders/") && !strings.HasPrefix(lowerPath, "/var/folders/") {
 		return false
+	}
+	// A whole Darwin user/cache container also moves any protected agent
+	// below it. Keep the structural ancestors; ordinary app cache leaves stay
+	// eligible without an unbounded recursive scan of the shared container.
+	rel := strings.TrimPrefix(strings.TrimPrefix(lowerPath, "/private"), "/var/folders/")
+	if len(strings.Split(rel, string(filepath.Separator))) <= 3 {
+		return true
 	}
 	for _, prefix := range endpointSecurityBundlePrefixes {
 		if strings.Contains(lowerPath, prefix) {

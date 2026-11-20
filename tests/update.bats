@@ -584,6 +584,40 @@ SCRIPT
 	fi
 }
 
+@test "nightly commit lookup keeps the SHA from a large GitHub response" {
+	run /bin/bash --noprofile --norc << 'INNER'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/manage/update.sh"
+expected_commit="e31d46faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+commit_response_file="$HOME/large-commit.json"
+# The commit endpoint includes up to 300 file objects, each with another SHA
+# and a potentially large patch. Small responses can hide an early pipe close.
+{
+	printf '{\n  "sha": "%s",\n  "files": [\n' "$expected_commit"
+	for ((i = 0; i < 300; i++)); do
+		if [[ "$i" -gt 0 ]]; then printf ',\n'; fi
+		printf '    {\n      "sha": "%040d",\n      "filename": "file-%s",\n      "patch": "%16384s"\n    }' "$i" "$i" ''
+	done
+	printf '\n  ]\n}\n'
+} > "$commit_response_file"
+curl() { cat "$commit_response_file"; }
+mole_git_runs_quietly() {
+	touch "$HOME/git-fallback"
+	return 1
+}
+
+background_commit=$(get_latest_commit_from_github api-only)
+printf 'background=<%s>\n' "$background_commit"
+[[ "$background_commit" == "$expected_commit" ]] || exit 1
+explicit_commit=$(get_latest_commit_from_github)
+printf 'explicit=<%s>\n' "$explicit_commit"
+[[ "$explicit_commit" == "$expected_commit" ]] || exit 1
+[[ ! -e "$HOME/git-fallback" ]] || exit 1
+INNER
+
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "background nightly checks skip the git fallback while explicit lookups retain it" {
 	local fake_bin="$TEST_ROOT/fake-bin"
 	local curl_url_log="$TEST_ROOT/curl.urls"
@@ -1014,6 +1048,31 @@ UPGRADE_OUTPUT="Warning: mole 9.9.9 already installed" update_via_homebrew "9.9.
 # Its own scratch files are not cleanup and must not be logged as such.
 [[ ! -s "$OPERATIONS_LOG_FILE" ]] || exit 1
 update_via_homebrew "1.0.0"
+cat "$OPERATIONS_LOG_FILE"
+EOF
+
+	[ "$status" -eq 0 ] || {
+		echo "$output"
+		return 1
+	}
+	[[ "$output" == *"[update] REBUILT Homebrew mole (updated to 9.9.9)"* ]]
+}
+
+@test "Homebrew update logs the change before an interruptible highlights fetch" {
+	run env HOME="$HOME/interrupted-highlights" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+mkdir -p "$HOME"
+source "$PROJECT_ROOT/lib/core/common.sh"
+run_with_timeout() {
+	shift
+	case "$*" in
+		"brew upgrade mole") printf '==> Upgrading mole\n' ;;
+		"brew list --versions mole") printf 'mole 9.9.9\n' ;;
+	esac
+}
+# Ctrl-C during the network fetch ends the run after brew already upgraded.
+mole_print_release_highlights() { exit 130; }
+(update_via_homebrew "1.0.0") || true
 cat "$OPERATIONS_LOG_FILE"
 EOF
 
@@ -2147,6 +2206,41 @@ SCRIPT
 	[ "$status" -eq 0 ]
 }
 
+@test "git fallbacks never run the system git stub without the Command Line Tools" {
+	local fake_bin="$TEST_ROOT/fake-bin-git-stub"
+	mkdir -p "$fake_bin"
+	cat > "$fake_bin/git" <<'SCRIPT'
+#!/bin/bash
+echo ran >> "$TEST_ROOT/git-ran"
+printf '%s\trefs/tags/V1.61.0\n' deadbeef
+SCRIPT
+	cat > "$fake_bin/xcode-select" <<'SCRIPT'
+#!/bin/bash
+exit "${XCODE_RC:-2}"
+SCRIPT
+	chmod +x "$fake_bin/git" "$fake_bin/xcode-select"
+
+	for xcode_rc in 2 0; do
+		rm -f "$TEST_ROOT/git-ran"
+		run env PATH="$fake_bin:$PATH" XCODE_RC="$xcode_rc" FAKE_BIN="$fake_bin" TEST_ROOT="$TEST_ROOT" /bin/bash <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/update.sh"
+MOLE_SYSTEM_GIT_STUB="$FAKE_BIN/git"
+MOLE_XCODE_SELECT_BIN="$FAKE_BIN/xcode-select"
+printf 'version=%s\n' "$(get_latest_version_from_git)"
+SCRIPT
+		[ "$status" -eq 0 ] || return 1
+		if [[ "$xcode_rc" == 2 ]]; then
+			[[ "$output" == "version=" ]] || return 1
+			[[ ! -e "$TEST_ROOT/git-ran" ]] || return 1
+		else
+			[[ "$output" == "version=1.61.0" ]] || return 1
+			[[ -e "$TEST_ROOT/git-ran" ]] || return 1
+		fi
+	done
+}
+
 @test "update check stays silent when the cache cannot be written or read" {
  [ "$(id -u)" -ne 0 ] || skip "root ignores directory and file modes"
  run /bin/bash <<'SCRIPT'
@@ -2417,4 +2511,76 @@ mole_update_message_cache_is_current() { return 0; }
 [[ "$(read_update_message_cache "$notice")" == 'Update 9.9.9 available, run mo update' ]] || exit 1
 SCRIPT
     [ "$status" -eq 0 ]
+}
+
+@test "system proxy lookup prefers HTTPS, then HTTP, then SOCKS, and rejects malformed hosts" {
+ run env -u https_proxy -u HTTPS_PROXY -u all_proxy -u ALL_PROXY /bin/bash <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/update.sh"
+MOLE_SCUTIL_BIN="$HOME/scutil"
+fixture() { printf '#!/bin/bash\ncat <<D\n<dictionary> {\n%s\n}\nD\n' "$1" > "$MOLE_SCUTIL_BIN"; chmod +x "$MOLE_SCUTIL_BIN"; }
+fixture $'  HTTPEnable : 1\n  HTTPPort : 8080\n  HTTPProxy : 10.0.0.2\n  HTTPSEnable : 1\n  HTTPSPort : 7890\n  HTTPSProxy : 127.0.0.1'
+[[ "$(mole_system_proxy_url)" == http://127.0.0.1:7890 ]] || exit 1
+fixture $'  HTTPEnable : 1\n  HTTPPort : 8080\n  HTTPProxy : proxy.local\n  HTTPSEnable : 0'
+[[ "$(mole_system_proxy_url)" == http://proxy.local:8080 ]] || exit 2
+fixture $'  SOCKSEnable : 1\n  SOCKSPort : 1080\n  SOCKSProxy : 127.0.0.1'
+[[ "$(mole_system_proxy_url)" == socks5h://127.0.0.1:1080 ]] || exit 3
+fixture $'  HTTPSEnable : 0\n  HTTPSPort : 7890\n  HTTPSProxy : 127.0.0.1'
+[[ -z "$(mole_system_proxy_url)" ]] || exit 4
+fixture $'  HTTPSEnable : 1\n  HTTPSPort : 7890\n  HTTPSProxy : bad;host'
+[[ -z "$(mole_system_proxy_url)" ]] || exit 5
+https_proxy=http://env.example:3128
+mole_use_system_proxy_if_unset
+[[ "$https_proxy" == http://env.example:3128 ]] || exit 6
+SCRIPT
+ [ "$status" -eq 0 ]
+}
+
+@test "background update lookup waits longer and follows the system proxy while foreground lookups do not" {
+ run env -u https_proxy -u HTTPS_PROXY -u all_proxy -u ALL_PROXY /bin/bash <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/manage/update.sh"
+VERSION=1.0.0
+MOLE_SCUTIL_BIN="$HOME/scutil"
+printf '#!/bin/bash\nprintf "  HTTPSEnable : 1\\n  HTTPSPort : 7890\\n  HTTPSProxy : 127.0.0.1\\n"\n' > "$MOLE_SCUTIL_BIN"
+chmod +x "$MOLE_SCUTIL_BIN"
+get_install_channel() { echo stable; }
+is_homebrew_install() { return 1; }
+curl() { printf '%s proxy=%s\n' "$*" "${https_proxy:-}" >> "$HOME/curl-calls"; printf '{"tag_name":"V9.8.7"}\n'; }
+check_for_updates
+for _ in $(seq 1 30); do [[ -s "$HOME/.cache/mole/update_message" ]] && break; sleep 0.1; done
+grep -q -- '--max-time 6 .*proxy=http://127.0.0.1:7890' "$HOME/curl-calls" || exit 1
+[[ "$(cat "$HOME/.cache/mole/update_message")" == *9.8.7* ]] || exit 2
+: > "$HOME/curl-calls"
+get_latest_version_from_github > /dev/null
+grep -q -- '--max-time 3 .*proxy=$' "$HOME/curl-calls" || exit 3
+SCRIPT
+ [ "$status" -eq 0 ]
+}
+
+@test "release highlights take the first changelog titles and stop at the next section" {
+ run /bin/bash <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+body=$'Intro\r\n### Changelog\r\n\r\n1. Clearer clean output: Rows say what they hold.\r\n2. `mo slim` is safer: detail\r\n3. Plain item without a colon\r\n4. Fourth: x\r\n5. Fifth: y\r\n\r\n### 更新日志\r\n1. 中文: 不应出现'
+got=$(mole_release_highlight_titles "$body" 4)
+want=$'Clearer clean output\n`mo slim` is safer\nPlain item without a colon\nFourth'
+[[ "$got" == "$want" ]] || { printf 'got: %s\n' "$got"; exit 1; }
+[[ -z "$(mole_release_highlight_titles 'no list here' 4)" ]] || exit 1
+SCRIPT
+ [ "$status" -eq 0 ]
+}
+
+@test "release highlights stay silent off a terminal and never fetch there" {
+ run /bin/bash <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+curl() { touch "$HOME/fetched"; printf '{"body":"### Changelog\\n1. A: b"}\n'; }
+out=$(mole_print_release_highlights 9.8.7)
+[[ -z "$out" ]] || { echo "printed: $out"; exit 1; }
+[[ ! -e "$HOME/fetched" ]] || exit 1
+SCRIPT
+ [ "$status" -eq 0 ]
 }

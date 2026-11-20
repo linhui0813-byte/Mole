@@ -14,8 +14,6 @@ source "$_MOLE_OPTIMIZE_TASKS_DIR/catalog.sh"
 source "$_MOLE_OPTIMIZE_TASKS_DIR/outcomes.sh"
 
 # Config constants (override via env).
-readonly MOLE_TM_THIN_TIMEOUT=180
-readonly MOLE_TM_THIN_VALUE=9999999999
 readonly MOLE_SQLITE_MAX_SIZE=104857600 # 100MB
 
 # Dry-run aware output.
@@ -55,7 +53,7 @@ opt_existing_path_size_kb() {
     local size_kb=0
     local size_rc=0
     size_kb=$(get_path_size_kb "$path" 2> /dev/null) || size_rc=$?
-    mole_rc_timeout_or_signal "$size_rc" && return "$size_rc"
+    mole_rc_signal "$size_rc" && return "$size_rc"
     [[ $size_rc -eq 0 ]] || size_kb=0
     opt_numeric_kb "$size_kb"
 }
@@ -157,8 +155,9 @@ has_active_vpn_interface() {
 }
 
 # Return 0 when the DNS cache was flushed (or would be in dry-run), 1 when the
-# flush failed or admin access is missing, 2 when an active VPN skipped it, and
-# 3 when the VPN state is unknown. SIGHUP makes mDNSResponder drop its cache,
+# flush failed or admin access is missing, 2 when an active VPN skipped it, 3
+# when the VPN state is unknown, and 4 when the directory cache was flushed but
+# macOS refused the mDNSResponder signal. SIGHUP makes mDNSResponder drop its cache,
 # and VPN clients that watch DNS configuration (WireGuard and similar) treat
 # that as a network change and reconnect. An unknown state also skips, like
 # opt_network_stack_optimize, because the probe could not rule a VPN out.
@@ -179,8 +178,29 @@ flush_dns_cache() {
         return 1
     fi
 
-    if sudo dscacheutil -flushcache 2> /dev/null && sudo killall -HUP mDNSResponder 2> /dev/null; then
-        return 0
+    # Newer macOS keeps the same system plist but names the service .reloaded.
+    # Read only that SIP-protected plist; never discover a target by process name or PID.
+    local service_label=""
+    service_label=$(/usr/bin/plutil -extract Label raw -o - \
+        /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist 2> /dev/null) || return 1
+    case "$service_label" in
+        com.apple.mDNSResponder | com.apple.mDNSResponder.reloaded) ;;
+        *) return 1 ;;
+    esac
+
+    sudo dscacheutil -flushcache 2> /dev/null || return 1
+    local signal_error="" signal_status=0
+    { signal_error=$(sudo /bin/launchctl kill SIGHUP "system/$service_label" 2>&1 >&3); } 3>&1 || signal_status=$?
+    [[ $signal_status -eq 0 ]] && return 0
+    # macOS 27 refuses this signal to every caller, root included (#1867).
+    # Root-level killall stays off the table: it could signal any process that
+    # shares the name. Run as the service account instead, where the kernel
+    # only lets it signal processes that account owns, and -u narrows the match
+    # to them too. If that is refused as well, the OS is withholding the action,
+    # which is a skip, not a failed refresh.
+    if [[ "$signal_error" == *"Not privileged to signal service"* ]]; then
+        sudo -u _mdnsresponder /usr/bin/killall -u _mdnsresponder -HUP mDNSResponder > /dev/null 2>&1 && return 0
+        return 4
     fi
     return 1
 }
@@ -233,7 +253,7 @@ opt_cache_refresh() {
         local size_kb=0
         local size_rc=0
         size_kb=$(opt_existing_path_size_kb "$target_path") || size_rc=$?
-        mole_rc_timeout_or_signal "$size_rc" && return "$size_rc"
+        mole_rc_signal "$size_rc" && return "$size_rc"
         [[ $size_rc -eq 0 ]] || size_kb=0
         removable_targets+=("$target_path")
         removable_sizes+=("$size_kb")
@@ -321,7 +341,8 @@ opt_saved_state_cleanup() {
             > "$scan_file" 2> /dev/null || scan_rc=$?
         if [[ $scan_rc -ne 0 ]]; then
             : > "$scan_file" || true
-            mole_rc_timeout_or_signal "$scan_rc" && return "$scan_rc"
+            # A scan timeout fails only this task; a signal still cancels.
+            mole_rc_signal "$scan_rc" && return "$scan_rc"
             echo -e "  ${YELLOW}${ICON_WARNING}${NC} Failed to scan old saved states"
             scan_failed=1
         fi
@@ -429,6 +450,10 @@ opt_network_optimization() {
         3)
             echo -e "  ${YELLOW}${ICON_WARNING}${NC} Failed to inspect active VPN state"
             optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_FAILED"
+            ;;
+        4)
+            opt_msg "DNS cache refresh skipped, macOS does not allow signaling mDNSResponder"
+            optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_SKIPPED"
             ;;
         *)
             echo -e "  ${YELLOW}${ICON_WARNING}${NC} Failed to refresh DNS cache"
@@ -929,7 +954,7 @@ opt_spotlight_index_optimize() {
                     optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_SKIPPED"
                     return 0
                 fi
-                echo -e "  ${BLUE}${ICON_INFO}${NC} Spotlight search is slow, rebuilding index, may take 1-2 hours"
+                echo -e "  ${BLUE}${ICON_ADMIN}${NC} Spotlight search is slow, rebuilding index, may take 1-2 hours"
                 if sudo mdutil -E / > /dev/null 2>&1; then
                     opt_msg "Spotlight index rebuild started"
                     echo -e "  ${GRAY}Indexing will continue in background${NC}"
@@ -954,11 +979,14 @@ opt_spotlight_index_optimize() {
 
 # Remove orphaned Spotlight search-rule entries.
 # Uninstalling an app (especially Mac App Store apps that synced via iCloud)
-# can leave its bundle id behind in com.apple.spotlight EnabledPreferenceRules,
+# can leave its bundle id behind in com.apple.Spotlight EnabledPreferenceRules,
 # showing up as a dead row in System Settings > Spotlight (#1000). macOS never
 # prunes these, so we drop entries whose app is no longer installed.
+# The domain is spelled in Spotlight's own case: cfprefsd keys domains by the
+# exact string, so while Spotlight holds com.apple.Spotlight a lowercase read
+# finds no rules and a lowercase write reaches the file but never Spotlight.
 opt_prune_spotlight_orphan_rules() {
-    local domain="com.apple.spotlight"
+    local domain="com.apple.Spotlight"
     local plist="$HOME/Library/Preferences/${domain}.plist"
 
     if ! defaults read "$domain" EnabledPreferenceRules &> /dev/null; then
@@ -1003,7 +1031,13 @@ opt_prune_spotlight_orphan_rules() {
                 # Only act on well-formed bundle ids; bundle_has_installed_app
                 # double-checks with mdfind and a filesystem scan, so a return of
                 # 1 means the app is genuinely gone. Anything else is kept.
-                if ! mole_is_reverse_dns_bundle_id "$entry"; then
+                # Spotlight stores its own switches here too, such as
+                # Custom.relatedContents (Show Related Content), which pass the
+                # reverse-DNS shape but name no app; removing one flips the
+                # switch back on (#1878). Only a lowercase first label, the
+                # shape Mole Mac's spotlightRuleNamesAnApp accepts, can be an app.
+                if ! mole_is_reverse_dns_bundle_id "$entry" ||
+                    [[ ! "${entry%%.*}" =~ ^[a-z0-9]+$ ]]; then
                     keep+=("$entry")
                 else
                     local resolver_rc=0
@@ -1209,6 +1243,7 @@ opt_launch_agents_cleanup() {
     fi
 
     local broken_count=0
+    local timed_out_count=0
 
     for plist in "$agents_dir"/*.plist; do
         [[ -f "$plist" ]] || continue
@@ -1218,13 +1253,21 @@ opt_launch_agents_cleanup() {
         binary=$(run_with_timeout "$MOLE_TIMEOUT_QUICK_DETECT_SEC" \
             /usr/libexec/PlistBuddy -c "Print :Program" \
             "$plist" 2> /dev/null) || plist_rc=$?
-        mole_rc_timeout_or_signal "$plist_rc" && return "$plist_rc"
+        mole_rc_signal "$plist_rc" && return "$plist_rc"
+        if mole_rc_timeout "$plist_rc"; then
+            timed_out_count=$((timed_out_count + 1))
+            continue
+        fi
         if [[ -z "$binary" ]]; then
             plist_rc=0
             binary=$(run_with_timeout "$MOLE_TIMEOUT_QUICK_DETECT_SEC" \
                 /usr/libexec/PlistBuddy -c "Print :ProgramArguments:0" \
                 "$plist" 2> /dev/null) || plist_rc=$?
-            mole_rc_timeout_or_signal "$plist_rc" && return "$plist_rc"
+            mole_rc_signal "$plist_rc" && return "$plist_rc"
+            if mole_rc_timeout "$plist_rc"; then
+                timed_out_count=$((timed_out_count + 1))
+                continue
+            fi
         fi
 
         # Only an absolute path that is genuinely missing counts as broken.
@@ -1238,7 +1281,7 @@ opt_launch_agents_cleanup() {
             label=$(run_with_timeout "$MOLE_TIMEOUT_QUICK_DETECT_SEC" \
                 /usr/libexec/PlistBuddy -c "Print :Label" \
                 "$plist" 2> /dev/null) || plist_rc=$?
-            mole_rc_timeout_or_signal "$plist_rc" && return "$plist_rc"
+            mole_rc_signal "$plist_rc" && return "$plist_rc"
             [[ -n "$label" ]] || label="$(basename "$plist" .plist)"
             # Label and Program come from a third-party plist, so escape
             # sequences in them must not reach the terminal.
@@ -1248,13 +1291,21 @@ opt_launch_agents_cleanup() {
         fi
     done
 
-    if [[ $broken_count -eq 0 ]]; then
+    # A plist that could not be read in time is unknown: it is never called
+    # healthy, and the task counts as failed in the summary line.
+    if [[ $broken_count -eq 0 && $timed_out_count -eq 0 ]]; then
         opt_msg "Launch Agents all healthy"
         optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_UNCHANGED"
         return 0
     fi
 
-    echo -e "  ${YELLOW}${ICON_WARNING}${NC} $broken_count Launch Agent(s) point at a missing program · left in ~/Library/LaunchAgents"
+    if [[ $broken_count -gt 0 ]]; then
+        echo -e "  ${YELLOW}${ICON_WARNING}${NC} $broken_count Launch Agent(s) point at a missing program · left in ~/Library/LaunchAgents"
+    fi
+    if [[ $timed_out_count -gt 0 ]]; then
+        optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_FAILED"
+        return 0
+    fi
     optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_ATTENTION"
 }
 
@@ -1338,27 +1389,33 @@ opt_shared_file_list_repair() {
         > "$scan_file" 2> "${scan_err_file:-/dev/null}" || scan_rc=$?
     if [[ $scan_rc -ne 0 ]]; then
         : > "$scan_file" || true
-        mole_rc_timeout_or_signal "$scan_rc" && return "$scan_rc"
-        # Permission-only errors make the scan unavailable. Mixed errors or
-        # an unreadable diagnostic keep the ordinary failed outcome.
-        local permission_only=false
-        if [[ -n "$scan_err_file" && -s "$scan_err_file" ]]; then
-            local permission_pattern='(Permission denied|Operation not permitted)( \(os error [0-9]+\))?\.?$'
-            local permission_scan_rc=0
-            grep -Ev -e "$permission_pattern" -e '^$' "$scan_err_file" \
-                > /dev/null || permission_scan_rc=$?
-            if [[ $permission_scan_rc -eq 1 ]] &&
-                grep -Eq "$permission_pattern" "$scan_err_file"; then
-                permission_only=true
+        # A scan timeout fails only this task; a signal still cancels.
+        mole_rc_signal "$scan_rc" && return "$scan_rc"
+        if mole_rc_timeout "$scan_rc"; then
+            echo -e "  ${YELLOW}${ICON_WARNING}${NC} Failed to scan shared file lists"
+            scan_failed=1
+        else
+            # Permission-only errors make the scan unavailable. Mixed errors or
+            # an unreadable diagnostic keep the ordinary failed outcome.
+            local permission_only=false
+            if [[ -n "$scan_err_file" && -s "$scan_err_file" ]]; then
+                local permission_pattern='(Permission denied|Operation not permitted)( \(os error [0-9]+\))?\.?$'
+                local permission_scan_rc=0
+                grep -Ev -e "$permission_pattern" -e '^$' "$scan_err_file" \
+                    > /dev/null || permission_scan_rc=$?
+                if [[ $permission_scan_rc -eq 1 ]] &&
+                    grep -Eq "$permission_pattern" "$scan_err_file"; then
+                    permission_only=true
+                fi
             fi
+            if [[ "$permission_only" == "true" ]]; then
+                echo -e "  ${GRAY}-${NC} Shared file lists not readable (check directory permissions and Full Disk Access)"
+                optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_UNAVAILABLE"
+                return 0
+            fi
+            echo -e "  ${YELLOW}${ICON_WARNING}${NC} Failed to scan shared file lists"
+            scan_failed=1
         fi
-        if [[ "$permission_only" == "true" ]]; then
-            echo -e "  ${GRAY}-${NC} Shared file lists not readable (check directory permissions and Full Disk Access)"
-            optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_UNAVAILABLE"
-            return 0
-        fi
-        echo -e "  ${YELLOW}${ICON_WARNING}${NC} Failed to scan shared file lists"
-        scan_failed=1
     fi
     while IFS= read -r -d '' sfl_file; do
         [[ -f "$sfl_file" ]] || continue
@@ -1446,7 +1503,9 @@ opt_notification_cleanup() {
                 "DELETE FROM record WHERE delivered_date < strftime('%s','now','-30 days'); VACUUM;" \
                 2> /dev/null || sql_ok=$?
             if [[ $sql_ok -eq 0 ]]; then
-                killall NotificationCenter 2> /dev/null || true
+                # Let launchd signal its own service instance, never every process with this name.
+                run_with_timeout "$MOLE_TIMEOUT_MEDIUM_PROBE_SEC" /bin/launchctl kill SIGTERM \
+                    "gui/$UID/com.apple.notificationcenterui.agent" > /dev/null 2>&1 || true
                 opt_msg "Notification Center database cleaned (was $(bytes_to_human $((db_size * 1024))))"
                 optimize_task_result "$MOLE_OPTIMIZE_OUTCOME_APPLIED"
             else

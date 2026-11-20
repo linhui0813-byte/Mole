@@ -34,7 +34,11 @@ import (
 // v8: APFS clones that share every block count once, so v7 totals can be inflated.
 // v9: mixed clone/hardlink groups deduplicate together; bounded lists use path ties.
 // v10: shortened directory listings must refresh before they are browsed.
-const cacheSchemaVersion = 10
+// v11: the overview leaves CloudStorage out of the User Library total.
+// v12: traversal stops at mount points, so v11 totals can include mounted volumes.
+// v13: the Home and old-Downloads overview totals stop at mount points too.
+// v14: Home totals deduplicate hardlinks across immediate children.
+const cacheSchemaVersion = 14
 
 type overviewSizeSnapshot struct {
 	Size          int64     `json:"size"`
@@ -69,7 +73,7 @@ func snapshotFromModel(m model) historyEntry {
 func filterNonEmptyEntries(entries []dirEntry) []dirEntry {
 	filtered := make([]dirEntry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Size > 0 || entry.State != scanComplete {
+		if !entry.hiddenWhenEmpty() {
 			filtered = append(filtered, entry)
 		}
 	}
@@ -129,13 +133,22 @@ func ensureOverviewSnapshotCacheLocked() error {
 	// and each save re-serialized all of them.
 	now := time.Now()
 	for path, snapshot := range snapshots {
-		if snapshot.SchemaVersion != cacheSchemaVersion || snapshot.Size <= 0 || now.Sub(snapshot.Updated) >= overviewCacheTTL {
+		if snapshot.SchemaVersion != cacheSchemaVersion || snapshot.Size <= 0 || !stampWithin(now, snapshot.Updated, overviewCacheTTL) {
 			delete(snapshots, path)
 		}
 	}
 	overviewSnapshotCache = snapshots
 	overviewSnapshotLoaded = true
 	return nil
+}
+
+// stampWithin reports whether a stored wall-clock stamp is inside its freshness
+// window. A stamp from the future (the system clock was set back) has a
+// negative age and reads as expired, so a stale answer is not kept until the
+// clock catches up.
+func stampWithin(now, stamp time.Time, window time.Duration) bool {
+	age := now.Sub(stamp)
+	return age >= 0 && age < window
 }
 
 func getOverviewSizeStorePath() (string, error) {
@@ -164,7 +177,7 @@ func loadStoredOverviewMeasurement(path string) (int64, scanState, error) {
 		return 0, scanComplete, fmt.Errorf("snapshot cache unavailable")
 	}
 	if snapshot, ok := overviewSnapshotCache[path]; ok && snapshot.Size > 0 {
-		if time.Since(snapshot.Updated) < overviewCacheTTL {
+		if stampWithin(time.Now(), snapshot.Updated, overviewCacheTTL) {
 			if snapshot.Partial {
 				return snapshot.Size, scanPartial, nil
 			}
@@ -198,7 +211,7 @@ func storeOverviewMeasurement(path string, size int64, partial bool) error {
 	// while the recorded value still stands; the timestamp is only refreshed
 	// often enough to keep a live entry from aging out.
 	if existing, ok := overviewSnapshotCache[path]; ok && existing.Size == size && existing.Partial == partial &&
-		time.Since(existing.Updated) < overviewCacheTTL/overviewRefreshDivisor {
+		stampWithin(time.Now(), existing.Updated, overviewCacheTTL/overviewRefreshDivisor) {
 		return nil
 	}
 	overviewSnapshotCache[path] = overviewSizeSnapshot{
@@ -626,7 +639,7 @@ func loadCacheFromDisk(path string) (*cacheEntry, error) {
 	}
 
 	scanAge := time.Since(entry.ScanTime)
-	if scanAge > analyzerCacheTTL {
+	if scanAge < 0 || scanAge > analyzerCacheTTL {
 		removeCacheEntry(path)
 		return nil, fmt.Errorf("cache expired: too old")
 	}
@@ -662,16 +675,11 @@ func loadStaleCacheFromDisk(path string) (*cacheEntry, error) {
 
 	// Only the authoritative TTL deletes: staleCacheTTL is the shorter
 	// first-paint window, and an entry past it is still valid for a full scan.
-	if time.Since(entry.ScanTime) > staleCacheTTL {
+	if age := time.Since(entry.ScanTime); age < 0 || age > staleCacheTTL {
 		return nil, fmt.Errorf("stale cache expired")
 	}
 
 	return entry, nil
-}
-
-func saveCacheToDisk(path string, result scanResult) error {
-	ctx := context.Background()
-	return saveCacheToDiskWithOptions(newScanPublication(ctx, nil), path, result, false)
 }
 
 func saveCacheToDiskWithOptions(publication *scanPublication, path string, result scanResult, needsRefresh bool) error {

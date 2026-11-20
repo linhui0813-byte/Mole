@@ -43,7 +43,7 @@ tests/tmp-*
 !flake.lock
 
 # Local AI Assistant Instructions
-# CLAUDE.md is a symlink to AGENTS.md (shared source of truth, tracked).
+# AGENTS.md is the shared, tracked guide; Claude Code reads it directly.
 # Personal overrides go in *.local.md, which stay gitignored.
 CLAUDE.local.md
 AGENTS.local.md
@@ -75,6 +75,9 @@ bin/analyze-go
 bin/status-go
 bin/analyze-darwin-*
 bin/status-darwin-*
+
+# Local research clones and scratch output (oss-linux study clones, sync reviews)
+/.artifacts/
 
 # Test artifacts
 tests/tmp-*/

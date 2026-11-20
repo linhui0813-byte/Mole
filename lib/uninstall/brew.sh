@@ -51,6 +51,20 @@ _mole_brew_probe() {
         /bin/bash --noprofile --norc -c 'brew "$@"' mole-brew-probe "$@"
 }
 
+# First line Homebrew printed when `brew list --cask` itself failed, so an
+# aborted scan names the real cause (an unaccepted Xcode license fails every
+# brew command) instead of blaming one cask. Prints nothing when brew lists
+# cleanly, timed out, or is not installed.
+_mole_brew_failure_line() {
+    is_homebrew_available || return 1
+    local err="" rc=0
+    err=$(_mole_brew_probe "$MOLE_TIMEOUT_PKG_LIST_SEC" list --cask 2>&1 > /dev/null) || rc=$?
+    [[ $rc -ne 0 ]] && ! mole_rc_timeout_or_signal "$rc" || return 1
+    err=$(printf '%s\n' "$err" | sed -e 's/^Error: //' -e '/^[[:space:]]*$/d' | head -n 1)
+    [[ -n "$err" ]] || return 1
+    printf '%s\n' "$err"
+}
+
 _mole_brew_caskroom_roots() {
     local room
     for room in /opt/homebrew/Caskroom /usr/local/Caskroom; do
@@ -540,6 +554,13 @@ brew_uninstall_cask() {
             timeout=600 # 10 minutes for large apps
         fi
         debug_log "App size: ${size_gb}GB, timeout: ${timeout}s"
+    fi
+
+    # Nested sudo needs the foreground tty. Use the existing tty-aware Perl
+    # supervisor here, keeping process-group cleanup and other callers unchanged.
+    local MO_TIMEOUT_BIN="${MO_TIMEOUT_BIN:-}"
+    if [[ -t 0 && -x "${MO_TIMEOUT_PERL_BIN:-}" ]]; then
+        MO_TIMEOUT_BIN=""
     fi
 
     # Run with timeout to prevent hangs from problematic cask scripts.

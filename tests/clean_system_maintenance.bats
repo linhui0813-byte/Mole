@@ -373,7 +373,7 @@ sudo() {
     return 0
 }
 safe_sudo_find_delete() {
-    echo "safe_sudo_find_delete:$1:$2" >> "$CALL_LOG"
+    echo "safe_sudo_find_delete:$1:$2:$3" >> "$CALL_LOG"
     if [[ "$1" == "$IDLE_DIR" ]]; then
         MOLE_SAFE_SUDO_FIND_DELETE_COUNT=1
     else
@@ -397,7 +397,9 @@ EOF
     [ "$status" -eq 0 ]
     # Scoped to the idleassetsd temp dir and the aborted-download name only:
     # never a bare CFNetworkDownload_*.tmp sweep across all of /private/var/folders.
-    [[ "$output" == *"safe_sudo_find_delete:/private/var/folders/zz/abcdef/T/com.apple.idleassetsd:CFNetworkDownload_*.tmp"* ]] || return 1
+    # An hour idle, not the day-based temp window: the folder empties at every
+    # restart, so its files never live a week (#1994).
+    [[ "$output" == *"safe_sudo_find_delete:/private/var/folders/zz/abcdef/T/com.apple.idleassetsd:CFNetworkDownload_*.tmp:60m"* ]] || return 1
     [[ "$output" == *"SUCCESS:Stale wallpaper downloads"* ]] || return 1
 }
 
@@ -601,6 +603,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/system.sh"
+_mole_mount_table() { echo "/dev/disk3s1s1 on / (apfs, local, journaled)"; }
 
 defaults() { echo "1"; }
 
@@ -619,8 +622,8 @@ clean_local_snapshots
 EOF
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Time Machine local snapshots ·"* ]] || return 1
-    [[ "$output" == *"tmutil listlocalsnapshots /"* ]]
+    [[ "$output" == *"Time Machine local snapshots · "*"2"*"macOS removes them when space runs low"* ]] || return 1
+    [[ "$output" != *"tmutil"* ]]
 }
 
 @test "clean_local_snapshots is quiet when no snapshots" {
@@ -628,6 +631,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/system.sh"
+_mole_mount_table() { echo "/dev/disk3s1s1 on / (apfs, local, journaled)"; }
 
 defaults() { echo "1"; }
 
@@ -643,6 +647,263 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ "$output" != *"Time Machine local snapshots"* ]]
+}
+
+@test "clean_local_snapshots reports backup app snapshots without Time Machine (#1916)" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/system.sh"
+_mole_mount_table() { echo "/dev/disk3s1s1 on / (apfs, local, journaled)"; }
+
+defaults() { return 1; }
+run_with_timeout() {
+    printf '%s\n' \
+        "Snapshots for disk /:" \
+        "com.synology.activebackup.F0yvGv9C" \
+        "com.bombich.ccc.6F2A7C1E-1D3B-4C55-9A0B-2E8F1C7D4B10" \
+        "com.bombich.ccc.0B9D2E44-7A61-4F0C-8E3B-5C1A9F6D2E77.2026-11-04-020000" \
+        "com.apple.os.update-MSUPrepareUpdate" \
+        "com.apple.TimeMachine.2023-10-25-120000.local"
+}
+start_section_spinner(){ :; }
+stop_section_spinner(){ :; }
+note_activity(){ echo "ACTIVITY"; }
+tm_is_running(){ echo "UNEXPECTED_TM_PROBE"; return 1; }
+
+clean_local_snapshots
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"APFS snapshots · "*"3"*"from com.synology.activebackup and com.bombich.ccc, deleted files keep using space until removed"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"ACTIVITY"* ]] || { echo "$output"; return 1; }
+    # No Time Machine configured: no Time Machine probe and no Time Machine row.
+    [[ "$output" != *"UNEXPECTED_TM_PROBE"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"Time Machine local snapshots"* ]] || { echo "$output"; return 1; }
+}
+
+@test "clean_local_snapshots still reports backup app snapshots during a Time Machine backup (#1916)" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/system.sh"
+_mole_mount_table() { echo "/dev/disk3s1s1 on / (apfs, local, journaled)"; }
+
+defaults() { echo "1"; }
+run_with_timeout() {
+    printf '%s\n' \
+        "com.apple.TimeMachine.2023-10-25-120000.local" \
+        "com.synology.activebackup.F0yvGv9C"
+}
+start_section_spinner(){ :; }
+stop_section_spinner(){ :; }
+note_activity(){ :; }
+tm_is_running(){ return 0; }
+
+clean_local_snapshots
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Time Machine snapshots · skipped (backup in progress)"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"APFS snapshots · "*"1"*"from com.synology.activebackup"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"Time Machine local snapshots"* ]] || { echo "$output"; return 1; }
+}
+
+@test "clean_local_snapshots prints both rows when Time Machine is configured and idle (#1916)" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/system.sh"
+_mole_mount_table() { echo "/dev/disk3s1s1 on / (apfs, local, journaled)"; }
+
+defaults() { echo "1"; }
+run_with_timeout() {
+    printf '%s\n' \
+        "com.apple.TimeMachine.2023-10-25-120000.local" \
+        "com.apple.TimeMachine.2023-10-24-120000.local" \
+        "com.synology.activebackup.F0yvGv9C"
+}
+start_section_spinner(){ echo "START:$1"; }
+stop_section_spinner(){ echo "STOP"; }
+note_activity(){ :; }
+tm_is_running(){ return 1; }
+
+clean_local_snapshots
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Time Machine local snapshots · "*"2"*"macOS removes them when space runs low"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"APFS snapshots · "*"1"*"from com.synology.activebackup"* ]] || { echo "$output"; return 1; }
+    # An idle Time Machine changes the spinner text in place, no stop between.
+    [[ "$output" == *"START:Checking Time Machine status..."$'\n'"START:Checking local snapshots..."* ]] || { echo "$output"; return 1; }
+}
+
+@test "clean_local_snapshots lists backup app snapshots when Time Machine status is unknown (#1916)" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/system.sh"
+_mole_mount_table() { echo "/dev/disk3s1s1 on / (apfs, local, journaled)"; }
+
+defaults() { echo "1"; }
+run_with_timeout() {
+    printf '%s\n' \
+        "com.apple.TimeMachine.2023-10-25-120000.local" \
+        "com.synology.activebackup.F0yvGv9C"
+}
+start_section_spinner(){ :; }
+stop_section_spinner(){ :; }
+note_activity(){ :; }
+tm_is_running(){ return 2; }
+
+clean_local_snapshots
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Time Machine snapshots · skipped (status unknown)"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"APFS snapshots · "*"1"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"Time Machine local snapshots"* ]] || { echo "$output"; return 1; }
+}
+
+@test "clean_local_snapshots stops before listing when the Time Machine probe is interrupted (#1916)" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/system.sh"
+_mole_mount_table() { echo "/dev/disk3s1s1 on / (apfs, local, journaled)"; }
+
+defaults() { echo "1"; }
+run_with_timeout() { echo "UNEXPECTED_LISTING"; }
+start_section_spinner(){ :; }
+stop_section_spinner(){ :; }
+note_activity(){ :; }
+tm_is_running(){ return 130; }
+
+rc=0
+clean_local_snapshots || rc=$?
+echo "RC=$rc"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"RC=130"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"UNEXPECTED_LISTING"* ]] || { echo "$output"; return 1; }
+}
+
+@test "mole_network_volume_mounted reads the local flag of every mount table entry" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/snapshots.sh"
+debug_log() { echo "DEBUG: $*"; }
+
+LOCAL_TABLE='/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
+devfs on /dev (devfs, local, nobrowse)
+map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)
+/dev/disk5s1 on /Volumes/Disk (with) parens (apfs, local, nodev, nosuid, journaled)
+devices -- file:///Users/me/Library/Containers/x/Data/ on /Users/me/DeviceFS (devicefs, local, nodev, nosuid, noowners, fskit, mounted by me)'
+verdict() {
+    local rc=0
+    mole_network_volume_mounted || rc=$?
+    echo "$1=$rc"
+}
+TABLE="$LOCAL_TABLE"
+TABLE_RC=0
+_mole_mount_table() { printf '%s\n' "$TABLE"; return "$TABLE_RC"; }
+verdict local
+TABLE="$LOCAL_TABLE"$'\n''//me@192.168.1.2/share on /Volumes/share (smbfs, nodev, nosuid, mounted by me)'
+verdict smb
+TABLE="$LOCAL_TABLE"$'\n''nas:/export on /Volumes/export (nfs, asynchronous)'
+verdict nfs
+TABLE="$LOCAL_TABLE"$'\n''//me@nas/share on /Volumes/share (apfs, local, copy) (smbfs, nodev, nosuid, mounted by me)'
+verdict smbparen
+TABLE="something this parser does not know"
+verdict unknown
+TABLE=""
+verdict empty
+TABLE="$LOCAL_TABLE"
+TABLE_RC=124
+verdict timeout
+TABLE_RC=130
+verdict signal
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local expected
+    for expected in local=1 smb=0 nfs=0 smbparen=0 unknown=0 empty=0 timeout=0 signal=130; do
+        [[ "$output" == *"$expected"* ]] || { echo "missing $expected"; echo "$output"; return 1; }
+    done
+    [[ "$output" == *"DEBUG: Snapshot rows skipped: unparsed mount table line: something this parser does not know"* ]] ||
+        { echo "the unparsed line was not logged"; echo "$output"; return 1; }
+}
+
+@test "clean_local_snapshots runs no tmutil while a network share is mounted" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/system.sh"
+_mole_mount_table() {
+    printf '%s\n' '/dev/disk3s1s1 on / (apfs, local, journaled)' \
+        '//me@nas/share on /Volumes/share (smbfs, nodev, nosuid, mounted by me)'
+}
+
+defaults() { echo "1"; }
+run_with_timeout() { echo "UNEXPECTED_TMUTIL:$*"; }
+tmutil() { echo "UNEXPECTED_TMUTIL:$*"; }
+start_section_spinner(){ echo "SPINNER:$1"; }
+stop_section_spinner(){ :; }
+note_activity(){ :; }
+tm_is_running(){ echo "UNEXPECTED_TM_PROBE"; return 1; }
+
+clean_local_snapshots
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -z "$output" ] || { echo "$output"; return 1; }
+}
+
+@test "large files lists snapshots with only local volumes and runs no tmutil beside a network share" {
+    local review_home="$HOME/large-review-network-share"
+    mkdir -p "$review_home"
+
+    local mounts
+    for mounts in local share; do
+        rm -f "$review_home/tmutil.calls"
+        run env HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" MOUNTS="$mounts" \
+            /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+docker() { return 1; }
+defaults() { return 1; }
+_mole_mount_table() {
+    echo '/dev/disk3s1s1 on / (apfs, local, journaled)'
+    if [[ "$MOUNTS" == share ]]; then
+        echo '//me@nas/share on /Volumes/share (smbfs, nodev, nosuid, mounted by me)'
+    fi
+}
+tmutil() {
+    echo "$*" >> "$HOME/tmutil.calls"
+    printf '%s\n' "Snapshots for disk /:" "com.synology.activebackup.F0yvGv9C"
+}
+run_with_timeout() {
+    shift
+    "$@"
+}
+check_large_file_candidates
+EOF
+        [ "$status" -eq 0 ] || { echo "$mounts: $output"; return 1; }
+        if [[ "$mounts" == local ]]; then
+            grep -qFx "listlocalsnapshots /" "$review_home/tmutil.calls" || { echo "$output"; return 1; }
+            [[ "$output" == *"APFS snapshots · "*"from com.synology.activebackup"* ]] || { echo "$output"; return 1; }
+        else
+            [[ ! -e "$review_home/tmutil.calls" ]] || { cat "$review_home/tmutil.calls"; return 1; }
+            [[ "$output" != *"snapshot"* ]] || { echo "$output"; return 1; }
+            [ -z "$output" ] || { echo "$output"; return 1; }
+        fi
+    done
 }
 
 @test "clean_homebrew skips when cleaned recently" {
@@ -661,6 +922,27 @@ EOF
 
     [ "$status" -eq 0 ]
     [[ -z "$output" ]]
+}
+
+@test "brew_cleanup_ran_recently treats a stamp from the future as expired" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/brew.sh"
+
+stamp="$HOME/brew-stamp"
+date +%s > "$stamp"
+brew_cleanup_ran_recently "$stamp" || { echo "recent stamp ignored"; exit 1; }
+echo $(( $(date +%s) + 2 * 86400 )) > "$stamp"
+if brew_cleanup_ran_recently "$stamp"; then
+    echo "future stamp counted as recent"
+    exit 1
+fi
+echo "brew-clock ok"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"brew-clock ok"* ]]
 }
 
 @test "clean_homebrew runs cleanup with timeout stubs" {
@@ -748,6 +1030,104 @@ EOF
 
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [[ "$output" == *"Homebrew cleanup"* ]] || { echo "$output"; return 1; }
+}
+
+@test "clean_homebrew shows and counts the size Homebrew reports freeing (#2047)" {
+    # Homebrew ends a cleanup with "has freed approximately <size> of disk
+    # space"; the real-run parser looked for "<size> freed" and never matched.
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/brew.sh"
+
+mkdir -p "$HOME/.cache/mole"
+rm -f "$HOME/.cache/mole/brew_last_cleanup"
+
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+note_activity() { :; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+brew() {
+    case "$1" in
+        cleanup)
+            echo "Removing: /opt/homebrew/Cellar/node/24.1.0... (2,011 files, 88.5MB)"
+            echo "==> This operation has freed approximately 88.5MB of disk space."
+            return 0
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+clean_homebrew
+printf 'TOTALS=%s:%s:%s\n' "$files_cleaned" "$total_size_cleaned" "$total_items"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Homebrew cleanup"*"88.5MB"* ]] || { echo "$output"; return 1; }
+    [[ "$output" != *"Homebrew cleanup · 1 item"* ]] || { echo "$output"; return 1; }
+    # 88.5MB in Homebrew's decimal units is 88,500,000 bytes, 86,426 KB.
+    [[ "$output" == *"TOTALS=1:86426:1"* ]] || { echo "$output"; return 1; }
+}
+
+@test "clean_homebrew reads Homebrew's summary when HOMEBREW_COLOR is set (#2047)" {
+    # HOMEBREW_COLOR colors output even when it is redirected to a file,
+    # unless HOMEBREW_NO_COLOR is set too, as the preview already does.
+    run env HOMEBREW_COLOR=1 /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/brew.sh"
+
+mkdir -p "$HOME/.cache/mole"
+rm -f "$HOME/.cache/mole/brew_last_cleanup"
+
+start_inline_spinner() { :; }
+stop_inline_spinner() { :; }
+note_activity() { :; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+brew() {
+    local arrow="==>"
+    if [[ -n "${HOMEBREW_COLOR:-}" && -z "${HOMEBREW_NO_COLOR:-}" ]]; then
+        arrow=$'\033[34m==>\033[0m'
+    fi
+    case "$1" in
+        cleanup)
+            echo "Removing: /opt/homebrew/Cellar/node/24.1.0... (2,011 files, 88.5MB)"
+            echo "$arrow This operation has freed approximately 88.5MB of disk space."
+            return 0
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+clean_homebrew
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Homebrew cleanup"*"88.5MB"* ]] || { echo "$output"; return 1; }
+}
+
+@test "brew_cleanup_size_kb converts Homebrew's decimal sizes and rejects other text (#2047)" {
+    run /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/brew.sh"
+for size in 512B 2.5KB 88.5MB 1.2GB 1.25GB 1.5TB "88.5 MB" ""; do
+    printf '[%s]=[%s]\n' "$size" "$(brew_cleanup_size_kb "$size")"
+done
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local expected=$'[512B]=[1]\n[2.5KB]=[3]\n[88.5MB]=[86426]\n[1.2GB]=[1171875]\n[1.25GB]=[]\n[1.5TB]=[]\n[88.5 MB]=[]\n[]=[]'
+    [ "$output" = "$expected" ] || { echo "$output"; return 1; }
 }
 
 @test "clean_homebrew leaves no timestamp when cleanup times out" {
@@ -2299,6 +2679,55 @@ EOF
     [[ "$output" != *"ACCEPTED"* ]]
 }
 
+@test "macos_installer_is_apple_signed takes only Apple-signed InstallAssistant bundles" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/system.sh"
+
+installer="$HOME/Install macOS Test.app"
+mkdir -p "$installer/Contents"
+touch "$installer/Contents/Info.plist"
+deadline=$((SECONDS + 10))
+BUNDLE_ID=com.apple.InstallAssistant.Seed
+CODESIGN_RC=0
+run_with_timeout() {
+    local _duration="$1"
+    shift
+    case "${1:-}" in
+        /usr/bin/plutil) printf '%s\n' "$BUNDLE_ID" ;;
+        /usr/bin/codesign)
+            [[ "$*" == *"anchor apple"* ]] || return 99
+            echo "$*" >> "$HOME/codesign.calls"
+            return "$CODESIGN_RC"
+            ;;
+        *) "$@" ;;
+    esac
+}
+
+macos_installer_is_apple_signed "$installer" "$deadline" || { echo 'SIGNED_REJECTED'; exit 1; }
+CODESIGN_RC=3
+if macos_installer_is_apple_signed "$installer" "$deadline"; then echo 'UNSIGNED_ACCEPTED'; exit 1; fi
+CODESIGN_RC=0
+for BUNDLE_ID in com.example.InstallAssistant com.apple.InstallAssistantX com.apple.InstallAssistant. ''; do
+    rm -f "$HOME/codesign.calls"
+    if macos_installer_is_apple_signed "$installer" "$deadline"; then echo "ID_ACCEPTED:$BUNDLE_ID"; exit 1; fi
+    [[ ! -e "$HOME/codesign.calls" ]] || { echo "CODESIGN_RAN:$BUNDLE_ID"; exit 1; }
+done
+BUNDLE_ID=com.apple.InstallAssistant
+CODESIGN_RC=124
+rc=0
+macos_installer_is_apple_signed "$installer" "$deadline" || rc=$?
+[[ $rc -eq 124 ]] || { echo "TIMEOUT_RC:$rc"; exit 1; }
+rm -f "$installer/Contents/Info.plist"
+if macos_installer_is_apple_signed "$installer" "$deadline"; then echo 'NO_PLIST_ACCEPTED'; exit 1; fi
+echo 'APPLE_INSTALLER_ONLY'
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"APPLE_INSTALLER_ONLY"* ]]
+}
+
 @test "macos_installer_candidate_still_eligible rejects invalid age replacement active and pending races" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
@@ -2314,6 +2743,7 @@ expected_mtime="${expected##*:}"
 get_epoch_seconds() { echo "$((expected_mtime + 15 * 86400))"; }
 software_update_pending_or_unknown() { return 1; }
 macos_installer_process_is_idle() { return 0; }
+macos_installer_is_apple_signed() { return 0; }
 run_with_timeout() {
     local _duration="$1"
     shift
@@ -2325,6 +2755,12 @@ run_with_timeout() {
 }
 
 macos_installer_candidate_still_eligible "$installer" "$expected" 14 "$deadline"
+macos_installer_is_apple_signed() { return 1; }
+if macos_installer_candidate_still_eligible "$installer" "$expected" 14 "$deadline"; then
+    echo 'UNSIGNED_ACCEPTED'
+    exit 1
+fi
+macos_installer_is_apple_signed() { return 0; }
 
 macos_installer_candidate_identity() { printf '1:2:0\n'; }
 if macos_installer_candidate_still_eligible "$installer" '1:2:0' 14 "$deadline"; then
@@ -2334,6 +2770,7 @@ fi
 unset -f macos_installer_candidate_identity
 source "$PROJECT_ROOT/lib/clean/system.sh"
 software_update_pending_or_unknown() { return 1; }
+macos_installer_is_apple_signed() { return 0; }
 
 replacement="$HOME/installer-replacement"
 mkdir -p "$replacement/Contents"

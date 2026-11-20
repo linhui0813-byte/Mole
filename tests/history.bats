@@ -316,6 +316,66 @@ assert data["deletions"][0]["path"] == "/tmp/unicode-\u96ea-quote\"slash\\tab\tb
 '
 }
 
+@test "history JSON replaces malformed UTF-8 while preserving valid scalar values" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 python3 - <<'PYTEST'
+import json
+import os
+import random
+import subprocess
+
+cases = [(bytes([c]), chr(c) if c < 128 else "\ufffd") for c in range(1, 256)]
+for point in (0x80, 0x85, 0x7ff, 0x800, 0x2028, 0x2029, 0xd7ff, 0xe000, 0xfeff, 0xffff, 0x10000, 0x10ffff):
+    value = chr(point)
+    cases.append((value.encode(), value))
+for value in ("plain", "雪🙂", 'quote"slash\\\t\r\n'):
+    cases.append((value.encode(), value))
+for malformed in (b"\xc0\x80", b"\xe0\x80\x80", b"\xed\xa0\x80", b"\xf0\x80\x80\x80",
+                  b"\xf4\x90\x80\x80", b"\xf5\x80\x80\x80", b"\xe2\x82", b"\xf0\x9f\x92"):
+    cases.append((malformed, "\ufffd" * len(malformed)))
+cases += [(b"\xe2(\xa1", "\ufffd(\ufffd"), (b"\xe2\xc2\xa2", "\ufffd¢")]
+rng = random.Random(20261026)
+for _ in range(250):
+    raw = bytes(rng.randrange(1, 256) for _ in range(rng.randrange(1, 13)))
+    decoded = raw.decode("utf-8", errors="surrogateescape")
+    expected = "".join("\ufffd" if 0xdc80 <= ord(c) <= 0xdcff else c for c in decoded)
+    cases.append((raw, expected))
+script = b'source "$1/lib/core/history.sh"; shift; for value; do history_json_string "$value"; printf "\\n"; done'
+result = subprocess.run([b"/bin/bash", b"--noprofile", b"--norc", b"-c", script, b"history-test",
+                         os.fsencode(os.environ["PROJECT_ROOT"]), *[v for v, _ in cases]],
+                        capture_output=True, check=True, env=dict(os.environ, LC_ALL="C"))
+rows = result.stdout.decode("utf-8").split("\n")[:-1]
+assert len(rows) == len(cases), (len(rows), len(cases))
+for row, (raw, expected) in zip(rows, cases):
+    assert json.loads(row) == expected, (raw, row, expected)
+PYTEST
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "mo history JSON repairs malformed legacy fields without rewriting logs" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 python3 - <<'PYTEST'
+import json
+import os
+from pathlib import Path
+import subprocess
+
+log_dir = Path(os.environ["HOME"]) / "Library/Logs/mole"
+operations = (b"# ========== cl\xffean session started at 2026-05-24 10:00:00 ==========\n"
+              b"[2026-05-24 10:00:01] [cl\xffean] SKIPPED /kept (whitelist)\n")
+deletions = (b"2026-05-24T10:00:02+0000\ttrash\t4\tok\t/tmp/bad\xff-\xed\xa0\x80-"
+             + "雪🙂".encode() + b"\n")
+(log_dir / "operations.log").write_bytes(operations)
+(log_dir / "deletions.log").write_bytes(deletions)
+result = subprocess.run([os.environ["PROJECT_ROOT"] + "/mole", "history", "--json"],
+                        capture_output=True, check=True, env=dict(os.environ, LC_ALL="C"))
+data = json.loads(result.stdout.decode("utf-8"))
+assert data["sessions"][0]["command"] == "cl\ufffdean", data
+assert data["deletions"][0]["path"] == "/tmp/bad\ufffd-\ufffd\ufffd\ufffd-雪🙂", data
+assert (log_dir / "operations.log").read_bytes() == operations
+assert (log_dir / "deletions.log").read_bytes() == deletions
+PYTEST
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
 @test "mo history --limit caps sessions and deletion entries" {
     write_history_logs
 
@@ -587,6 +647,61 @@ assert by_id["right"]["actions"]["removed"] == 0, sessions
 assert by_id[""]["actions"]["trashed"] == 1, sessions
 assert by_id[""]["attribution"] == "command", sessions
 assert sum(s["operation_count"] for s in sessions) == 3, sessions
+'
+}
+
+@test "operation lines with a non-ASCII prefix are never folded into a count record" {
+    # awk splits bytes and Bash splits characters of the user locale, where a
+    # "]" byte can end a GBK or Shift-JIS character. Such a line must reach the
+    # line parser whole; an ASCII run with the same shape is still folded.
+    run /bin/bash -c '
+        source "$1/lib/core/history.sh"
+        printf "[t\\x81] [clean] REMOVED a\n[t\\x81] [clean] TRASHED b\n" | history_condense_operations_log | LC_ALL=C cut -c1 | tr -d "\n"
+        printf " "
+        printf "[t] [clean] REMOVED a\n[t] [clean] TRASHED b\n" | history_condense_operations_log | LC_ALL=C cut -c1 | tr -d "\n"
+    ' _ "$PROJECT_ROOT"
+    [[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+    [[ "$output" == "LL LC" ]] || { echo "got: $output"; return 1; }
+}
+
+@test "condensed operation runs count every action and keep breaks the line parser would see" {
+    # history_condense_operations_log folds a run of same-identity lines into
+    # one count record. Lines no parser reads may sit inside a run, while an
+    # irregular line naming another run and lines with an invalid identity
+    # must not be folded into the active session.
+    {
+        printf '%s\n' '# ========== clean run=a session started at 2026-05-24 10:00:00 =========='
+        printf '%s\n' '[2026-05-24 10:00:01] [clean run=a] REMOVED /tmp/1'
+        printf '2026-05-24T10:00:01Z\tclean\tREMOVED\t/tmp/tsv-row-no-parser-reads\n'
+        printf '\n'
+        printf '%s\n' '[2026-05-24 10:00:02] [clean run=a] TRASHED /tmp/2'
+        printf '%s\n' '[2026-05-24 10:00:03] [clean run=a] SKIPPED /tmp/3'
+        printf '%s\n' '[2026-05-24 10:00:03]] [purge run=b] REMOVED /tmp/irregular'
+        printf '%s\n' '[2026-05-24 10:00:04] [clean run=a] FAILED /tmp/4'
+        printf '%s\n' '[2026-05-24 10:00:05] [clean run=a] REBUILT /tmp/5'
+        printf '%s\n' '[2026-05-24 10:00:06] [clean run=a] TASK_FAILED task'
+        printf '%s\n' '[2026-05-24 10:00:07] [clean run=a] WEIRD /tmp/6'
+        printf '[2026-05-24 10:00:07] [clean run=a] REMOVED\r\n'
+        printf '%s\n' '[2026-05-24 10:00:08] [clean run=bad id] REMOVED /tmp/ignored-1'
+        printf '%s\n' '[2026-05-24 10:00:08] [clean run=bad id] REMOVED /tmp/ignored-2'
+        printf '%s\n' '[2026-05-24 10:00:09] [clean run=a] REMOVED /tmp/7'
+        printf '%s\n' '[2026-05-24 10:00:09] [clean run=a] REMOVED /tmp/8'
+        printf '%s\n' '# ========== clean run=a session ended at 2026-05-24 10:01:00, 3 items, 3KB =========='
+        printf '%s' '[2026-05-24 10:02:00] [clean run=a] REMOVED /tmp/after-end-no-newline'
+    } > "$HOME/Library/Logs/mole/operations.log"
+
+    run env HOME="$HOME" "$PROJECT_ROOT/mole" history --json
+    [[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+    printf '%s\n' "$output" | python3 -c '
+import json, sys
+sessions = json.load(sys.stdin)["sessions"]
+assert len(sessions) == 3, sessions
+first, purge, later = sorted(sessions, key=lambda s: (s["started_at"], s["command"]))
+assert first["run_id"] == "a" and first["ended_at"] == "2026-05-24 10:01:00", first
+assert first["actions"] == {"removed": 3, "trashed": 1, "skipped": 1, "failed": 1, "rebuilt": 1, "other": 2}, first
+assert first["failed_tasks"] == 1 and first["operation_count"] == 10, first
+assert purge["run_id"] == "b" and purge["actions"]["removed"] == 1 and purge["operation_count"] == 1, purge
+assert later["run_id"] == "a" and later["ended_at"] == "" and later["operation_count"] == 1, later
 '
 }
 

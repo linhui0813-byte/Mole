@@ -1,14 +1,14 @@
-<p align="right"><b>macOS</b> · <a href="https://github.com/tw93/Mole/tree/windows">Windows</a></p>
+<p align="right"><b>macOS</b> · <a href="https://github.com/tw93/Mole/tree/windows#readme">Windows</a> · <a href="https://github.com/tw93/Mole/tree/linux#readme">Linux</a></p>
 
 <div align="center">
   <h1>Mole</h1>
   <p><b>Mac 심층 정리, 앱 제거, 시스템 최적화, 디스크 분석 및 상태 모니터링. 무료 오픈소스 CLI와 네이티브 Mac 앱.</b></p>
-  <p><a href="README.md">English</a> · <a href="README_CN.md">中文</a> · <a href="README_TW.md">繁體</a> · <a href="README_JA.md">日本語</a> · 한국어 · <a href="README_DE.md">Deutsch</a> · <a href="README_FR.md">Français</a> · <a href="README_UA.md">Українська</a> · <a href="README_RU.md">Русский</a></p>
+  <p><a href="README.md">English</a> · <a href="README_CN.md">中文</a> · <a href="README_TW.md">繁體</a> · <a href="README_JA.md">日本語</a> · 한국어 · <a href="README_DE.md">Deutsch</a> · <a href="README_FR.md">Français</a> · <a href="README_PL.md">Polski</a> · <a href="README_PT-BR.md">Português</a> · <a href="README_UA.md">Українська</a> · <a href="README_RU.md">Русский</a></p>
   <a href="https://github.com/tw93/mole/stargazers"><img src="https://img.shields.io/github/stars/tw93/mole?style=flat-square" alt="Stars"></a>
   <a href="https://github.com/tw93/mole/releases"><img src="https://img.shields.io/github/v/release/tw93/mole?label=version&style=flat-square" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL_v3-blue.svg?style=flat-square" alt="License"></a>
   <a href="https://github.com/tw93/mole/commits"><img src="https://img.shields.io/github/commit-activity/m/tw93/mole?style=flat-square" alt="Commits"></a>
-  <a href="https://twitter.com/HiTw93"><img src="https://img.shields.io/badge/follow-Tw93-red?style=flat-square&logo=Twitter" alt="Twitter"></a>
+  <a href="https://x.com/HiTw93"><img src="https://img.shields.io/badge/follow-Tw93-red?style=flat-square&logo=x" alt="Twitter"></a>
   <a href="https://t.me/+9f9gf4ZrFSQ2OWVl"><img src="https://img.shields.io/badge/chat-Telegram-blueviolet?style=flat-square&logo=Telegram" alt="Telegram"></a>
 </div>
 
@@ -43,13 +43,19 @@ brew install mole
 curl -fsSL https://raw.githubusercontent.com/tw93/mole/main/install.sh | bash
 ```
 
-**Windows에서 설치** ([Windows CLI](https://github.com/tw93/Mole/tree/windows))
+**AI 에이전트로 설치**
 
-```powershell
-iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
+에이전트에게 이렇게 말하면 됩니다:
+
+> Install Mole for me by reading https://raw.githubusercontent.com/tw93/Mole/main/llms.txt
+
+스킬을 직접 설치할 수도 있습니다. 설치하면 Claude Code, Codex, Cursor 등 에이전트가 무엇이든 삭제하기 전에 `--dry-run`으로 목록을 먼저 보여 주고, 앱 제거와 관리자 권한이 필요한 단계는 직접 실행하도록 남겨 둡니다. 업데이트는 `npx skills update -g -y`로 합니다.
+
+```bash
+npx skills add tw93/Mole -a claude-code codex cursor -g -y
 ```
 
-Mole은 Homebrew, 이 GitHub 저장소, Mac 앱과 Windows 앱용 [mole.fit](https://mole.fit/)에서만 배포됩니다. "Mole 기반"이라고 소개하는 다른 앱이나 인코딩된 명령을 터미널에 붙여 넣으라고 하는 사이트는 Mole과 관련이 없습니다.
+호스트 플러그인으로 설치하려면 Claude Code에서 `/plugin marketplace add tw93/Mole` 다음 `/plugin install mole@mole`, Codex에서 `codex plugin marketplace add tw93/Mole` 다음 `codex plugin add mole@mole`, DeepSeek Harness에서 `dsh plugin --profile <name> add dsh-mole`를 실행합니다.
 
 **주요 명령어**
 
@@ -129,6 +135,20 @@ nix profile remove mole
 
 </details>
 
+**Windows에서 설치** ([Windows CLI](https://github.com/tw93/Mole/tree/windows#readme))
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
+```
+
+**Linux에서 설치** ([Linux CLI](https://github.com/tw93/Mole/tree/linux#readme))
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tw93/Mole/linux/install.sh | bash
+```
+
+Mole은 Homebrew, 이 저장소, [mole.fit](https://mole.fit/)에서만 배포됩니다. `molemac.com`, `moleapp.net`, `molefit.com`은 Mole이 아니며, `mole.bluecatbot.com`의 Windows 앱은 이름이 같은 별도의 커뮤니티 프로젝트입니다.
+
 ## 안전성 및 신뢰성
 
 Mole은 파일을 삭제할 수 있으므로 경로를 검증하고, 공유 위치와 시스템 소유 위치를 보호하며, 필요할 때 확인을 요청합니다. 안전하게 변경할 수 있다고 확인할 수 없는 항목은 건너뛰거나 거부합니다.
@@ -141,6 +161,25 @@ Mole은 파일을 삭제할 수 있으므로 경로를 검증하고, 공유 위�
 - 화이트리스트 파일을 읽을 수 없으면 `clean`, `purge`, `optimize`는 이를 무시하고 실행하지 않고 중단합니다
 
 취약점 신고 방법, 안전 경계, 현재 한계는 [SECURITY.md](SECURITY.md) 및 [SECURITY_AUDIT.md](SECURITY_AUDIT.md)를 참고하세요.
+
+## 설정
+
+Mole는 설정 없이 동작합니다. 다음 환경 변수는 느린 디스크, 멈춘 네트워크·클라우드 마운트에 맞게 조정할 때 사용합니다. Mole가 어떤 단계에서 `timed out`을 표시할 때만 타임아웃을 늘리세요.
+
+- `MOLE_TIMEOUT_QUICK_DETECT_SEC` (2): 명령 사용 가능 여부 검사
+- `MOLE_TIMEOUT_SHORT_QUERY_SEC` (3): `df`, `tmutil status` 같은 가벼운 조회
+- `MOLE_TIMEOUT_MEDIUM_PROBE_SEC` (5): 디렉터리 트리를 훑거나 네트워크에 접근하는 검사
+- `MOLE_TIMEOUT_PKG_LIST_SEC` (10): `brew list` 등 패키지 매니저 목록
+- `MOLE_TIMEOUT_PKG_CLEANUP_SEC` (20): 디스크를 훑는 캐시 정리
+- `MOLE_TIMEOUT_DISK_VERIFY_SEC` (30): 파일 시스템 검증 및 복구
+- `MOLE_TIMEOUT_HINT_SCAN_SEC` (15): 상한이 없는 사용자 디렉터리 스캔
+- `MOLE_CLOUD_OFFICE_SECTION_BUDGET_SEC` (300): 클라우드 및 Office 정리 구간 전체 예산
+
+괄호 안 숫자는 기본 초입니다. 예를 들어 느린 디스크에서 스캔에 더 많은 시간을 주려면:
+
+```bash
+MOLE_TIMEOUT_HINT_SCAN_SEC=60 MOLE_TIMEOUT_MEDIUM_PROBE_SEC=15 mo clean
+```
 
 ## 세부 기능 안내
 
@@ -175,7 +214,7 @@ Clean Your Mac
 
 ======================================================================
 Cleanup complete
-Tracked cleanup: 4.5GB | Items cleaned: 97 | Categories: 4
+Removed: 4.5GB · 97 items
 Free space: 223.5GB (+4.5GB)
 ======================================================================
 ```
@@ -227,17 +266,17 @@ PERFORMANCE DIAGNOSIS
   ✓ No sustained high-CPU bottleneck detected
 
 ➤ Finder Cache Refresh
-  → QuickLook thumbnails refreshed
-  → Icon services cache rebuilt
+  ✓ QuickLook thumbnails refreshed
+  ✓ Icon services cache rebuilt
 
 ➤ Network Cache Refresh
-  → DNS cache refreshed
+  ✓ DNS cache refreshed
 
 ➤ Database Optimization
   ◎ Close these apps before database optimization: Safari
 
 ➤ Disk Health
-  → Disk verify skipped
+  ✓ Disk verify skipped
 
 ======================================================================
 Optimization Complete
@@ -306,6 +345,7 @@ Proxy   HTTP · 192.168.1.100             Chrome     ▮▮▮▯▯  28.3%
 - `mo status | jq '.health_score'`: 출력이 파이프로 연결되면 자동으로 JSON 모드로 전환됩니다
 - `mo status --watch --interval 2s`: NDJSON(줄바꿈 구분 JSON) 형식으로 실시간 스트리밍합니다
 - `mo history --json`: 정리 작업 이력을 JSON으로 출력합니다. 각 세션에는 `run_id`(불투명한 문자열이며 식별 정보가 기록되지 않았으면 빈 값)와 `attribution`이 들어 있으며, 식별된 실행은 `run`, 예전 명령 단위 묶음은 `command`, 예전 마커로 중단과 겹친 실행을 구분할 수 없으면 `ambiguous`입니다. 기록된 작업은 계속 확인할 수 있지만 `ambiguous` 개수는 개별 실행에 정확히 나눌 수 없습니다. `ended_at`이 비어 있으면 종료 마커가 기록되지 않은 것입니다.
+- `mo uninstall --list`: 설치된 앱을 `name`, `bundle_id`, `source`, `uninstall_name`, `path`, `size` 필드가 있는 JSON으로 출력합니다
 
 ```text
 $ mo analyze --json ~/Documents
@@ -456,7 +496,7 @@ Mole 제작에 힘을 보태주신 모든 기여자분들께 감사드립니다.
 </a>
 
 <br/><br/>
-X (Twitter)에 공유해 주신 사용자들의 생생한 후기:
+𝕏에 공유해 주신 사용자들의 생생한 후기:
 
 <img src="./docs/img/mole-love.png" alt="커뮤니티 후기" width="1000" />
 
@@ -465,14 +505,12 @@ X (Twitter)에 공유해 주신 사용자들의 생생한 후기:
 ## 후원 및 응원
 
 - [Mole for Mac](https://mole.fit)을 구매하시는 것이 Mole 개발을 지속하는 가장 직접적인 힘이 됩니다
-- Mole이 마음에 드셨다면 GitHub Star를 눌러주시고, [주변에 공유](https://twitter.com/intent/tweet?url=https://github.com/tw93/Mole&text=Mole%20-%20Deep%20clean%20and%20optimize%20your%20Mac.)해 주시거나 Issue/PR로 함께해 주세요
+- Mole이 마음에 드셨다면 GitHub Star를 눌러주시고, [주변에 공유](https://x.com/intent/tweet?url=https://github.com/tw93/Mole&text=Mole%20-%20Deep%20clean%20and%20optimize%20your%20Mac.)해 주시거나 Issue/PR로 함께해 주세요
 - 제게는 '탕위안'과 '콜라'라는 고양이 두 마리가 있는데, Mole이 유용하셨다면 두 아이에게 <a href="https://cats.tw93.fun?name=Mole" target="_blank">맛있는 캔 🥩</a> 하나 선물해 주세요
 
-<details>
-<summary>이미 고양이들에게 간식을 선물해 주신 분들 🐱</summary>
-<br/>
-<a href="https://cats.tw93.fun?name=Mole"><img src="https://cdn.jsdelivr.net/gh/tw93/sponsors@main/assets/sponsors.svg" alt="Mole 후원자" width="1000" loading="lazy" /></a>
-</details>
+이미 고양이들에게 간식을 선물해 주신 분들 🐱
+
+<a href="https://cats.tw93.fun?name=Mole"><img src="https://raw.githubusercontent.com/tw93/sponsors/main/assets/sponsors.svg" alt="Mole 후원자" width="1000" loading="lazy" /></a>
 
 ## 라이선스
 

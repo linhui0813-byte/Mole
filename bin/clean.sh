@@ -146,13 +146,6 @@ declare -a DRY_RUN_SEEN_IDENTITIES=()
 DRY_RUN_TOTAL_PARTIAL=false
 declare -a DEFERRED_CLEANUP_FAMILIES=()
 
-# shellcheck disable=SC2329
-note_activity() {
-    if [[ "${TRACK_SECTION:-0}" == "1" ]]; then
-        SECTION_ACTIVITY=1
-    fi
-}
-
 # Record expected process-state skips without turning every protected target
 # into a separate warning row. Unknown process state is not recorded here and
 # remains visible at the call site.
@@ -556,6 +549,7 @@ read_clean_sudo_password_remainder() {
 
 prompt_for_system_clean() {
     local prompt_attempt=0
+    mole_report_program_status blocked permission
     while true; do
         echo -ne "${PURPLE}${ICON_ARROW}${NC} System caches need sudo. ${GREEN}Enter${NC} continue, ${GRAY}Space${NC} skip: "
 
@@ -566,6 +560,7 @@ prompt_for_system_clean() {
         # starts typing their password) proceeds to authentication.
         if [[ "$choice" == "QUIT" ]]; then
             echo -e " ${GRAY}Canceled${NC}"
+            CLEAN_STATUS_ON_SUCCESS=idle
             exit 0
         fi
 
@@ -576,6 +571,7 @@ prompt_for_system_clean() {
             break
         elif [[ "$choice" == "ENTER" ]]; then
             printf "\r\033[K" # Clear the prompt line
+            mole_report_program_status blocked auth
             if ensure_sudo_session "System cleanup requires admin access"; then
                 SYSTEM_CLEAN=true
                 echo -e "${GREEN}${ICON_SUCCESS}${NC} Admin access granted"
@@ -589,6 +585,7 @@ prompt_for_system_clean() {
         elif [[ "$choice" == CHAR:* ]]; then
             local typed_password="${choice#CHAR:}"
             local password_remainder=""
+            mole_report_program_status blocked auth
             read_clean_sudo_password_remainder password_remainder
             typed_password="${typed_password}${password_remainder}"
 
@@ -617,9 +614,12 @@ prompt_for_system_clean() {
             echo -e "${YELLOW}${ICON_WARNING}${NC} Press Enter to continue, or Space to skip"
         fi
     done
+    mole_report_program_status working
 }
 
 CLEANUP_DONE=false
+# Set once a cleanup or preview starts. Escape cancels with a zero exit code.
+CLEAN_STATUS_ON_SUCCESS=""
 # shellcheck disable=SC2329
 cleanup() {
     local signal="${1:-EXIT}"
@@ -632,11 +632,21 @@ cleanup() {
 
     stop_inline_spinner 2> /dev/null || true
 
+    # Background jobs ignore SIGINT.
+    stop_project_cache_prefetch 2> /dev/null || true
+
     cleanup_temp_files
 
     stop_sudo_session
 
     show_cursor
+
+    [[ -n "$CLEAN_STATUS_ON_SUCCESS" ]] || return 0
+    case "$exit_code" in
+        0) mole_report_program_status "$CLEAN_STATUS_ON_SUCCESS" ;;
+        130 | 143) mole_report_program_status idle ;; # SIGINT or SIGTERM, including from a cleanup step.
+        *) mole_report_program_status error ;;
+    esac
 }
 
 trap 'cleanup EXIT $?' EXIT
@@ -745,28 +755,62 @@ normalize_paths_for_cleanup() {
     return 0
 }
 
+# Measure reclaimable file blocks, not logical lengths. Each root is independent:
+# links outside that root and shared clone blocks stay out of its estimate.
+# This is measurement only; the normal deletion guards still own eligibility.
+_cleanup_path_sizes_kb() {
+    # shellcheck disable=SC2016 # The single-quoted program contains Perl variables.
+    run_with_timeout "$MOLE_TIMEOUT_DISK_VERIFY_SEC" /usr/bin/perl -e '
+        use strict;
+        use warnings;
+        use File::Find;
+        use Fcntl qw(:mode);
+        sub private_bytes {
+            my ($path, $allocated) = @_;
+            # Darwin getattrlist: common FLAGS followed by extended PRIVATESIZE.
+            # FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED. Unsupported filesystems
+            # retain allocated bytes; compressed resource forks do too.
+            my $attrs = pack("SSLLLLL", 5, 0, 0x80040000, 0, 0, 0, 8);
+            my $reply = "\0" x 36;
+            my $name = "$path\0";
+            return $allocated if syscall(220, $name, $attrs, $reply, 36, 0x21) != 0;
+            my ($length, $common, $volume, $dir, $file, $extended, $flags, $private) = unpack("L7Q", $reply);
+            return $allocated if $length < 36 || !($common & 0x40000) || !($extended & 8) || ($flags & 0x20);
+            return $private < $allocated ? $private : $allocated;
+        }
+        for my $root (@ARGV) {
+            my @root_stat = lstat($root);
+            if (!@root_stat || S_ISLNK($root_stat[2])) { print "0\n" or die $!; next; }
+            my %links;
+            my $bytes = 0;
+            my $visit = sub {
+                my $path = $_;
+                my @s = lstat($path);
+                return unless @s;
+                if ($s[0] != $root_stat[0]) { $File::Find::prune = 1; return; }
+                return unless S_ISREG($s[2]);
+                my $allocated = $s[12] * 512;
+                my $size = private_bytes($path, $allocated);
+                if ($s[3] > 1) {
+                    my $key = "$s[0]:$s[1]";
+                    $links{$key} ||= [0, $s[3], $size];
+                    $links{$key}[0]++;
+                } else { $bytes += $size; }
+            };
+            if (S_ISDIR($root_stat[2])) {
+                find({wanted => $visit, no_chdir => 1, follow => 0}, $root);
+            } else { local $_ = $root; $visit->(); }
+            for my $link (values %links) {
+                $bytes += $link->[2] if $link->[0] == $link->[1];
+            }
+            print(int(($bytes + 1023) / 1024), "\n") or die $!;
+        }
+    ' -- "$@" 2> /dev/null
+}
+
 # shellcheck disable=SC2329
 get_cleanup_path_size_kb() {
-    local path="$1"
-
-    # A plain file or a symlink is a single stat. Directories and the
-    # stat-unavailable case fall back to get_path_size_kb. For a regular file
-    # with a zero/invalid stat we also fall back; a symlink reports 0 directly.
-    if [[ -L "$path" || -f "$path" ]] && command -v stat > /dev/null 2>&1; then
-        local bytes
-        bytes=$("$STAT_BSD" -f%z "$path" 2> /dev/null || echo "0")
-        if [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]]; then
-            echo $(((bytes + 1023) / 1024))
-            return 0
-        fi
-        if [[ -L "$path" ]]; then
-            echo 0
-            return 0
-        fi
-    fi
-
-    # Cleanup totals count what can be freed: readable bytes (see get_path_size_kb).
-    get_path_size_kb "$path" "" readable
+    _cleanup_path_sizes_kb "$1"
 }
 
 # Classification helper for cleanup risk levels
@@ -833,6 +877,9 @@ _safe_clean_impl() {
         return 0
     fi
 
+    local sizing_timeouts_start="${MOLE_CLEAN_SIZING_TIMEOUTS:-0}"
+    # Any size Mole could not read keeps the row: its 0B would be a guess.
+    local sizing_unknown=false
     local description
     local -a targets
 
@@ -985,7 +1032,7 @@ _safe_clean_impl() {
     if [[ ${#existing_paths[@]} -gt 10 ]]; then
         show_spinner=true
         local total_paths=${#existing_paths[@]}
-        if [[ -t 1 ]]; then start_section_spinner "Scanning items..."; fi
+        if [[ -t 1 ]]; then start_section_spinner "Scanning ${description}..."; fi
     fi
 
     local cleaning_spinner_started=false
@@ -1007,10 +1054,10 @@ _safe_clean_impl() {
             [[ -d "${existing_paths[i]}" ]] && ((dir_count++))
         done
 
-        # Heuristic: mostly files -> bulk stat is faster than per-file subshells.
+        # Mostly files share one measurement process instead of per-file subshells.
         if [[ $dir_count -lt 5 && ${#existing_paths[@]} -gt 20 ]]; then
             if [[ -t 1 && "$show_spinner" == "false" ]]; then
-                start_section_spinner "Scanning items..."
+                start_section_spinner "Scanning ${description}..."
                 show_spinner=true
             fi
 
@@ -1018,8 +1065,7 @@ _safe_clean_impl() {
             local _bytes
             local bulk_stat_file="$temp_dir/bulk_stat"
             local bulk_stat_rc=0
-            run_with_timeout "$MOLE_TIMEOUT_DISK_VERIFY_SEC" \
-                "$STAT_BSD" -f%z "${existing_paths[@]}" < /dev/null \
+            _cleanup_path_sizes_kb "${existing_paths[@]}" < /dev/null \
                 > "$bulk_stat_file" 2> /dev/null || bulk_stat_rc=$?
             if [[ $bulk_stat_rc -ge 128 ]]; then
                 cleanup_interrupt_rc=$bulk_stat_rc
@@ -1028,9 +1074,16 @@ _safe_clean_impl() {
                 # must not cancel the delete set. Sizes are already 0 here.
                 MOLE_CLEAN_SIZING_TIMEOUTS=$((${MOLE_CLEAN_SIZING_TIMEOUTS:-0} + 1))
             fi
+            if [[ $bulk_stat_rc -ne 0 ]] || ! awk -v expected="${#existing_paths[@]}" '
+                !/^[0-9]+$/ { invalid = 1 }
+                END { exit invalid || NR != expected }
+            ' "$bulk_stat_file"; then
+                : > "$bulk_stat_file"
+                sizing_unknown=true
+            fi
             while IFS= read -r _bytes; do
                 [[ "$_bytes" =~ ^[0-9]+$ ]] || _bytes=0
-                local _kb=$(((_bytes + 1023) / 1024))
+                local _kb=$_bytes
                 if [[ "$_kb" -gt 0 ]]; then
                     echo "$_kb 1" > "$temp_dir/result_${idx}"
                 else
@@ -1041,26 +1094,6 @@ _safe_clean_impl() {
             while [[ $idx -lt ${#existing_paths[@]} ]]; do
                 echo "0 0" > "$temp_dir/result_${idx}"
                 idx=$((idx + 1))
-            done
-            for ((idx = 0; idx < ${#existing_paths[@]}; idx++)); do
-                if [[ -d "${existing_paths[$idx]}" && ! -L "${existing_paths[$idx]}" ]]; then
-                    local _dsize=0
-                    local _dsize_rc=0
-                    _dsize=$(get_cleanup_path_size_kb \
-                        "${existing_paths[$idx]}") || _dsize_rc=$?
-                    if [[ $_dsize_rc -ge 128 ]]; then
-                        cleanup_interrupt_rc=$_dsize_rc
-                        break
-                    elif mole_rc_timeout "$_dsize_rc"; then
-                        MOLE_CLEAN_SIZING_TIMEOUTS=$((${MOLE_CLEAN_SIZING_TIMEOUTS:-0} + 1))
-                    fi
-                    [[ "$_dsize" =~ ^[0-9]+$ ]] || _dsize=0
-                    if [[ "$_dsize" -gt 0 ]]; then
-                        echo "$_dsize 1" > "$temp_dir/result_${idx}"
-                    else
-                        echo "0 0" > "$temp_dir/result_${idx}"
-                    fi
-                fi
             done
         else
             local -a pids=()
@@ -1083,6 +1116,9 @@ _safe_clean_impl() {
                             # Sizing budget exhausted: keep the item in the
                             # delete set and report its size as 0.
                             size_unknown=1
+                        elif [[ $size_rc -ne 0 || ! "$size" =~ ^[0-9]+$ ]]; then
+                            # Another sizing failure: still cleaned, size unknown.
+                            size_unknown=2
                         fi
                         [[ ! "$size" =~ ^[0-9]+$ ]] && size=0
                         local tmp_file="$temp_dir/result_${idx}.$$"
@@ -1112,7 +1148,7 @@ _safe_clean_impl() {
                         completed=$((completed + 1))
 
                         if [[ "$show_spinner" == "true" && -t 1 ]]; then
-                            update_progress_if_needed "$completed" "$total_paths" last_progress_update 2 || true
+                            update_progress_if_needed "$completed" "$total_paths" last_progress_update 2 "$description" || true
                         fi
                     fi
                 done
@@ -1128,7 +1164,7 @@ _safe_clean_impl() {
                     completed=$((completed + 1))
 
                     if [[ "$show_spinner" == "true" && -t 1 ]]; then
-                        update_progress_if_needed "$completed" "$total_paths" last_progress_update 2 || true
+                        update_progress_if_needed "$completed" "$total_paths" last_progress_update 2 "$description" || true
                     fi
                 done
             fi
@@ -1145,6 +1181,7 @@ _safe_clean_impl() {
             _t_flag=0
             read -r _t_size _t_count _t_flag < "$_t_file" 2> /dev/null || true
             [[ "$_t_flag" == "1" ]] && MOLE_CLEAN_SIZING_TIMEOUTS=$((${MOLE_CLEAN_SIZING_TIMEOUTS:-0} + 1))
+            [[ "$_t_flag" == "2" ]] && sizing_unknown=true
         done
 
         if [[ $cleanup_interrupt_rc -ne 0 ]]; then
@@ -1166,6 +1203,11 @@ _safe_clean_impl() {
         # Start spinner for cleaning phase
         if [[ "$DRY_RUN" != "true" && ${#existing_paths[@]} -gt 0 && -t 1 ]]; then
             start_section_spinner "Cleaning..."
+            cleaning_spinner_started=true
+        elif [[ -n "$delete_guard" && -t 1 ]]; then
+            # The preview still asks the owner guard about every item, about
+            # 70ms each, which left VS Code logs silent for 0.7s.
+            start_section_spinner "Checking ${description}..."
             cleaning_spinner_started=true
         fi
         idx=0
@@ -1294,6 +1336,9 @@ _safe_clean_impl() {
                     # Sizing budget exhausted: keep cleaning with size 0.
                     MOLE_CLEAN_SIZING_TIMEOUTS=$((${MOLE_CLEAN_SIZING_TIMEOUTS:-0} + 1))
                 fi
+                if [[ $size_rc -ne 0 || ! "$size_kb" =~ ^[0-9]+$ ]]; then
+                    sizing_unknown=true
+                fi
                 [[ ! "$size_kb" =~ ^[0-9]+$ ]] && size_kb=0
 
                 local removed=0
@@ -1405,7 +1450,14 @@ _safe_clean_impl() {
         debug_log "Skipped $removal_failed_count items, permission denied, in use, or timed out, for: $description"
     fi
 
-    if [[ $removed_any -eq 1 ]]; then
+    # A row that measured 0B (empty folders, zero-length files) still removes
+    # its items, but printing it reads as noise. Only a size every item
+    # reported as 0 hides it; a timeout or failed measurement keeps the row.
+    if [[ $removed_any -eq 1 && $total_size_kb -eq 0 && "$sizing_unknown" == "false" &&
+        "${MOLE_CLEAN_SIZING_TIMEOUTS:-0}" == "$sizing_timeouts_start" ]]; then
+        stop_section_spinner
+        mole_add_cleaned_row "$total_count" 0
+    elif [[ $removed_any -eq 1 ]]; then
         # Stop spinner before output
         stop_section_spinner
 
@@ -1455,6 +1507,69 @@ safe_clean_guarded() {
     shift
     declare -f "$delete_guard" > /dev/null 2>&1 || return 2
     _safe_clean_impl "$delete_guard" "$@"
+}
+
+# Prints the refusal behind an error line, or fails when the line is anything
+# else. Only the text after the last ": " counts, since mktemp quotes the path.
+_clean_write_refusal() {
+    local message="${1##*: }"
+    case "$message" in
+        "Operation not permitted" | "Permission denied" | "Read-only file system")
+            printf '%s' "$message"
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# Creates and removes one empty folder in $1. Prints the reason and succeeds only
+# when the system refused the write.
+_clean_write_check() {
+    local output="" path=""
+    if ! output=$(LC_ALL=C mktemp -d "$1/.mole-write-check.XXXXXX" 2>&1); then
+        _clean_write_refusal "${output##*$'\n'}"
+        return
+    fi
+    # Stderr noise from a healthy mktemp comes first; the path is the last line.
+    path="${output##*$'\n'}"
+    if output=$(LC_ALL=C rmdir "$path" 2>&1); then
+        return 1
+    fi
+    _clean_write_refusal "${output##*$'\n'}"
+}
+
+# A shell that may not write here, such as an agent's sandbox, has every delete
+# denied, and a denied delete reads as nothing to clean: the run used to end on
+# "Cleanup complete" and exit 0 with nothing removed. Only an explicit refusal
+# stops the run. Any other failure carries on, above all ENOSPC, since a full
+# disk is what people run this for. A home run is stopped only when every folder
+# it checks refuses, so one odd folder never costs the rest of the cleanup.
+refuse_cleanup_without_write_access() {
+    [[ "$DRY_RUN" == "true" ]] && return 0
+
+    local -a targets=()
+    if [[ -n "$EXTERNAL_VOLUME_TARGET" ]]; then
+        targets=("$EXTERNAL_VOLUME_TARGET")
+    else
+        targets=("$HOME/Library/Caches" "$HOME/Library/Logs")
+    fi
+
+    local target="" reason="" refused_target="" refused_reason=""
+    for target in "${targets[@]}"; do
+        [[ -d "$target" ]] || continue
+        reason=$(_clean_write_check "$target") || return 0
+        if [[ -z "$refused_target" ]]; then
+            refused_target="$target"
+            refused_reason="$reason"
+        fi
+    done
+    [[ -n "$refused_target" ]] || return 0
+
+    printf 'mo clean cannot remove files from this shell: writing to %s was refused (%s).\n' "${refused_target/#$HOME/~}" "$refused_reason" >&2
+    printf 'Nothing was removed.' >&2
+    [[ "$refused_reason" == "Read-only file system" ]] || printf ' If this shell runs in a sandbox, run mo clean in your own terminal.' >&2
+    printf '\n' >&2
+    return 1
 }
 
 start_cleanup() {
@@ -1621,6 +1736,7 @@ perform_cleanup() {
     # Pre-check TCC permissions to avoid mid-run prompts.
     if [[ -z "$EXTERNAL_VOLUME_TARGET" ]]; then
         check_tcc_permissions
+        start_legacy_analyzer_cache_sweep
     fi
 
     if [[ ${#WHITELIST_PATTERNS[@]} -gt 0 ]]; then
@@ -1654,21 +1770,15 @@ perform_cleanup() {
             [[ $custom_count -gt 0 ]] && summary+="$custom_count custom"
             summary+=" patterns active"
 
-            echo -e "${BLUE}${ICON_SUCCESS}${NC} Whitelist: $summary"
-
-            if [[ "$DRY_RUN" == "true" ]]; then
-                for pattern in "${WHITELIST_PATTERNS[@]}"; do
-                    [[ "$pattern" == "$FINDER_METADATA_SENTINEL" ]] && continue
-                    echo -e "  ${GRAY}${ICON_SUBLIST}${NC} ${GRAY}${pattern}${NC}"
-                done
-            fi
+            # One line: listing every pattern on each preview pushed the
+            # cleanup rows a screen down. mo clean --whitelist shows them.
+            echo -e "${BLUE}${ICON_ADMIN}${NC} Whitelist: $summary"
         fi
     fi
 
     if [[ -t 1 && "$DRY_RUN" != "true" ]]; then
         local fda_status=0
-        has_full_disk_access
-        fda_status=$?
+        has_full_disk_access || fda_status=$?
         if [[ $fda_status -eq 1 ]]; then
             echo ""
             echo -e "${GRAY}${ICON_REVIEW}${NC} ${GRAY}Grant Full Disk Access to your terminal in System Settings for best results${NC}"
@@ -1730,6 +1840,8 @@ perform_cleanup() {
                 clean_external_volume_target "$EXTERNAL_VOLUME_TARGET" || return $?
             end_section
         else
+            start_project_cache_prefetch
+
             # ===== 1. System =====
             if [[ "$SYSTEM_CLEAN" == "true" ]]; then
                 start_section "System"
@@ -1804,13 +1916,12 @@ perform_cleanup() {
             start_section "App leftovers"
             _run_cleanup_step clean_orphaned_app_data || return $?
             _run_cleanup_step clean_orphaned_system_services || return $?
-            # No stale-LaunchServices step here on purpose. `lsregister -u`
-            # cannot remove a record whose app is already gone: on macOS 15 and
-            # later it fails with -10814 for every such path, which is exactly
-            # the set this would have targeted, so the step could only ever
-            # report failures. `mo optimize` no longer rebuilds LaunchServices
-            # either: the rebuild made a running VPN extension read as
-            # reinstalled, so no command offers this repair.
+            # No stale-LaunchServices step here. An earlier note said
+            # `lsregister -u` fails with -10814 for an app that is already
+            # gone; on macOS 27.0.1 (2026-10-27) it exits 0 and the record
+            # leaves the dump, so only the product decision keeps this out.
+            # `mo optimize` no longer rebuilds LaunchServices either: the
+            # rebuild made a running VPN extension read as reinstalled.
             _run_cleanup_step clean_orphaned_container_stubs || return $?
             _run_cleanup_step show_user_launch_agent_hint_notice || return $?
             end_section
@@ -1842,13 +1953,17 @@ perform_cleanup() {
         fi
     }
     run_clean_sections || cleanup_cancel_rc=$?
+    stop_project_cache_prefetch
 
     # ===== Final summary =====
     flush_idle_section_slot
     echo ""
 
     if [[ "$DRY_RUN" == "true" ]]; then
+        # Writing the detailed list took 0.8s for 267 items with nothing on screen.
+        if [[ -t 1 ]]; then start_section_spinner "Preparing summary..."; fi
         render_clean_preview_from_ledger
+        stop_section_spinner
     fi
 
     local summary_heading=""
@@ -1946,8 +2061,7 @@ perform_cleanup() {
                 potential_label="$freed_size_human"
             fi
             local stats="Potential space: $(colorize_human_size "$potential_label")"
-            [[ $files_cleaned -gt 0 ]] && stats+=" | Items: $files_cleaned"
-            [[ $total_items -gt 0 ]] && stats+=" | Categories: $total_items"
+            [[ $files_cleaned -gt 0 ]] && stats+=" · $(mole_count_label "$files_cleaned" item)"
             summary_details+=("$stats")
 
             {
@@ -1968,10 +2082,12 @@ perform_cleanup() {
                     freed_size_human="Partially measured"
                 fi
             fi
-            local summary_line="Tracked cleanup: $(colorize_human_size "$freed_size_human")"
+            # The free-space line below carries the measured disk change, so
+            # this line stays the bytes Mole itself removed (#1023).
+            local summary_line="Removed: $(colorize_human_size "$freed_size_human")"
 
             if [[ $files_cleaned -gt 0 ]]; then
-                summary_line+=" | Items cleaned: $files_cleaned"
+                summary_line+=" · $(mole_count_label "$files_cleaned" item)"
             fi
 
             summary_details+=("$summary_line")
@@ -2002,24 +2118,25 @@ perform_cleanup() {
         done < <(emit_free_space_summary "$initial_free_space_kb" "$free_space_target")
     fi
 
-    # Caches of running apps are deferred silently: skipping them is Mole's
-    # ordinary behavior, not news, and for always-on tools (Codex, browsers)
-    # a summary line here appeared on every single run. Preview still lists
-    # what would be cleaned, and the ledger stays visible under --debug.
-    if [[ ${#DEFERRED_CLEANUP_FAMILIES[@]} -gt 0 ]]; then
-        debug_log "Deferred while active: $(format_deferred_cleanup_families)"
-    fi
-
     if [[ "$DRY_RUN" == "true" &&
         ($total_size_cleaned -gt 0 || "$DRY_RUN_TOTAL_PARTIAL" == "true" || $files_cleaned -gt 0) ]]; then
         if publish_clean_preview_file; then
             summary_details+=("Detailed file list: ${GRAY}$CLEAN_PREVIEW_FINAL_FILE${NC}")
-            summary_details+=("Use ${GRAY}mo clean --whitelist${NC} to add protection rules")
         else
             summary_details+=("Cleanup preview file could not be written safely")
         fi
     elif [[ "$DRY_RUN" == "true" ]]; then
         publish_clean_preview_file || true
+    fi
+
+    if [[ ${#DEFERRED_CLEANUP_FAMILIES[@]} -gt 0 ]]; then
+        local deferred_families
+        deferred_families=$(format_deferred_cleanup_families)
+        debug_log "Deferred while active: $deferred_families"
+        # A family skipped during preview can become eligible before cleanup (#2039).
+        if [[ "$DRY_RUN" == "true" ]]; then
+            summary_details+=("Skipped in this preview · $deferred_families")
+        fi
     fi
 
     if [[ ${MOLE_CLEAN_SIZING_TIMEOUTS:-0} -gt 0 ]]; then
@@ -2153,6 +2270,9 @@ main() {
         shift
     done
 
+    CLEAN_STATUS_ON_SUCCESS="done"
+    mole_report_program_status working
+    refuse_cleanup_without_write_access || exit 1
     start_cleanup
     hide_cursor
     local cleanup_rc=0

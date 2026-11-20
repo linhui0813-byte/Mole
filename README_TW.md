@@ -1,14 +1,14 @@
-<p align="right"><b>macOS</b> · <a href="https://github.com/tw93/Mole/tree/windows">Windows</a></p>
+<p align="right"><b>macOS</b> · <a href="https://github.com/tw93/Mole/tree/windows#readme">Windows</a> · <a href="https://github.com/tw93/Mole/tree/linux#readme">Linux</a></p>
 
 <div align="center">
   <h1>Mole</h1>
   <p><b>Mac 深度清理、應用程式解除安裝、系統最佳化、磁碟分析與狀態監控，免費開源命令列工具，另有原生 Mac App</b></p>
-  <p><a href="README.md">English</a> · <a href="README_CN.md">中文</a> · 繁體 · <a href="README_JA.md">日本語</a> · <a href="README_KR.md">한국어</a> · <a href="README_DE.md">Deutsch</a> · <a href="README_FR.md">Français</a> · <a href="README_UA.md">Українська</a> · <a href="README_RU.md">Русский</a></p>
+  <p><a href="README.md">English</a> · <a href="README_CN.md">中文</a> · 繁體 · <a href="README_JA.md">日本語</a> · <a href="README_KR.md">한국어</a> · <a href="README_DE.md">Deutsch</a> · <a href="README_FR.md">Français</a> · <a href="README_PL.md">Polski</a> · <a href="README_PT-BR.md">Português</a> · <a href="README_UA.md">Українська</a> · <a href="README_RU.md">Русский</a></p>
   <a href="https://github.com/tw93/mole/stargazers"><img src="https://img.shields.io/github/stars/tw93/mole?style=flat-square" alt="Stars"></a>
   <a href="https://github.com/tw93/mole/releases"><img src="https://img.shields.io/github/v/release/tw93/mole?label=version&style=flat-square" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL_v3-blue.svg?style=flat-square" alt="License"></a>
   <a href="https://github.com/tw93/mole/commits"><img src="https://img.shields.io/github/commit-activity/m/tw93/mole?style=flat-square" alt="Commits"></a>
-  <a href="https://twitter.com/HiTw93"><img src="https://img.shields.io/badge/follow-Tw93-red?style=flat-square&logo=Twitter" alt="Twitter"></a>
+  <a href="https://x.com/HiTw93"><img src="https://img.shields.io/badge/follow-Tw93-red?style=flat-square&logo=x" alt="Twitter"></a>
   <a href="https://t.me/+9f9gf4ZrFSQ2OWVl"><img src="https://img.shields.io/badge/chat-Telegram-blueviolet?style=flat-square&logo=Telegram" alt="Telegram"></a>
 </div>
 
@@ -43,13 +43,19 @@ brew install mole
 curl -fsSL https://raw.githubusercontent.com/tw93/mole/main/install.sh | bash
 ```
 
-**Windows 上安裝**（[Windows CLI](https://github.com/tw93/Mole/tree/windows)）
+**用 AI Agent 安裝**
 
-```powershell
-iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
+直接告訴你的 Agent：
+
+> Install Mole for me by reading https://raw.githubusercontent.com/tw93/Mole/main/llms.txt
+
+也可以自己裝 skill，裝上後 Claude Code、Codex、Cursor 等 Agent 刪除前會先用 `--dry-run` 把清單給你看，解除安裝 App 與需要管理員權限的步驟留給你自己執行，更新用 `npx skills update -g -y`。
+
+```bash
+npx skills add tw93/Mole -a claude-code codex cursor -g -y
 ```
 
-Mole 只透過 Homebrew、這個 GitHub 倉庫和 Mac 版、Windows 版官網 [mole.fit](https://mole.fit/) 發布，自稱基於 Mole 的其他 App，或要你往終端機貼上一段編碼指令的網站，都和 Mole 無關。
+習慣用宿主內建的外掛管理，Claude Code 裡先 `/plugin marketplace add tw93/Mole` 再 `/plugin install mole@mole`，Codex 裡先 `codex plugin marketplace add tw93/Mole` 再 `codex plugin add mole@mole`，DeepSeek Harness 裡用 `dsh plugin --profile <name> add dsh-mole`。
 
 **常用指令**
 
@@ -129,6 +135,20 @@ nix profile remove mole
 
 </details>
 
+**Windows 上安裝**（[Windows CLI](https://github.com/tw93/Mole/tree/windows#readme)）
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
+```
+
+**Linux 上安裝**（[Linux CLI](https://github.com/tw93/Mole/tree/linux#readme)）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tw93/Mole/linux/install.sh | bash
+```
+
+Mole 只透過 Homebrew、這個倉庫和 [mole.fit](https://mole.fit/) 發布，`molemac.com`、`moleapp.net`、`molefit.com` 都不是 Mole，`mole.bluecatbot.com` 上的 Windows App 是同名的社群專案。
+
 ## 安全機制
 
 Mole 會刪除檔案，所以會先檢查路徑、保護共用和系統目錄，需要時才請你確認，無法確認安全的項目一律略過或拒絕。
@@ -141,6 +161,25 @@ Mole 會刪除檔案，所以會先檢查路徑、保護共用和系統目錄，
 - 白名單檔案無法讀取時，`clean`、`purge` 和 `optimize` 會直接停止，不會在沒有白名單的情況下繼續執行
 
 漏洞回報方式、安全邊界與目前限制見 [SECURITY.md](SECURITY.md) 與 [SECURITY_AUDIT.md](SECURITY_AUDIT.md)。
+
+## 設定
+
+Mole 無需設定即可執行。以下環境變數可用於因應慢速磁碟、卡住的網路或雲端掛載；僅在 Mole 提示某一步 `timed out` 時才需要調大對應的逾時。
+
+- `MOLE_TIMEOUT_QUICK_DETECT_SEC` (2): 指令可用性探測
+- `MOLE_TIMEOUT_SHORT_QUERY_SEC` (3): 輕量查詢，如 `df` 與 `tmutil status`
+- `MOLE_TIMEOUT_MEDIUM_PROBE_SEC` (5): 走訪目錄樹或存取網路的探測
+- `MOLE_TIMEOUT_PKG_LIST_SEC` (10): 套件管理器列表，如 `brew list`
+- `MOLE_TIMEOUT_PKG_CLEANUP_SEC` (20): 走訪磁碟的快取清理
+- `MOLE_TIMEOUT_DISK_VERIFY_SEC` (30): 檔案系統校驗與修復
+- `MOLE_TIMEOUT_HINT_SCAN_SEC` (15): 無上限的使用者目錄掃描
+- `MOLE_CLOUD_OFFICE_SECTION_BUDGET_SEC` (300): 雲端與 Office 清理環節的總預算
+
+括號中的數字為預設秒數。例如，在慢速磁碟上給掃描更多時間：
+
+```bash
+MOLE_TIMEOUT_HINT_SCAN_SEC=60 MOLE_TIMEOUT_MEDIUM_PROBE_SEC=15 mo clean
+```
 
 ## 功能說明
 
@@ -175,7 +214,7 @@ Clean Your Mac
 
 ======================================================================
 Cleanup complete
-Tracked cleanup: 4.5GB | Items cleaned: 97 | Categories: 4
+Removed: 4.5GB · 97 items
 Free space: 223.5GB (+4.5GB)
 ======================================================================
 ```
@@ -227,17 +266,17 @@ PERFORMANCE DIAGNOSIS
   ✓ No sustained high-CPU bottleneck detected
 
 ➤ Finder Cache Refresh
-  → QuickLook thumbnails refreshed
-  → Icon services cache rebuilt
+  ✓ QuickLook thumbnails refreshed
+  ✓ Icon services cache rebuilt
 
 ➤ Network Cache Refresh
-  → DNS cache refreshed
+  ✓ DNS cache refreshed
 
 ➤ Database Optimization
   ◎ Close these apps before database optimization: Safari
 
 ➤ Disk Health
-  → Disk verify skipped
+  ✓ Disk verify skipped
 
 ======================================================================
 Optimization Complete
@@ -306,6 +345,7 @@ Proxy   HTTP · 192.168.1.100             Chrome     ▮▮▮▯▯  28.3%
 - `mo status | jq '.health_score'`：當輸出被管線重定向時自動切換為 JSON 模式
 - `mo status --watch --interval 2s`：持續串流輸出 NDJSON（換行分隔的 JSON）
 - `mo history --json`：以 JSON 格式輸出歷史清理日誌。每個工作階段帶有 `run_id`（不透明字串，沒有記錄身分時為空）和 `attribution`，能識別的執行是 `run`，舊版按指令分組的是 `command`，舊標記分不清中斷和重疊執行時是 `ambiguous`。記錄下來的操作仍然都能看到，但 `ambiguous` 的計數沒辦法可靠地分到單次執行上。`ended_at` 為空表示沒有記錄到結束標記
+- `mo uninstall --list`：以 JSON 輸出已安裝的 App，欄位為 `name`、`bundle_id`、`source`、`uninstall_name`、`path` 與 `size`
 
 ```text
 $ mo analyze --json ~/Documents
@@ -456,7 +496,7 @@ Raycast 裝好後要手動設定一次：
 </a>
 
 <br/><br/>
-來自 X (Twitter) 使用者的真實回饋：
+來自 𝕏 使用者的真實回饋：
 
 <img src="./docs/img/mole-love.png" alt="社群回饋" width="1000" />
 
@@ -465,14 +505,12 @@ Raycast 裝好後要手動設定一次：
 ## 支持專案
 
 - 購買 [Mole for Mac](https://mole.fit) 是支持 Mole 持續開發最直接的方式
-- 如果 Mole 幫到了你，歡迎給予 Star、[分享給朋友](https://twitter.com/intent/tweet?url=https://github.com/tw93/Mole&text=Mole%20-%20Deep%20clean%20and%20optimize%20your%20Mac.)，或在 GitHub 提交 Issue 和 PR
+- 如果 Mole 幫到了你，歡迎給予 Star、[分享給朋友](https://x.com/intent/tweet?url=https://github.com/tw93/Mole&text=Mole%20-%20Deep%20clean%20and%20optimize%20your%20Mac.)，或在 GitHub 提交 Issue 和 PR
 - 我養了兩隻貓，湯圓和可樂，如果 Mole 用著順手，歡迎請她們吃一頓 <a href="https://cats.tw93.fun?name=Mole" target="_blank">罐頭 🥩</a>
 
-<details>
-<summary>已經請客的好心人 🐱</summary>
-<br/>
-<a href="https://cats.tw93.fun?name=Mole"><img src="https://cdn.jsdelivr.net/gh/tw93/sponsors@main/assets/sponsors.svg" alt="贊助者" width="1000" loading="lazy" /></a>
-</details>
+已經請客的好心人 🐱
+
+<a href="https://cats.tw93.fun?name=Mole"><img src="https://raw.githubusercontent.com/tw93/sponsors/main/assets/sponsors.svg" alt="贊助者" width="1000" loading="lazy" /></a>
 
 ## 開源授權條款
 

@@ -166,6 +166,8 @@ func (m *model) cancelLiveScan() {
 	m.liveScanCancel = nil
 	m.liveScanEvents = nil
 	m.liveScanningPaths = nil
+	m.liveEntryIndex = nil
+	m.liveEntriesDirty = false
 	m.autoSortLiveEntries = false
 }
 
@@ -202,18 +204,23 @@ func (m *model) applyLiveChildSize(entry dirEntry, complete bool, result scanRes
 	}
 
 	m.ensureLiveEntryBacking()
-	previousSize := int64(-1)
-	found := false
-	for i := range m.entriesAll {
-		if m.entriesAll[i].Path == entry.Path {
-			previousSize = m.entriesAll[i].Size
-			m.entriesAll[i] = entry
-			found = true
-			break
+	if m.liveEntryIndex == nil {
+		m.liveEntryIndex = make(map[string]int, len(m.entriesAll))
+		for i := range m.entriesAll {
+			m.liveEntryIndex[m.entriesAll[i].Path] = i
 		}
 	}
-	if !found {
+	previousSize := int64(-1)
+	if i, found := m.liveEntryIndex[entry.Path]; found {
+		previousSize = m.entriesAll[i].Size
+		m.entriesAll[i] = entry
+	} else {
+		m.liveEntryIndex[entry.Path] = len(m.entriesAll)
 		m.entriesAll = append(m.entriesAll, entry)
+	}
+	// The unfiltered view shares the backing rows, including after append.
+	if m.entryFilter == "" {
+		m.entries = m.entriesAll
 	}
 
 	m.totalSize += max(entry.Size, 0) - max(previousSize, 0)
@@ -226,13 +233,27 @@ func (m *model) applyLiveChildSize(entry dirEntry, complete bool, result scanRes
 		childResult.Entries = filterNonEmptyEntries(result.Entries)
 		m.cache[entry.Path] = historyEntryFromScanResult(entry.Path, childResult, m.cache[entry.Path], true)
 	}
+	// Account for every result immediately; reorder and rebuild filtered rows
+	// once per existing display tick, rather than once per child event.
+	m.liveEntriesDirty = true
+	m.clampEntrySelection()
+	m.status = fmt.Sprintf("Scanning %s...", displayPath(m.path))
+}
+
+func (m *model) flushLiveEntryUpdates() {
+	if !m.liveEntriesDirty {
+		return
+	}
+	m.liveEntriesDirty = false
 	if m.autoSortLiveEntries {
 		m.sortLiveEntriesForActiveMode()
 	} else {
+		selectedPath := m.selectedEntryPath()
 		m.applyEntryFilter()
+		if selectedPath != "" {
+			m.selectEntryPath(selectedPath)
+		}
 	}
-	m.clampEntrySelection()
-	m.status = fmt.Sprintf("Scanning %s...", displayPath(m.path))
 }
 
 func (m *model) finishLiveScan(result scanResult) {
@@ -242,6 +263,8 @@ func (m *model) finishLiveScan(result scanResult) {
 	m.liveScanCancel = nil
 	m.liveScanEvents = nil
 	m.liveScanningPaths = nil
+	m.liveEntryIndex = nil
+	m.liveEntriesDirty = false
 	m.autoSortLiveEntries = false
 
 	filteredEntries := filterNonEmptyEntries(result.Entries)
@@ -291,6 +314,8 @@ func (m *model) sortLiveEntriesForActiveMode() {
 		selectedPath = m.selectedEntryPath()
 	}
 	sortDirEntriesBySize(m.entriesAll)
+	m.liveEntryIndex = nil
+	m.liveEntriesDirty = false
 	m.applyEntryFilter()
 	if m.liveSortMode == liveSortFreezeOnMove {
 		m.selected = 0
@@ -321,7 +346,33 @@ func (m *model) selectEntryPath(path string) {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.update(msg)
+	next := updated.(model)
+	_, initializing := msg.(initializeMsg)
+	if initializing || next.path != m.path || (next.liveScanID != 0 && next.liveScanID != m.liveScanID) {
+		if metadataCmd := next.refreshSimulatorMetadata(); metadataCmd != nil {
+			cmd = tea.Batch(cmd, metadataCmd)
+		}
+	}
+	return next, cmd
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case simulatorMetadataMsg:
+		if msg.id != m.simulatorProbeID || msg.path != m.path || m.deleting || m.deleteConfirm {
+			return m, nil
+		}
+		selectedPath := m.selectedEntryPath()
+		m.simulators = msg.devices
+		m.applyEntryFilter()
+		m.selectEntryPath(selectedPath)
+		for path := range m.multiSelected {
+			if !slices.ContainsFunc(m.entries, func(entry dirEntry) bool { return entry.Path == path }) {
+				delete(m.multiSelected, path)
+			}
+		}
+		return m, nil
 	case initializeMsg:
 		var cmd tea.Cmd
 		if m.inOverviewMode() {
@@ -357,9 +408,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancelBackgroundCacheWrites(removedPaths)
 				invalidateCacheAncestry(removedPaths)
 				if msg.err != nil {
-					m.status = fmt.Sprintf("Deleted %d items; some failed: %v", msg.count, msg.err)
+					m.status = fmt.Sprintf("Moved %d items to Trash, some failed: %v", msg.count, msg.err)
 				} else {
-					m.status = fmt.Sprintf("Deleted %d items", msg.count)
+					m.status = fmt.Sprintf("Moved %d items to Trash", msg.count)
 				}
 				if msg.logWarning != "" {
 					m.status += " · " + msg.logWarning
@@ -399,9 +450,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			if msg.err != nil {
-				m.status = fmt.Sprintf("Failed to delete: %v", msg.err)
+				m.status = fmt.Sprintf("Failed to move to Trash: %v", msg.err)
 			} else {
-				m.status = fmt.Sprintf("Deleted %d items", msg.count)
+				m.status = fmt.Sprintf("Moved %d items to Trash", msg.count)
 			}
 			if msg.logWarning != "" {
 				m.status += " · " + msg.logWarning
@@ -555,6 +606,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.totalSize = sumKnownEntrySizes(m.entries)
 			m.scanState = entryScanState(m.entries)
+			m.ensureVisibleOverviewSelection()
 
 			if msg.Err != nil {
 				label := "Size unavailable"
@@ -579,6 +631,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tickMsg:
+		m.flushLiveEntryUpdates()
 		hasPending := false
 		if m.inOverviewMode() {
 			for _, entry := range m.entries {
@@ -607,6 +660,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The busy view hides rows and confirmations. Keep its inputs from
+	// changing selection or dispatching another deletion without a visible prompt.
+	if m.deleting {
+		switch msg.String() {
+		case "q", "Q", "ctrl+c":
+			return m, tea.Quit
+		case "r", "R":
+			// Refresh remains safe: completion cancels it before invalidating caches.
+		default:
+			return m, nil
+		}
+	}
+
 	// Delete confirm flow.
 	if m.deleteConfirm {
 		switch msg.String() {
@@ -639,19 +705,19 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.deleteTarget = nil
 			if len(pathsToDelete) == 0 {
 				m.deleting = false
-				m.status = "Nothing to delete"
+				m.status = "Nothing to move to Trash"
 				return m, nil
 			}
 
 			audit := newDeleteAudit(m.selectedPathSizes(pathsToDelete))
 			if len(pathsToDelete) == 1 {
 				targetPath := pathsToDelete[0]
-				m.status = fmt.Sprintf("Deleting %s...", filepath.Base(targetPath))
+				m.status = fmt.Sprintf("Moving %s to Trash...", filepath.Base(targetPath))
 				cmd := tea.Batch(deletePathCmd(targetPath, m.deleteCount, audit), m.startTick())
 				return m, cmd
 			}
 
-			m.status = fmt.Sprintf("Deleting %d items...", len(pathsToDelete))
+			m.status = fmt.Sprintf("Moving %d items to Trash...", len(pathsToDelete))
 			cmd := tea.Batch(deleteMultiplePathsCmd(pathsToDelete, m.deleteCount, audit), m.startTick())
 			return m, cmd
 		case "esc", "q":
@@ -703,16 +769,8 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.largeOffset = m.largeSelected
 				}
 			}
-		} else if len(m.entries) > 0 && m.selected > 0 {
-			m.noteLiveCursorMove()
-			next := m.selected - 1
-			for next > 0 && m.entries[next].Size == 0 {
-				next--
-			}
-			m.selected = next
-			if m.selected < m.offset {
-				m.offset = m.selected
-			}
+		} else {
+			m.moveEntrySelection(-1)
 		}
 	case "down", "j", "J":
 		if m.showLargeFiles {
@@ -723,17 +781,8 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.largeOffset = m.largeSelected - viewport + 1
 				}
 			}
-		} else if len(m.entries) > 0 && m.selected < len(m.entries)-1 {
-			m.noteLiveCursorMove()
-			next := m.selected + 1
-			for next < len(m.entries)-1 && m.entries[next].Size == 0 {
-				next++
-			}
-			m.selected = next
-			viewport := calculateViewport(m.height, false)
-			if m.selected >= m.offset+viewport {
-				m.offset = m.selected - viewport + 1
-			}
+		} else {
+			m.moveEntrySelection(1)
 		}
 	case "enter", "right", "l", "L":
 		if m.showLargeFiles {
@@ -1002,7 +1051,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "delete", "backspace":
 		if m.scanning {
-			m.status = "Delete is available after the scan finishes"
+			m.status = "Move to Trash is available after the scan finishes"
 			return m, nil
 		}
 		if m.showLargeFiles {
@@ -1050,7 +1099,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else if m.selected < len(m.entries) {
 				selected := m.entries[m.selected]
 				if selected.State == scanUnavailable {
-					m.status = fmt.Sprintf("Cannot delete %s, size unknown", selected.Name)
+					m.status = fmt.Sprintf("Cannot move %s to Trash, size unknown", selected.Name)
 					return m, nil
 				}
 				m.deleteConfirm = true
@@ -1193,6 +1242,7 @@ func (m model) goBack() (tea.Model, tea.Cmd) {
 		m.scanning = false
 		m.scanTransient = false
 		m.viewNeedsRefresh = false
+		m.ensureVisibleOverviewSelection()
 		if hasPendingOverviewEntries(m.entries) {
 			m.totalSize = sumKnownEntrySizes(m.entries)
 			m.scanState = entryScanState(m.entries)
@@ -1258,10 +1308,13 @@ func (m *model) switchToOverviewMode() tea.Cmd {
 }
 
 func (m model) enterSelectedDir() (tea.Model, tea.Cmd) {
-	if len(m.entries) == 0 {
+	if len(m.entries) == 0 || m.selected < 0 || m.selected >= len(m.entries) {
 		return m, nil
 	}
 	selected := m.entries[m.selected]
+	if m.inOverviewMode() && selected.hiddenWhenEmpty() {
+		return m, nil
+	}
 	if selected.IsDir {
 		m.cancelLiveScan()
 		// Drilling in commits and drops any active directory filter so the parent
@@ -1354,6 +1407,21 @@ func scanOverviewPathCmd(path string, index int, publication *scanPublication) t
 
 // Cancel before invalidating stored measurements, so an in-flight scan cannot
 // publish pre-delete bytes after the invalidation has finished.
+// stopMeasurementsForExit ends every running du before the process leaves.
+// exec.CommandContext can only kill a child while its parent is alive, so a
+// quit that does not wait would leave du walking the tree with no deadline.
+func (m *model) stopMeasurementsForExit() {
+	if m.simulatorCancel != nil {
+		m.simulatorCancel()
+	}
+	m.cancelLiveScan()
+	m.cancelOverviewScans(nil)
+	m.cancelBackgroundCacheWrites(nil)
+	for deadline := time.Now().Add(duExitWait); (activeDu.Load() > 0 || activeSimulatorCommands.Load() > 0) && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (m *model) cancelOverviewScans(removedPaths []string) {
 	for path, publication := range m.overviewScanningSet {
 		if len(removedPaths) == 0 || pathTouchesRemoved(path, removedPaths) {

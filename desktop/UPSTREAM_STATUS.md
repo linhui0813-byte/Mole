@@ -1,9 +1,9 @@
 # Upstream integration status
 
-Reviewed on 2026-10-20.
+Reviewed on 2026-11-20.
 
 - Source: **Mole CLI (macOS)**, `tw93/Mole`, commit
-  `7b2a196061e1be7fae4ba422cd9102313fcb321d`.
+  `3fd0005ed71ce6df1a9e837a1b8f493dbad242f6`.
 - Source entry points: the collectors in `cmd/status/`, traversal and JSON
   contracts in `cmd/analyze/`, plus `bin/clean.sh` and its shared protection and
   Trash helpers for the separate Clean and Analyze action adapters.
@@ -14,10 +14,24 @@ Reviewed on 2026-10-20.
   appended to `AGENTS.md`. The upstream instructions remain intact, and the
   guard rejects changes to them. Fork-specific code and compatibility work stay
   in `desktop/`.
-- This is a source update and a verified local development build, not a release
-  of the commercial Mole Mac app or a newly published binary.
+- The delivery target is the local development build of the independent dashboard.
 
-## Verification
+## Verification of the 2026-11-20 snapshot
+
+- Upstream parity and all seven isolation tests passed. The Analyze and Clean
+  race tests and the Analyze, uninstall, and live-metrics Swift contracts passed.
+- The signed preview passed the packaged Analyze, Analyze Trash, and uninstall
+  smoke tests. The bundled engine matched all 46 source files, and the collector
+  produced three consecutive live readings with a complete process sample.
+- The first full suite passed Go tests, module loading, integration, and
+  installation. Its unit stage hit a Python 3.11 directory race and a timing
+  assertion under concurrent load. Both cases passed when rerun individually.
+- The repository check passed in an isolated checkout using upstream's Windows
+  branch (`363307f9`) for the published-skill audit and the configured `go vet`
+  fallback. The fork's October Windows branch predates the shared skill's
+  command changes and failed that cross-platform audit.
+
+## Verification of the 2026-10-20 snapshot
 
 - Upstream parity guard: passed against the actual checkout.
 - Guard contract: the isolated-repository tests passed. Replacing the guard
@@ -70,7 +84,7 @@ native build, signature, and exact bundled-source checks passed.
 The safeguard's full-suite rerun exited 1 only on the existing fallback-audit
 case below; Go, module loading, integration, and installation stages passed.
 
-## Known upstream audit failure
+## Historical upstream audit failure
 
 `tests/clean_core.bats`, case `engine-absent cleanup fallbacks stay at their
 audited count`, expects ten `declare -f safe_clean_guarded` fallback branches;
@@ -81,9 +95,8 @@ unmodified source commit, with no dashboard files present. That checkout was
 removed after the reproduction. The desktop adapter reuses existing protection
 and Trash helpers; no upstream code or assertion was changed to silence the failure.
 
-Next check: rerun the case after the next upstream update. Any remediation of
-the cleanup implementation or its audited baseline belongs upstream and must
-be reviewed there. Keep the execution code identical in this fork.
+On 2026-11-20, the case passed against `3fd0005e`. The updated upstream source
+has the ten audited sites, and the assertion still expects ten.
 
 ## Analyze integration
 

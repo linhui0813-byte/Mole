@@ -178,6 +178,7 @@ source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
 unset MOLE_TEST_NO_AUTH MOLE_TEST_MODE
 sudo() { echo "SUDO:$*"; return 0; }
+function /usr/bin/plutil { echo com.apple.mDNSResponder.reloaded; }
 
 execute_optimization network_optimization
 [[ "$(optimize_outcome_count applied)" == "1" ]] || exit 1
@@ -185,8 +186,115 @@ EOF
 
 	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
 	[[ "$(grep -c 'SUDO:dscacheutil -flushcache' <<< "$output")" == "1" ]] || return 1
-	[[ "$output" == *"SUDO:killall -HUP mDNSResponder"* ]] || return 1
+	[[ "$output" == *"SUDO:/bin/launchctl kill SIGHUP system/com.apple.mDNSResponder.reloaded"* ]] || return 1
 	[[ "$output" == *"DNS cache refreshed"* ]] || return 1
+	[[ "$output" != *"Failed to refresh DNS cache"* ]]
+}
+
+@test "DNS refresh signals only the allowlisted system plist service" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_ASSUME_VPN_ACTIVE=0 MOLE_DRY_RUN=0 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+optimize_sudo_available() { return 0; }
+function /usr/bin/plutil {
+    [[ "$*" == "-extract Label raw -o - /System/Library/LaunchDaemons/com.apple.mDNSResponder.plist" ]] || return 99
+    echo "$label"
+}
+trace="$HOME/dns-service.trace"
+sudo() { printf '%s\n' "$*" >> "$trace"; }
+for label in com.apple.mDNSResponder com.apple.mDNSResponder.reloaded; do
+    : > "$trace"
+    flush_dns_cache || exit 1
+    expected=$(printf 'dscacheutil -flushcache\n/bin/launchctl kill SIGHUP system/%s' "$label")
+    [[ "$(cat "$trace")" == "$expected" ]] || exit 1
+done
+EOF
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+}
+
+@test "DNS refresh refuses an unknown or unreadable service before any sudo action" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_ASSUME_VPN_ACTIVE=0 MOLE_DRY_RUN=0 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+optimize_sudo_available() { return 0; }
+function /usr/bin/plutil { printf '%s\n' "$label"; return "$read_status"; }
+trace="$HOME/dns-refused.trace"
+sudo() { printf '%s\n' "$*" >> "$trace"; }
+read_status=0
+for label in com.apple.mDNSResponder.neighbor '' $'com.apple.mDNSResponder\nextra'; do
+    result=0
+    flush_dns_cache || result=$?
+    [[ "$result" == 1 && ! -e "$trace" ]] || exit 1
+done
+label=com.apple.mDNSResponder
+read_status=1
+result=0
+flush_dns_cache || result=$?
+[[ "$result" == 1 && ! -e "$trace" ]] || exit 1
+EOF
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+}
+
+@test "DNS refresh never retries a refused service signal by process name" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_ASSUME_VPN_ACTIVE=0 MOLE_DRY_RUN=0 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+optimize_sudo_available() { return 0; }
+function /usr/bin/plutil { echo com.apple.mDNSResponder; }
+trace="$HOME/dns-signal-refused.trace"
+sudo() {
+    printf '%s\n' "$*" >> "$trace"
+    [[ "$1" == dscacheutil ]] && return 0
+    [[ -n "$launchctl_error" ]] && echo "$launchctl_error" >&2
+    return 1
+}
+expected=$(printf 'dscacheutil -flushcache\n/bin/launchctl kill SIGHUP system/com.apple.mDNSResponder')
+for launchctl_error in '' 'Could not find service "com.apple.mDNSResponder" in domain for system'; do
+    : > "$trace"
+    result=0
+    flush_dns_cache || result=$?
+    [[ "$result" == 1 ]] || exit 1
+    [[ "$(cat "$trace")" == "$expected" ]] || exit 2
+done
+EOF
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+}
+
+@test "DNS refresh retries a macOS-refused service signal only as the mDNSResponder account" {
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_ASSUME_VPN_ACTIVE=0 MOLE_DRY_RUN=0 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+optimize_sudo_available() { return 0; }
+function /usr/bin/plutil { echo com.apple.mDNSResponder.reloaded; }
+trace="$HOME/dns-signal-eperm.trace"
+sudo() {
+    printf '%s\n' "$*" >> "$trace"
+    case "$1" in
+        dscacheutil) return 0 ;;
+        /bin/launchctl) echo "Not privileged to signal service." >&2; return 1 ;;
+        *) return "$fallback_status" ;;
+    esac
+}
+expected=$(printf 'dscacheutil -flushcache\n/bin/launchctl kill SIGHUP system/com.apple.mDNSResponder.reloaded\n-u _mdnsresponder /usr/bin/killall -u _mdnsresponder -HUP mDNSResponder')
+for case_spec in 0:0 1:4; do
+    fallback_status=${case_spec%%:*}
+    : > "$trace"
+    result=0
+    flush_dns_cache || result=$?
+    [[ "$result" == "${case_spec##*:}" ]] || exit 1
+    [[ "$(cat "$trace")" == "$expected" ]] || exit 2
+done
+flush_dns_cache() { return 4; }
+execute_optimization network_optimization
+[[ "$(optimize_outcome_count skipped)" == 1 ]] || exit 3
+[[ "$(optimize_outcome_count failed)" == 0 ]] || exit 4
+EOF
+	[[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"macOS does not allow signaling mDNSResponder"* ]] || return 1
 	[[ "$output" != *"Failed to refresh DNS cache"* ]]
 }
 
@@ -909,7 +1017,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-PLIST="$HOME/Library/Preferences/com.apple.spotlight.plist"
+PLIST="$HOME/Library/Preferences/com.apple.Spotlight.plist"
 mkdir -p "$(dirname "$PLIST")"
 rm -f "$PLIST"
 /usr/libexec/PlistBuddy \
@@ -938,12 +1046,55 @@ EOF
 	[[ "$output" != *"com.lm.william.TwinklingCard"* ]]
 }
 
+@test "opt_prune_spotlight_orphan_rules keeps Spotlight's own switches (#1878)" {
+	# Custom.relatedContents is the Show Related Content switch. It passes the
+	# reverse-DNS shape, so the resolver used to call it a missing app and the
+	# switch came back on after every optimize.
+	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+PLIST="$HOME/Library/Preferences/com.apple.Spotlight.plist"
+mkdir -p "$(dirname "$PLIST")"
+rm -f "$PLIST"
+/usr/libexec/PlistBuddy \
+    -c "Add :EnabledPreferenceRules array" \
+    -c "Add :EnabledPreferenceRules:0 string Custom.relatedContents" \
+    -c "Add :EnabledPreferenceRules:1 string MENU_WEBSEARCH.enabled" \
+    -c "Add :EnabledPreferenceRules:2 string com.gone.App" \
+    "$PLIST" >/dev/null 2>&1
+defaults() {
+    case "$1" in
+        read) return 0 ;;
+        write | delete) echo "DEFAULTS: $*" ;;
+    esac
+}
+bundle_has_installed_app() {
+    echo "RESOLVED: $1"
+    return 1
+}
+execute_optimization spotlight_orphan_rules_cleanup
+EOF
+
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+	# The positive control: a real orphan is still removed.
+	[[ "$output" == *"Removed 1 orphan"* ]] || { echo "$output"; return 1; }
+	[[ "$output" == *"RESOLVED: com.gone.App"* ]] || return 1
+	[[ "$output" != *"RESOLVED: Custom.relatedContents"* ]] || return 1
+	[[ "$output" != *"RESOLVED: MENU_WEBSEARCH.enabled"* ]] || return 1
+	local written
+	written=$(printf '%s\n' "$output" | grep 'DEFAULTS: write')
+	[[ "$written" == *"Custom.relatedContents"* ]] || { echo "$output"; return 1; }
+	[[ "$written" == *"MENU_WEBSEARCH.enabled"* ]] || return 1
+	[[ "$written" != *"com.gone.App"* ]]
+}
+
 @test "opt_prune_spotlight_orphan_rules dry-run reports but does not write" {
 	run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_DRY_RUN=1 /bin/bash --noprofile --norc <<'EOF'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-PLIST="$HOME/Library/Preferences/com.apple.spotlight.plist"
+PLIST="$HOME/Library/Preferences/com.apple.Spotlight.plist"
 mkdir -p "$(dirname "$PLIST")"
 rm -f "$PLIST"
 /usr/libexec/PlistBuddy \
@@ -972,7 +1123,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-PLIST="$HOME/Library/Preferences/com.apple.spotlight.plist"
+PLIST="$HOME/Library/Preferences/com.apple.Spotlight.plist"
 mkdir -p "$(dirname "$PLIST")"
 rm -f "$PLIST"
 /usr/libexec/PlistBuddy \
@@ -1001,7 +1152,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-PLIST="$HOME/Library/Preferences/com.apple.spotlight.plist"
+PLIST="$HOME/Library/Preferences/com.apple.Spotlight.plist"
 mkdir -p "$(dirname "$PLIST")"
 rm -f "$PLIST"
 /usr/libexec/PlistBuddy \
@@ -1031,7 +1182,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-PLIST="$HOME/Library/Preferences/com.apple.spotlight.plist"
+PLIST="$HOME/Library/Preferences/com.apple.Spotlight.plist"
 mkdir -p "${PLIST%/*}"
 printf '%s' '<plist version="1.0"><dict><key>EnabledPreferenceRules</key><array><string>com.missing.App</string><string>com.apple.Safari</string></array></dict></plist>' > "$PLIST"
 defaults() { case "$1" in read) return 0;; *) echo "UNEXPECTED_WRITE $*";; esac; }
@@ -1056,7 +1207,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/optimize/tasks.sh"
-PLIST="$HOME/Library/Preferences/com.apple.spotlight.plist"
+PLIST="$HOME/Library/Preferences/com.apple.Spotlight.plist"
 mkdir -p "${PLIST%/*}"
 printf '%s' '<plist version="1.0"><dict><key>EnabledPreferenceRules</key><array><string>com.missing.App</string><dict><key>protected</key><true/></dict></array></dict></plist>' > "$PLIST"
 defaults() { case "$1" in read) return 0;; *) echo "UNEXPECTED_WRITE $*";; esac; }
@@ -1065,6 +1216,40 @@ execute_optimization spotlight_orphan_rules_cleanup
 EOF
     [ "$status" -eq 0 ]
     [[ "$output" != *"UNEXPECTED_WRITE"* ]] || return 1
+}
+
+@test "Spotlight rules are read and written in the domain Spotlight itself uses" {
+	# cfprefsd keys domains by exact string: while Spotlight holds
+	# com.apple.Spotlight, com.apple.spotlight reads no rules and a write to it
+	# never reaches Spotlight, even on a case-insensitive volume.
+	for keep in some none; do
+		run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" KEEP="$keep" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/optimize/tasks.sh"
+PLIST="$HOME/Library/Preferences/com.apple.Spotlight.plist"
+mkdir -p "${PLIST%/*}"
+rm -f "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :EnabledPreferenceRules array" "$PLIST" >/dev/null 2>&1
+[[ "$KEEP" == none ]] || /usr/libexec/PlistBuddy -c "Add :EnabledPreferenceRules:0 string System.iphoneApps" "$PLIST" >/dev/null 2>&1
+/usr/libexec/PlistBuddy -c "Add :EnabledPreferenceRules: string com.gone.App" "$PLIST" >/dev/null 2>&1
+: > "$HOME/defaults-calls"
+# Recorded in a file: the read's output goes to /dev/null.
+defaults() { echo "DEFAULTS_DOMAIN: $1 $2" >> "$HOME/defaults-calls"; }
+bundle_has_installed_app() { return 1; }
+execute_optimization spotlight_orphan_rules_cleanup
+cat "$HOME/defaults-calls"
+EOF
+		[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+		[[ "$output" == *"Removed 1 orphan"* ]] || { echo "$output"; return 1; }
+		[[ "$output" == *"DEFAULTS_DOMAIN: read com.apple.Spotlight"* ]] || { echo "$output"; return 1; }
+		if [[ "$keep" == none ]]; then
+			[[ "$output" == *"DEFAULTS_DOMAIN: delete com.apple.Spotlight"* ]] || { echo "$output"; return 1; }
+		else
+			[[ "$output" == *"DEFAULTS_DOMAIN: write com.apple.Spotlight"* ]] || { echo "$output"; return 1; }
+		fi
+		[[ "$output" != *"com.apple.spotlight"* ]] || { echo "$output"; return 1; }
+	done
 }
 
 @test "opt_spotlight_index_optimize reports optimal when probes are fast" {

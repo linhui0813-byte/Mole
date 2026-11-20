@@ -1,6 +1,8 @@
 ---
 name: bugs
 description: "Mole incident catalog for cleanup safety, bounded probes, cancellation, dry-run parity, and actionable gates. Use for a Mole safety-sensitive diff; not for docs, release notes, or generic review."
+metadata:
+  internal: true
 ---
 
 # Mole bug patterns

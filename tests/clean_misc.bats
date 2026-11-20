@@ -22,6 +22,7 @@ set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 source "$PROJECT_ROOT/lib/clean/user.sh"
 stop_section_spinner() { :; }
+pgrep() { return 1; }
 safe_clean() { echo "$2"; }
 clean_cloud_storage
 EOF
@@ -133,6 +134,36 @@ EOF
     [ "$(< "$HOME/tart-args")" = "prune --entries caches --older-than 30" ] || return 1
     [[ "$output" == *"Tart caches · pruned"* ]] || return 1
     [[ "$output" != *"--entries vms"* ]] || return 1
+}
+
+@test "clean_tart_caches adds the reclaimed bytes to the run totals (#2045)" {
+    rm -rf "$HOME/.tart" "$HOME/tart-payload"
+    mkdir -p "$HOME/.tart/cache/OCIs"
+    : > "$HOME/tart-payload"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+debug_log() { :; }
+pgrep() { return 1; }
+is_path_whitelisted() { return 1; }
+get_path_size_kb() { [[ -e "$HOME/tart-payload" ]] && echo 4096 || echo 1024; }
+run_with_timeout() { shift; "$@"; }
+tart() { rm -f "$HOME/tart-payload"; }
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+clean_tart_caches
+printf 'TOTALS=%s:%s:%s\n' "$files_cleaned" "$total_size_cleaned" "$total_items"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Tart caches · pruned"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"TOTALS=0:3072:1"* ]] || { echo "$output"; return 1; }
 }
 
 @test "clean_tart_caches stops when the native prune is interrupted" {
@@ -335,6 +366,74 @@ EOF
 
     [ "$status" -eq 0 ]
     [ -z "$output" ] || return 1
+}
+
+@test "clean_tart_caches tolerates non-signal size failures before and after prune" {
+    local phase size_rc case_home want_timeouts
+    for size_rc in 1 124 130; do
+        for phase in dry pre post; do
+            case_home="$BATS_TEST_TMPDIR/tart-$phase-$size_rc"
+            mkdir -p "$case_home/.tart/cache/OCIs"
+
+            run env HOME="$case_home" PROJECT_ROOT="$PROJECT_ROOT" PHASE="$phase" SIZE_RC="$size_rc" \
+                MOLE_CURRENT_COMMAND=clean MOLE_CLEAN_CANCEL_STATUS=0 MOLE_CLEAN_SIZING_TIMEOUTS=0 \
+                /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+if [[ "$PHASE" == "dry" ]]; then
+    DRY_RUN=true
+else
+    DRY_RUN=false
+fi
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+debug_log() { :; }
+pgrep() { return 1; }
+is_path_whitelisted() { return 1; }
+bytes_to_human() { echo "4MB"; }
+run_with_timeout() { shift; "$@"; }
+tart() { : > "$HOME/tart-called"; return 0; }
+get_path_size_kb() {
+    if [[ "$PHASE" == "post" && ! -e "$HOME/tart-called" ]]; then
+        echo 4096
+        return 0
+    fi
+    return "$SIZE_RC"
+}
+rc=0
+clean_tart_caches || rc=$?
+printf 'RC=%s CANCEL=%s TIMEOUTS=%s\n' "$rc" "${MOLE_CLEAN_CANCEL_STATUS:-0}" "${MOLE_CLEAN_SIZING_TIMEOUTS:-0}"
+EOF
+
+            [ "$status" -eq 0 ] || { echo "$phase/$size_rc: $output"; return 1; }
+            if [[ "$size_rc" -eq 130 ]]; then
+                [[ "$output" == *"RC=130 CANCEL=130"* ]] || { echo "$output"; return 1; }
+                if [[ "$phase" != "post" ]]; then
+                    [ ! -e "$case_home/tart-called" ] || return 1
+                else
+                    [ -e "$case_home/tart-called" ] || return 1
+                    [[ "$output" == *"Tart caches · pruned"* ]] || { echo "$output"; return 1; }
+                fi
+            else
+                want_timeouts=0
+                if [[ "$size_rc" -eq 124 ]]; then
+                    want_timeouts=1
+                fi
+                [[ "$output" == *"RC=0 CANCEL=0 TIMEOUTS=$want_timeouts"* ]] || { echo "$output"; return 1; }
+                if [[ "$phase" == "dry" ]]; then
+                    [[ "$output" == *"would prune items older than 30 days"* ]] || { echo "$output"; return 1; }
+                    [[ "$output" != *"size unknown"* ]] || { echo "$output"; return 1; }
+                    [ ! -e "$case_home/tart-called" ] || return 1
+                else
+                    [ -e "$case_home/tart-called" ] || return 1
+                    [[ "$output" == *"Tart caches · pruned"* ]] || { echo "$output"; return 1; }
+                    [[ "$output" != *"reclaimed"* ]] || { echo "$output"; return 1; }
+                fi
+            fi
+        done
+    done
 }
 
 @test "clean_note_apps calls expected caches" {

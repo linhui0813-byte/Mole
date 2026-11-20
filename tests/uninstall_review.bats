@@ -367,11 +367,51 @@ SH
     [[ "$output" == *", including personal data"* ]] || { echo "$output"; return 1; }
 }
 
+@test "--with-data holds back CrossOver, Whisky and OpenEmu game libraries" {
+    run env HOME="$HOME/with-data-games" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'SH'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/ui/menu_paginated.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+bottles="$HOME/Library/Application Support/CrossOver"
+whisky="$HOME/Library/Containers/com.isaacmarovitz.Whisky"
+roms="$HOME/Library/Application Support/OpenEmu"
+prefs="$HOME/Library/Preferences/com.codeweavers.CrossOver.plist"
+app="$HOME/Applications/CrossOver.app"
+mkdir -p "$bottles/Bottles/Steam" "$whisky/Bottles" "$roms/Game Library" "$app" "$HOME/Library/Preferences"
+touch "$prefs"
+encoded=$(printf '%s\n' "$bottles" "$whisky" "$roms" "$prefs" | base64 | tr -d '\n')
+app_details=("CrossOver|$app|com.codeweavers.CrossOver|12|$encoded||true|false|false|||||none||||")
+running_apps=() sudo_apps=() brew_cask_apps=() leftover_notes=()
+total_estimated_size=12
+get_path_size_kb() { printf '10\n'; }
+calculate_total_size() { if [[ -n "$1" ]]; then printf '1\n'; else printf '0\n'; fi; }
+drain_pending_input() { :; }
+paginated_multi_select() { return 9; }
+MOLE_UNINSTALL_WITH_DATA=1 MOLE_DRY_RUN=1 MOLE_TEST_MODE=1 _batch_preview_and_confirm <<< ''
+IFS='|' read -r _ _ _ _ result _ <<< "${app_details[0]}"
+files=$(decode_file_list "$result" CrossOver)
+[[ "$files" == *"$prefs"* ]] || exit 1
+[[ "$files" != *"$bottles"* ]] || exit 1
+[[ "$files" != *"$whisky"* ]] || exit 1
+[[ "$files" != *"$roms"* ]] || exit 1
+SH
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    local kept="${output##*Personal data kept:}"
+    [[ "$kept" == *"CrossOver"* && "$kept" == *"Whisky"* && "$kept" == *"OpenEmu"* ]] || { echo "$output"; return 1; }
+}
+
 run_non_tty_confirmation() {
-    local input_mode="$1"
-    local out="$HOME/no-tty-$input_mode.out"
-    if ! env -u MOLE_TEST_NO_AUTH -u MOLE_TEST_MODE HOME="$HOME/no-tty-$input_mode" \
-        PROJECT_ROOT="$PROJECT_ROOT" INPUT_MODE="$input_mode" MOLE_DRY_RUN=1 \
+    local input_mode="$1" dry_run="${2:-0}" expected_rc=3 expected_text='interactive terminal'
+    if [[ "$dry_run" == 1 ]]; then
+        expected_rc=4
+        expected_text='Dry run complete'
+    fi
+    local out="$HOME/no-tty-$input_mode-$dry_run.out"
+    # No sudo or Homebrew apps are selected, so the real-mode confirmation
+    # path cannot reach a password prompt even when the gate is broken.
+    if ! env -u MOLE_TEST_NO_AUTH -u MOLE_TEST_MODE HOME="$HOME/no-tty-$input_mode-$dry_run" \
+        PROJECT_ROOT="$PROJECT_ROOT" INPUT_MODE="$input_mode" MOLE_DRY_RUN="$dry_run" EXPECTED_RC="$expected_rc" \
         /bin/bash --noprofile --norc > "$out" 2>&1 <<'SH'
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
@@ -392,14 +432,14 @@ else
     printf 'n\n' | _batch_preview_and_confirm || rc=$?
 fi
 printf 'RC=%s\n' "$rc"
-[[ $rc -eq 3 ]] || exit 1
+[[ $rc -eq $EXPECTED_RC ]] || exit 1
 [[ -d "$app" ]] || exit 1
 SH
     then
         cat "$out"
         return 1
     fi
-    grep -Fq 'interactive terminal' "$out" || { cat "$out"; return 1; }
+    grep -Fq "$expected_text" "$out" || { cat "$out"; return 1; }
 }
 
 @test "real uninstall preview refuses /dev/null without a terminal" {
@@ -408,4 +448,122 @@ SH
 
 @test "real uninstall preview refuses a piped n without a terminal" {
     run_non_tty_confirmation piped
+}
+
+@test "dry-run uninstall preview without a terminal ends cleanly after the plan" {
+    run_non_tty_confirmation null 1
+    run_non_tty_confirmation piped 1
+}
+
+@test "with-data emulator holdbacks stay selectable and ordinary data stays selected" {
+    run env HOME="$HOME/emulator-holdbacks" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'SH'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+for name in Dolphin PCSX2 RetroArch PrismLauncher Minecraft Citra Cemu Ryujinx PPSSPP RPCS3 MultiMC ATLauncher; do
+    path="$HOME/Library/Application Support/$name"
+    mkdir -p "$path"
+    found=$(find_app_files "org.example.$name" "$name")
+    grep -Fx "$path" <<< "$found" || exit 1
+    _uninstall_data_preselect_holdback "$path" || exit 1
+    _uninstall_data_preselect_holdback "$path/saves" || exit 1
+    if _uninstall_data_preselect_holdback "$path-backup"; then exit 1; fi
+done
+if _uninstall_data_preselect_holdback "$HOME/Library/Application Support/ExampleChat"; then exit 1; fi
+files=$(printf '%s\n' "$HOME/Library/Application Support/PCSX2" "$HOME/Library/Application Support/ExampleChat")
+encoded=$(printf '%s' "$files" | base64 | tr -d '\n')
+_review_original_details=("PCSX2|$HOME/Applications/PCSX2.app|net.pcsx2.PCSX2|1|$encoded|")
+_review_personal_paths=() _review_selected_paths=() _review_auto_files=() _review_personal_files=() _review_app_sizes=()
+calculate_total_size() { printf '1\n'; }
+MOLE_UNINSTALL_WITH_DATA=1 _uninstall_prepare_data_review
+[[ "${_review_personal_paths[*]}" == *PCSX2* ]] || exit 1
+[[ "${_review_selected_paths[*]}" != *PCSX2* ]] || exit 1
+[[ "${_review_selected_paths[*]}" == *ExampleChat* ]] || exit 1
+_review_selected_paths+=("$HOME/Library/Application Support/PCSX2")
+_uninstall_apply_data_selection
+[[ "$(decode_file_list "$(cut -d '|' -f 5 <<< "${app_details[0]}")" PCSX2)" == *PCSX2* ]] || exit 1
+SH
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "--with-data holds back UTM and VirtualBuddy virtual machine libraries" {
+    run env HOME="$HOME/vm-holdbacks" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'SH'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+utm="$HOME/Library/Containers/com.utmapp.UTM"
+buddy="$HOME/Library/Application Support/VirtualBuddy"
+mkdir -p "$utm/Data/Documents/Linux.utm" "$buddy/Linux.vbvm" "$HOME/Library/Application Support/ExampleChat"
+# Both are rows find_app_files really emits for these apps.
+grep -Fx "$utm" <<< "$(find_app_files com.utmapp.UTM UTM)" || exit 1
+grep -Fx "$buddy" <<< "$(find_app_files codes.rambo.VirtualBuddy VirtualBuddy)" || exit 1
+for path in "$utm" "$utm/Data/Documents/Linux.utm" "$buddy" "$buddy/Linux.vbvm"; do
+    _uninstall_data_preselect_holdback "$path" || { echo "selected: $path"; exit 1; }
+done
+if _uninstall_data_preselect_holdback "$utm-backup"; then exit 1; fi
+if _uninstall_data_preselect_holdback "$buddy-backup"; then exit 1; fi
+files=$(printf '%s\n' "$utm" "$HOME/Library/Application Support/ExampleChat")
+encoded=$(printf '%s' "$files" | base64 | tr -d '\n')
+_review_original_details=("UTM|$HOME/Applications/UTM.app|com.utmapp.UTM|1|$encoded|")
+_review_personal_paths=() _review_selected_paths=() _review_auto_files=() _review_personal_files=() _review_app_sizes=()
+calculate_total_size() { printf '1\n'; }
+MOLE_UNINSTALL_WITH_DATA=1 _uninstall_prepare_data_review
+[[ "${_review_personal_paths[*]}" == *com.utmapp.UTM* ]] || exit 1
+[[ "${_review_selected_paths[*]}" != *com.utmapp.UTM* ]] || exit 1
+[[ "${_review_selected_paths[*]}" == *ExampleChat* ]] || exit 1
+SH
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "without Full Disk Access, other apps' container rows are listed unmeasured" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/uninstall/batch.sh"
+stub="$HOME/du-stub"; log="$HOME/du.log"
+rm -rf "$stub" "$log"; mkdir -p "$stub"
+cat > "$stub/du" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$log"
+printf '8\t%s\n' "\${@: -1}"
+STUB
+chmod +x "$stub/du"
+PATH="$stub:$PATH"
+container="$HOME/Library/Containers/com.example.review"
+group="$HOME/Library/Group Containers/group.example.review"
+support="$HOME/Library/Application Support/ExampleReview"
+mkdir -p "$container/Data" "$group/Data" "$support"
+files=$(printf '%s\n%s\n%s' "$container" "$group" "$support")
+
+MOLE_HAS_FDA=0
+[[ "$(format_uninstall_preview_path "$container")" != *", "* ]] || exit 1
+[[ "$(format_uninstall_preview_path "$group")" != *", "* ]] || exit 2
+[[ "$(calculate_total_size "$files")" == 8 ]] || exit 3
+[[ "$(format_uninstall_preview_path "$support")" == *", "* ]] || exit 4
+if grep -F -e "Containers" "$log"; then exit 5; fi
+
+: > "$log"; MOLE_HAS_FDA=unknown
+[[ "$(calculate_total_size "$files")" == 8 ]] || exit 6
+if grep -F -e "Containers" "$log"; then exit 7; fi
+
+# Through the real sink: the row still goes, its log size reads unknown, and
+# only an uninstall skips the probe.
+export MOLE_DELETE_LOG="$HOME/deletions.log"
+: > "$log"; : > "$MOLE_DELETE_LOG"; MOLE_HAS_FDA=0
+MOLE_UNINSTALL_MODE=1 MOLE_DELETE_MODE=permanent mole_delete "$container" false || exit 8
+[[ ! -e "$container" ]] || exit 9
+if grep -F -e "Containers" "$log"; then exit 10; fi
+grep -F "$container" "$MOLE_DELETE_LOG" | grep -qF unknown || exit 15
+MOLE_DELETE_MODE=permanent mole_delete "$group" false || exit 11
+[[ ! -e "$group" ]] || exit 16
+grep -qF "Group Containers" "$log" || exit 12
+mkdir -p "$container/Data" "$group/Data"
+
+: > "$log"; MOLE_HAS_FDA=1
+[[ "$(calculate_total_size "$files")" == 24 ]] || exit 13
+[[ "$(grep -c "Containers" "$log")" == 2 ]] || exit 14
+echo ok
+SCRIPT
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"ok"* ]]
 }

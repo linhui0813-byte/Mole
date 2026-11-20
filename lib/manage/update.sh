@@ -456,6 +456,7 @@ _update_print_verified_success() {
         printf '\n%s\n\n' "${GREEN}${ICON_SUCCESS}${NC} Updated to ${success_label}"
     else
         printf '\n%s\n\n' "${GREEN}${ICON_SUCCESS}${NC} Updated to ${success_label}, ${_MOLE_UPDATE_VERIFIED_VERSION}"
+        mole_print_release_highlights "${_MOLE_UPDATE_VERIFIED_VERSION:-}"
     fi
 }
 
@@ -537,9 +538,53 @@ _update_print_manual_reinstall() {
 # grep finding no match) would kill the whole command before the caller's own
 # fallback and error message could run. `mo update` exited 1 with no output at
 # all that way. The trailing `|| true` is what keeps the failure recoverable.
+# curl reads only proxy environment variables, never the macOS system proxy,
+# so a user who turned on a proxy app's system proxy mode and cannot reach
+# GitHub directly never saw an update notice. Background notices read that
+# proxy when the environment names none. Foreground `mo update` keeps the
+# environment as it is, since its downloads and install.sh would not follow.
+MOLE_SCUTIL_BIN="/usr/sbin/scutil"
+
+mole_system_proxy_url() {
+    [[ -x "$MOLE_SCUTIL_BIN" ]] || return 0
+    local key value https_host="" https_port="" http_host="" http_port=""
+    local socks_host="" socks_port="" https_on=0 http_on=0 socks_on=0
+    while IFS=' :' read -r key value; do
+        case "$key" in
+            HTTPSEnable) https_on="$value" ;;
+            HTTPSProxy) https_host="$value" ;;
+            HTTPSPort) https_port="$value" ;;
+            HTTPEnable) http_on="$value" ;;
+            HTTPProxy) http_host="$value" ;;
+            HTTPPort) http_port="$value" ;;
+            SOCKSEnable) socks_on="$value" ;;
+            SOCKSProxy) socks_host="$value" ;;
+            SOCKSPort) socks_port="$value" ;;
+        esac
+    done < <("$MOLE_SCUTIL_BIN" --proxy 2> /dev/null || true)
+    local scheme="" host="" port=""
+    if [[ "$https_on" == 1 ]]; then
+        scheme=http host="$https_host" port="$https_port"
+    elif [[ "$http_on" == 1 ]]; then
+        scheme=http host="$http_host" port="$http_port"
+    elif [[ "$socks_on" == 1 ]]; then
+        scheme=socks5h host="$socks_host" port="$socks_port"
+    fi
+    [[ "$host" =~ ^[A-Za-z0-9._-]+$ && "$port" =~ ^[0-9]{1,5}$ ]] || return 0
+    printf '%s://%s:%s\n' "$scheme" "$host" "$port"
+}
+
+mole_use_system_proxy_if_unset() {
+    [[ -n "${https_proxy:-}${HTTPS_PROXY:-}${all_proxy:-}${ALL_PROXY:-}" ]] && return 0
+    local proxy
+    proxy=$(mole_system_proxy_url)
+    [[ -n "$proxy" ]] || return 0
+    export https_proxy="$proxy"
+}
+
 get_latest_version() {
     local location version
-    location=$(curl -fsSLI --connect-timeout 2 --max-time 3 -o /dev/null -w '%{url_effective}' \
+    location=$(curl -fsSLI --connect-timeout "${MOLE_LOOKUP_CONNECT_TIMEOUT:-2}" --max-time "${MOLE_LOOKUP_MAX_TIME:-3}" -o /dev/null -w '%{url_effective}' \
         "https://github.com/tw93/Mole/releases/latest" 2> /dev/null || true)
     case "$location" in
         https://github.com/tw93/[Mm]ole/releases/tag/[Vv]*) version="${location##*/}" ;;
@@ -552,7 +597,7 @@ get_latest_version() {
 
 get_latest_version_from_github() {
     local version
-    version=$(curl -fsSL --connect-timeout 2 --max-time 3 \
+    version=$(curl -fsSL --connect-timeout "${MOLE_LOOKUP_CONNECT_TIMEOUT:-2}" --max-time "${MOLE_LOOKUP_MAX_TIME:-3}" \
         "https://api.github.com/repos/tw93/mole/releases/latest" 2> /dev/null |
         /usr/bin/plutil -extract tag_name raw -o - - 2> /dev/null || true)
     version="${version#[Vv]}"
@@ -560,8 +605,22 @@ get_latest_version_from_github() {
     return 0
 }
 
+# /usr/bin/git is a stub until the Command Line Tools are installed, and
+# running it opens their installer. Plain assignments so a test can point both
+# at fixtures after sourcing.
+MOLE_SYSTEM_GIT_STUB="/usr/bin/git"
+MOLE_XCODE_SELECT_BIN="/usr/bin/xcode-select"
+
+# Succeeds when a git lookup cannot pop up the Command Line Tools installer.
+mole_git_runs_quietly() {
+    local git_bin
+    git_bin=$(command -v git 2> /dev/null) || return 1
+    [[ "$git_bin" == "$MOLE_SYSTEM_GIT_STUB" ]] || return 0
+    "$MOLE_XCODE_SELECT_BIN" -p > /dev/null 2>&1
+}
+
 get_latest_version_from_git() {
-    if ! command -v git > /dev/null 2>&1; then
+    if ! mole_git_runs_quietly; then
         return 0
     fi
     local response tag version=""
@@ -642,7 +701,7 @@ brew_mole_formula_installed() {
 
 get_homebrew_latest_version() {
     local version
-    version=$(curl -fsSL --connect-timeout 2 --max-time 3 \
+    version=$(curl -fsSL --connect-timeout "${MOLE_LOOKUP_CONNECT_TIMEOUT:-2}" --max-time "${MOLE_LOOKUP_MAX_TIME:-3}" \
         "https://formulae.brew.sh/api/formula/mole.json" 2> /dev/null |
         /usr/bin/plutil -extract versions.stable raw -o - - 2> /dev/null || true)
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && printf '%s\n' "$version"
@@ -791,14 +850,15 @@ get_latest_commit_from_github() {
     local response=""
     local sha=""
     if command -v curl > /dev/null 2>&1; then
-        response=$(curl -fsSL --connect-timeout 2 --max-time 3 \
+        response=$(curl -fsSL --connect-timeout "${MOLE_LOOKUP_CONNECT_TIMEOUT:-2}" --max-time "${MOLE_LOOKUP_MAX_TIME:-3}" \
             "https://api.github.com/repos/tw93/mole/commits/main" 2> /dev/null || true)
     elif command -v wget > /dev/null 2>&1; then
-        response=$(wget --timeout=3 --tries=1 -qO- \
+        response=$(wget --timeout="${MOLE_LOOKUP_MAX_TIME:-3}" --tries=1 -qO- \
             "https://api.github.com/repos/tw93/mole/commits/main" 2> /dev/null || true)
     fi
-    sha=$(printf '%s\n' "$response" |
-        grep '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]\{40\}"' | head -1 | sed -E 's/.*"sha"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/') || sha=""
+    # Read the whole response: head can SIGPIPE a large commit's file list,
+    # causing pipefail to discard a valid SHA before the fallback decision.
+    sha=$(/usr/bin/plutil -extract sha raw -o - - <<< "$response" 2> /dev/null) || sha=""
     if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
         printf '%s\n' "$sha"
         return 0
@@ -813,7 +873,7 @@ get_latest_commit_from_github() {
 
     # The unauthenticated API can be rate-limited even while ordinary GitHub
     # access works. Keep the fallback bounded and accept only main's exact SHA.
-    if command -v git > /dev/null 2>&1; then
+    if mole_git_runs_quietly; then
         # Ignore ambient credential helpers and URL rewrites: this public,
         # read-only probe must resolve the literal GitHub remote or fail.
         if response=$(run_with_timeout "$MOLE_TIMEOUT_MEDIUM_PROBE_SEC" \
@@ -935,6 +995,10 @@ check_for_updates() {
     (
         (
             local latest="" installed="${VERSION}" message=""
+            # Nothing waits on this lookup, so slow networks get a longer
+            # window than the foreground default.
+            local MOLE_LOOKUP_CONNECT_TIMEOUT=4 MOLE_LOOKUP_MAX_TIME=6
+            mole_use_system_proxy_if_unset
             if [[ "$channel" == nightly ]]; then
                 installed=$(get_install_commit)
                 latest=$(get_latest_commit_from_github api-only)
@@ -1172,7 +1236,6 @@ show_help() {
 update_mole() (
     local force_update="${1:-false}"
     local nightly_update="${2:-false}"
-    local update_interrupted=false
     local sudo_keepalive_pid=""
     local UPDATE_LOCK_CONTROL=""
     local UPDATE_LOCK_HOLDER_PID=""
@@ -1186,7 +1249,7 @@ update_mole() (
                 "$UPDATE_LOCK_CONTROL" "$UPDATE_LOCK_HOLDER_PID" "$UPDATE_LOCK_ACQUIRED"
         fi
     }
-    trap '_update_cleanup; update_interrupted=true; echo ""; exit 130' INT TERM
+    trap '_update_cleanup; echo ""; exit 130' INT TERM
     trap '_update_cleanup' EXIT
 
     if is_nix_install; then
@@ -1441,10 +1504,12 @@ update_mole() (
             fi
             printf '%s\n\n' "${GREEN}${ICON_SUCCESS}${NC} Updated to ${success_label}, ${new_version:-unknown}"
             log_operation "update" "REBUILT" "${mole_path:-mole}" "updated to ${new_version:-unknown}"
+            [[ "$nightly_update" == "true" ]] || mole_print_release_highlights "${new_version:-}"
         else
             printf '\n'
             if printf '%s\n' "$output" | grep -q "Updated to latest version"; then
                 log_operation "update" "REBUILT" "${mole_path:-mole}" "updated to ${fallback_version:-unknown}"
+                [[ "$nightly_update" == "true" ]] || mole_print_release_highlights "${fallback_version:-}"
             fi
         fi
     }

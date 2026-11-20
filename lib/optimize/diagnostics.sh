@@ -426,7 +426,7 @@ run_optimize_diagnostics() {
             echo -e "  ${GRAY}${ICON_LIST}${NC} Gatekeeper status: ${spctl_status}"
         fi
         if [[ "$managed_count" -gt 0 && "$managed_count" == "$coresim_count" && "$detach_count" -eq 0 ]]; then
-            echo -e "  ${GRAY}${ICON_INFO}${NC} Only system-managed CoreSimulator images are mounted, informational only, not a detach target"
+            echo -e "  ${GRAY}${ICON_ADMIN}${NC} Only system-managed CoreSimulator images are mounted, informational only, not a detach target"
         fi
 
         opt_diag_offer_detach_candidates "$detach_candidates"
@@ -458,7 +458,7 @@ opt_diag_get_swapusage() {
         printf '%s\n' "$MOLE_OPTIMIZE_SWAPUSAGE"
         return 0
     fi
-    sysctl -n vm.swapusage 2> /dev/null || true
+    "$SYSCTL_CMD" -n vm.swapusage 2> /dev/null || true
 }
 
 opt_diag_get_mem_free_pct() {
@@ -603,8 +603,12 @@ opt_diag_idle_vm() {
 
     # Only claim it is idle if the owner agrees. A probe that cannot answer
     # must not produce a "safe to quit" recommendation.
+    # A remote Docker context answers for another machine's containers, so
+    # only a local engine's answer can speak for this VM (#1922).
+    # Its caller ignores the status like every sibling check, and Ctrl-C
+    # reaches Mole itself, so an interrupted probe just reads as not local.
     local running="" docker_output="" container_id
-    if command -v docker > /dev/null 2>&1; then
+    if mole_docker_endpoint_is_local; then
         if docker_output=$(run_with_timeout "$MOLE_TIMEOUT_SHORT_QUERY_SEC" docker ps -q 2> /dev/null); then
             running=0
             while IFS= read -r container_id; do

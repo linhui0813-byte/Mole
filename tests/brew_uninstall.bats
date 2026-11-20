@@ -26,6 +26,59 @@ setup() {
     mkdir -p "$HOME/Caskroom/test-app/1.2.3/TestApp.app"
 }
 
+@test "brew uninstall permits nested tty reads when GNU timeout is installed" {
+    if [[ "$(uname -s)" != "Darwin" || ! -x /usr/bin/expect || ! -x /usr/bin/perl ]]; then
+        skip "macOS expect/perl required"
+    fi
+    local timeout_bin
+    timeout_bin=$(command -v gtimeout || command -v timeout || true)
+    [[ -n "$timeout_bin" ]] || skip "GNU timeout required"
+
+    # shellcheck disable=SC2016 # The external brew stub expands its own arguments and input.
+    mole_test_fake_command brew '
+set -euo pipefail
+[[ "$*" == "uninstall --cask tty-probe" ]] || exit 97
+printf "READY\n"
+IFS= read -r value
+printf "READ:%s\n" "$value"
+'
+    run /usr/bin/expect "$PROJECT_ROOT/tests/timeout_tty_read.exp" \
+        "$PROJECT_ROOT" brew "$timeout_bin"
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"READ:typed-value"* ]] || return 1
+    [[ "$output" == *"BACKEND-RESTORED"* ]]
+}
+
+@test "brew uninstall preserves the non-tty timeout backend" {
+    export MOLE_TIMEOUT_CALLS="$BATS_TEST_TMPDIR/timeout-calls"
+    # shellcheck disable=SC2016 # The timeout stub records and executes its own arguments.
+    mole_test_fake_command gtimeout '
+printf "%s\n" "$*" >> "$MOLE_TIMEOUT_CALLS"
+shift
+exec "$@"
+'
+    mole_test_fake_command brew
+
+    run /bin/bash <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/timeout.sh"
+source "$PROJECT_ROOT/lib/uninstall/brew.sh"
+# The full runner may export a backend detected before this test's PATH stub.
+MO_TIMEOUT_BIN="$(command -v gtimeout)"
+debug_log() { :; }
+log_operation() { :; }
+is_brew_cask_installed() { return 1; }
+brew_uninstall_cask tty-probe "" nozap < /dev/null
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$(cat "$MOLE_TIMEOUT_CALLS")" == *"brew uninstall --cask tty-probe"* ]]
+}
+
 @test "get_brew_cask_name detects app in Caskroom (simulated)" {
     # Create fake Caskroom structure with symlink (modern Homebrew style)
     mkdir -p "$HOME/Caskroom/test-app/1.0.0"

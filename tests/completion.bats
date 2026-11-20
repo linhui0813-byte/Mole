@@ -250,3 +250,34 @@ RC
     # shellcheck disable=SC2016 # Assert literal shell configuration.
     grep -Fxq 'if output="$(mole completion zsh 2>/dev/null)"; then eval "$output"; fi' "$HOME/.zshrc" || return 1
 }
+
+@test "completion confirmation cancels on closed input (#1837)" {
+	run /bin/bash -c "SHELL=/bin/zsh \"$PROJECT_ROOT/bin/completion.sh\" </dev/null"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"Cancelled"* ]] || return 1
+	[ ! -f "$HOME/.zshrc" ]
+}
+
+@test "completion fish confirmation cancels on closed input (#1837)" {
+	run /bin/bash -c "SHELL=/bin/fish \"$PROJECT_ROOT/bin/completion.sh\" </dev/null"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"Cancelled"* ]] || return 1
+	[ ! -f "$HOME/.config/fish/completions/mole.fish" ]
+	[ ! -f "$HOME/.config/fish/completions/mo.fish" ]
+}
+
+@test "completion fish completes shell names only under completion subcommand" {
+	run "$PROJECT_ROOT/bin/completion.sh" fish
+	[ "$status" -eq 0 ] || { echo "$output"; return 1; }
+
+	local cmd shell_name expected
+	for cmd in mole mo; do
+		for shell_name in bash zsh fish; do
+			expected="complete -f -c $cmd -n \"__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish\" -a $shell_name -d \"generate $shell_name completion\""
+			[[ "$output" == *"$expected"* ]] || return 1
+		done
+	done
+
+	! grep -qE 'complete .* -n .* -n ' <<< "$output" || return 1
+	[[ "$output" != *"__fish_see_subcommand_path"* ]]
+}

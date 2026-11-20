@@ -25,6 +25,26 @@ setup() {
     [ "$result" = $'⠖\n⠲\n⠴\n⠦' ]
 }
 
+@test "format_spinner_message fits a CJK name by display width in both locales" {
+    local locale
+    for locale in C en_US.UTF-8; do
+        # shellcheck disable=SC2016  # the inner bash expands these
+        run env HOME="$HOME" LC_ALL="$locale" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc -c '
+            source "$PROJECT_ROOT/lib/core/common.sh"
+            tput() { echo 40; }
+            format_spinner_message "Removing 网易云音乐网易云音乐网易云音乐网易云音乐..."
+        '
+        [ "$status" -eq 0 ] || return 1
+        local msg="$output"
+        # 40 columns leave 32 for the message; a split character is invalid UTF-8.
+        printf '%s' "$msg" | /usr/bin/iconv -f UTF-8 -t UTF-8 > /dev/null || { echo "$locale split: $msg"; return 1; }
+        run python3 -I -c 'import sys, unicodedata; print(sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in sys.argv[1]))' "$msg"
+        [ "$status" -eq 0 ] || return 1
+        (( output <= 32 )) || { echo "$locale width $output: $msg"; return 1; }
+        [[ "$msg" == "Removing 网"*"..." ]] || { echo "$locale: $msg"; return 1; }
+    done
+}
+
 @test "detect_architecture maps current CPU to friendly label" {
     expected="Intel"
     if [[ "$(uname -m)" == "arm64" ]]; then
@@ -252,7 +272,7 @@ EOF
 set -euo pipefail
 source "$PROJECT_ROOT/lib/core/common.sh"
 pgrep() {
-    [[ "$1" == "-x" && "$2" == "xcodebuild" ]]
+    [[ "$1" == -*x && "|$2|" == *"|xcodebuild|"* ]]
 }
 xcode_build_tooling_process_state
 EOF
@@ -273,6 +293,26 @@ PATH=/nonexistent
 process_state=0
 xcode_build_tooling_process_state || process_state=$?
 [[ "$process_state" -eq 2 ]] || exit 3
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "Xcode and CoreSimulator process probes each run one pgrep" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+rm -f "$HOME/pgrep-calls"
+pgrep() { printf x >> "$HOME/pgrep-calls"; return 1; }
+calls() { wc -c < "$HOME/pgrep-calls" | tr -d ' '; }
+debug_log() { :; }
+process_state=0
+xcode_build_tooling_process_state || process_state=$?
+[[ "$process_state" -eq 1 && "$(calls)" -eq 1 ]] || { echo "xcode calls=$(calls) state=$process_state"; exit 1; }
+rm -f "$HOME/pgrep-calls"; process_state=0
+_coresimulator_cache_process_running || process_state=$?
+[[ "$process_state" -eq 1 && "$(calls)" -eq 1 ]] || { echo "simulator calls=$(calls) state=$process_state"; exit 1; }
 EOF
 
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -534,6 +574,36 @@ echo OK
 EOF
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
     [ "$output" = OK ]
+}
+
+@test "bytes_to_human never prints 1000 of a unit that has a next unit" {
+    output="$(
+        HOME="$HOME" /bin/bash --noprofile --norc << 'EOF'
+source "$PROJECT_ROOT/lib/core/common.sh"
+bytes_to_human 999499
+bytes_to_human 999500
+bytes_to_human 999999
+bytes_to_human 999949999
+bytes_to_human 999950000
+bytes_to_human 999999999
+bytes_to_human 1000000000
+bytes_to_human 1500000
+EOF
+    )"
+
+    bytes_lines=()
+    while IFS= read -r line; do
+        bytes_lines+=("$line")
+    done <<< "$output"
+
+    [ "${bytes_lines[0]}" = "999KB" ]
+    [ "${bytes_lines[1]}" = "1.0MB" ]
+    [ "${bytes_lines[2]}" = "1.0MB" ]
+    [ "${bytes_lines[3]}" = "999.9MB" ]
+    [ "${bytes_lines[4]}" = "1.00GB" ]
+    [ "${bytes_lines[5]}" = "1.00GB" ]
+    [ "${bytes_lines[6]}" = "1.00GB" ]
+    [ "${bytes_lines[7]}" = "1.5MB" ]
 }
 
 @test "bytes_to_human converts byte counts into readable units" {
@@ -829,6 +899,47 @@ EOF
     [ "$result" = "not-protected" ]
 }
 
+@test "protected bundle alternation matches exactly what each pattern matches alone" {
+    run env HOME="$HOME" /bin/bash --noprofile --norc <<'EOF2'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+patterns=("${SYSTEM_CRITICAL_BUNDLES[@]}" "${DATA_PROTECTED_BUNDLES[@]}")
+# An entry with | ( or ) would change the meaning of the @(a|b|...) alternation.
+for pattern in "${patterns[@]}"; do
+    [[ -n "$pattern" && "$pattern" != *[\|\(\)]* ]] || { echo "bad entry: $pattern"; exit 1; }
+done
+probes=("$HOME/Library/Caches/com.example.app" "plain" "日本語IME" "$HOME/Library/Caches/Écrivain/1Password/x")
+for pattern in "${patterns[@]}"; do
+    literal="${pattern//\*/X}"
+    probes+=("$literal" "/p/$literal/q" "${pattern//\*/}")
+done
+for probe in "${probes[@]}"; do
+    expected=1
+    for pattern in "${patterns[@]}"; do
+        # shellcheck disable=SC2053 # unquoted RHS is the glob under test
+        if [[ "$probe" == $pattern ]]; then expected=0; break; fi
+    done
+    actual=1
+    _mole_matches_protected_glob "$probe" "$_MOLE_CLEAN_PROTECTED_GLOB" && actual=0
+    [[ "$actual" == "$expected" ]] || { echo "mismatch: $probe"; exit 1; }
+done
+# A caller with nocasematch keeps its locale's case folding: U+212A, the
+# Kelvin sign, folds to k only in a UTF-8 locale, so org.<U+212A>eepassxc
+# still matches org.keepassxc.* as it did with the per-pattern loop.
+export LC_ALL=en_US.UTF-8
+kelvin_id=$(printf 'org.\xe2\x84\xaaeepassxc.any')
+shopt -s nocasematch
+should_protect_data "$kelvin_id" || { echo "nocasematch lost Unicode folding"; exit 1; }
+shopt -u nocasematch
+# The C locale used for the match stays inside the helper.
+should_protect_data "plain" || true
+[[ "$LC_ALL" == "en_US.UTF-8" ]] || { echo "caller locale changed"; exit 1; }
+echo ok
+EOF2
+    [ "$status" -eq 0 ]
+    [ "$output" = "ok" ]
+}
+
 # Regression: CUPS prefs have a bundle-ID-style name but no parent .app,
 # so the orphan sweep deleted them and users lost their default printer
 # and recent-printer list. See #731.
@@ -864,6 +975,35 @@ EOF
         "$HOME/.codex/logs_2.sqlite"; do
         result=$(HOME="$HOME" TARGET_PATH="$codex_state_path" /bin/bash --noprofile --norc -c 'source "$PROJECT_ROOT/lib/core/common.sh"; should_protect_path "$TARGET_PATH" && echo "protected" || echo "not-protected"')
         [ "$result" = "protected" ]
+    done
+}
+
+@test "should_protect_path protects Claude Code transcripts, file history and prompt history" {
+    for claude_state_path in \
+        "$HOME/.claude/projects" \
+        "$HOME/.claude/projects/-Users-me-app" \
+        "$HOME/.claude/projects/-Users-me-app/0b6c9f0e-1111-4222-8333-944455556666.jsonl" \
+        "$HOME/.claude/file-history" \
+        "$HOME/.claude/file-history/0b6c9f0e-1111-4222-8333-944455556666/1" \
+        "$HOME/.claude/history.jsonl" \
+        "$HOME/.claude" \
+        "$HOME/.Claude/projects/-Users-me-app" \
+        "$HOME/.CLAUDE/History.jsonl"; do
+        result=$(HOME="$HOME" TARGET_PATH="$claude_state_path" /bin/bash --noprofile --norc -c 'source "$PROJECT_ROOT/lib/core/common.sh"; should_protect_path "$TARGET_PATH" && echo "protected" || echo "not-protected"')
+        [ "$result" = "protected" ] || { echo "not protected: $claude_state_path"; return 1; }
+    done
+
+    # A HOME set with a trailing slash still names the same root.
+    local root_path="$HOME/.claude"
+    result=$(HOME="$HOME/" TARGET_PATH="$root_path" /bin/bash --noprofile --norc -c 'source "$PROJECT_ROOT/lib/core/common.sh"; should_protect_path "$TARGET_PATH" && echo "protected" || echo "not-protected"')
+    [ "$result" = "protected" ] || { echo "root not protected with HOME ending in /"; return 1; }
+
+    # A prefix sibling is not the transcript folder, and the root's other
+    # children (purge's worktree container) stay reachable.
+    local sibling_path
+    for sibling_path in "$HOME/.claude/projects-old" "$HOME/.claude/worktrees/feature"; do
+        result=$(HOME="$HOME" TARGET_PATH="$sibling_path" /bin/bash --noprofile --norc -c 'source "$PROJECT_ROOT/lib/core/common.sh"; should_protect_path "$TARGET_PATH" && echo "protected" || echo "not-protected"')
+        [ "$result" = "not-protected" ] || { echo "protected: $sibling_path"; return 1; }
     done
 }
 
@@ -1061,23 +1201,28 @@ EOF
 
     local raw="$HOME/spinner-progress.raw"
     # shellcheck disable=SC2016  # inner bash expands these from its environment
-    PROJECT_ROOT="$PROJECT_ROOT" HOME="$HOME" TERM=xterm-256color \
-        /usr/bin/script -q "$raw" /bin/bash --noprofile --norc -c '
+    # A loaded macos-26 runner drew only the first frame within a fixed 0.2s
+    # wait (capture: "0/10" once, then PID_STABLE), so wait for the redraw in
+    # the flushed capture instead of sleeping a guessed interval.
+    PROJECT_ROOT="$PROJECT_ROOT" HOME="$HOME" TERM=xterm-256color RAW="$raw" \
+        /usr/bin/script -q -F "$raw" /bin/bash --noprofile --norc -c '
             source "$PROJECT_ROOT/lib/core/common.sh"
             start_section_spinner "Scanning items... 0/10"
             pid_before="$INLINE_SPINNER_PID"
             last_tick=0
             update_progress_if_needed 5 10 last_tick 1
             pid_after="$INLINE_SPINNER_PID"
-            /bin/sleep 0.2
+            for _ in $(/usr/bin/seq 50); do
+                /usr/bin/grep -q "Scanning items... 5/10" "$RAW" 2> /dev/null && break
+                /bin/sleep 0.1
+            done
             stop_inline_spinner
             [[ "$pid_before" == "$pid_after" && -n "$pid_before" ]] && echo "PID_STABLE"
         ' < /dev/null > /dev/null 2>&1
 
     raw_content="$(cat "$raw")"
-    # This case failed once on a CI runner and could not be reproduced in
-    # about 70 local runs; print the PTY capture so the next failure explains
-    # itself instead of being retuned blind.
+    # Print the PTY capture so a failure explains itself instead of being
+    # retuned blind.
     [[ "$raw_content" == *"Scanning items... 5/10"* ]] || { cat -v "$raw"; return 1; }
     [[ "$raw_content" == *"PID_STABLE"* ]] || { cat -v "$raw"; return 1; }
 }
@@ -1204,6 +1349,12 @@ EOF
     run /bin/bash -c "export MOLE_BASE_LOADED=1; source '$PROJECT_ROOT/lib/core/ui.sh'; truncate_by_display_width '-n' 10; truncate_by_display_width '-e' 10"
     [ "$status" -eq 0 ]
     [ "$output" = $'-n\n-e' ]
+}
+
+@test "truncate_by_display_width counts ASCII as one column (#1918)" {
+    run /bin/bash -c "export MOLE_BASE_LOADED=1; source '$PROJECT_ROOT/lib/core/ui.sh'; truncate_by_display_width 'abcdefghijklmnop' 10; truncate_by_display_width '中文abcdefghij' 10"
+    [ "$status" -eq 0 ]
+    [ "$output" = $'abcdefg...\n中文abc...' ]
 }
 
 @test "read_key respects MOLE_READ_KEY_FORCE_CHAR" {
@@ -1355,6 +1506,64 @@ assert b'Cleaning fixture...' not in raw.split(b'Error:', 1)[1], raw
 PY
 }
 
+@test "loading Mole appends /usr/sbin and /sbin to a PATH without them" {
+    run env -i HOME="$HOME" PATH="/usr/bin:/bin" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/base.sh"
+echo "PATH=$PATH"
+command -v diskutil
+bash -c 'command -v lsof'
+EOF
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PATH=/usr/bin:/bin:/usr/sbin:/sbin"* ]] || return 1
+    [[ "$output" == *"/usr/sbin/diskutil"* ]] || return 1
+    [[ "$output" == *"/usr/sbin/lsof"* ]] || return 1
+
+    run env -i HOME="$HOME" PATH="/sbin:/usr/bin:/usr/sbin:/bin" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/base.sh"
+echo "PATH=$PATH"
+EOF
+    [ "$status" -eq 0 ]
+    [[ "$output" == "PATH=/sbin:/usr/bin:/usr/sbin:/bin" ]]
+}
+
+@test "sysctl never resolves through PATH (#1804)" {
+    # sysctl lives in /usr/sbin, which a shell PATH may leave out; the lookup
+    # then fails and every caller falls back silently. Shell calls go through
+    # $SYSCTL_CMD (or the literal /usr/sbin/sysctl), Go through the absolute path.
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+start='(^|[[:space:];(|&`"'"'"']|[$][(])'
+pattern="${start}sysctl[[:space:]]"
+for probe in '    n=$(sysctl -n hw.ncpu 2> /dev/null || echo 4)' '    sysctl -n vm.swapusage 2> /dev/null || true'; do
+    printf '%s\n' "$probe" | grep -qE "$pattern" || { echo "matcher missed: $probe"; exit 1; }
+done
+for allowed in '    n=$("$SYSCTL_CMD" -n hw.ncpu)' '    [[ "$(/usr/sbin/sysctl -n hw.optional.arm64)" == "1" ]]'; do
+    if printf '%s\n' "$allowed" | grep -qE "$pattern"; then
+        echo "matcher flagged: $allowed"
+        exit 1
+    fi
+done
+matched=$(find "$PROJECT_ROOT/lib" "$PROJECT_ROOT/bin" -name '*.sh' -print0 |
+    xargs -0 grep -nE "$pattern" "$PROJECT_ROOT/mole" "$PROJECT_ROOT/install.sh" |
+    grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+if [[ -n "$matched" ]]; then
+    echo "sysctl resolved through PATH: $matched"
+    exit 1
+fi
+go_matched=$(find "$PROJECT_ROOT/cmd" -name '*.go' ! -name '*_test.go' -print0 | xargs -0 grep -n '"sysctl"' || true)
+if [[ -n "$go_matched" ]]; then
+    echo "Go sysctl resolved through PATH: $go_matched"
+    exit 1
+fi
+echo "clean"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == "clean" ]]
+}
+
 @test "BSD-only stat, date, find and tr forms never resolve through PATH (#1196, #1752)" {
     # GNU coreutils earlier in PATH reads stat -f as file-system status and
     # date -r/-j differently, so these calls go through $STAT_BSD and
@@ -1396,4 +1605,103 @@ fi
 EOF
 
     [[ "$status" -eq 0 ]] || { echo "$output"; return 1; }
+}
+
+@test "has_full_disk_access reports denied when protected paths exist but cannot be read" {
+    mkdir -p "$HOME/Library/Mail/V10" "$HOME/Library/Messages"
+    : > "$HOME/Library/Messages/chat.db"
+    chmod 000 "$HOME/Library/Mail/V10" "$HOME/Library/Messages/chat.db"
+
+    run env HOME="$HOME" /bin/bash --noprofile --norc -c "
+source '$PROJECT_ROOT/lib/core/common.sh'
+unset MOLE_HAS_FDA
+rc=0
+has_full_disk_access || rc=\$?
+printf '%s:%s\n' \"\$rc\" \"\$MOLE_HAS_FDA\"
+"
+    chmod 755 "$HOME/Library/Mail/V10"
+    chmod 644 "$HOME/Library/Messages/chat.db"
+    rm -rf "$HOME/Library"
+
+    # stat succeeds on a TCC-protected path without Full Disk Access, so only
+    # listing a folder or opening a file proves the terminal can read it.
+    [ "$output" = "1:0" ]
+}
+
+@test "has_full_disk_access reports granted when a protected path can be read" {
+    mkdir -p "$HOME/Library/Mail/V10"
+
+    run env HOME="$HOME" /bin/bash --noprofile --norc -c "
+source '$PROJECT_ROOT/lib/core/common.sh'
+unset MOLE_HAS_FDA
+rc=0
+has_full_disk_access || rc=\$?
+printf '%s:%s\n' \"\$rc\" \"\$MOLE_HAS_FDA\"
+"
+    rm -rf "$HOME/Library"
+
+    [ "$output" = "0:1" ]
+}
+
+@test "has_full_disk_access reports unknown when no protected path exists" {
+    rm -rf "$HOME/Library"
+
+    run env HOME="$HOME" /bin/bash --noprofile --norc -c "
+source '$PROJECT_ROOT/lib/core/common.sh'
+unset MOLE_HAS_FDA
+rc=0
+has_full_disk_access || rc=\$?
+printf '%s:%s\n' \"\$rc\" \"\$MOLE_HAS_FDA\"
+"
+
+    [ "$output" = "2:unknown" ]
+}
+
+@test "mole_count_label keeps one item singular" {
+    # shellcheck disable=SC2016  # inner bash expands these from its environment
+    run env PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc -c '
+        source "$PROJECT_ROOT/lib/core/base.sh"
+        printf "%s|%s|%s\n" "$(mole_count_label 1 dir)" "$(mole_count_label 0 item)" "$(mole_count_label 12 item)"
+    '
+    [ "$status" -eq 0 ] || return 1
+    [ "$output" = "1 dir|0 items|12 items" ]
+}
+
+@test "mole_applescript_escape leaves no bare quote or trailing backslash in an AppleScript literal" {
+    cat > "$HOME/escape_probe.sh" << 'PROBE'
+source "$1/lib/core/base.sh"
+bad=0
+samples=('plain' 'a"b' 'a\b' 'x\"; do shell script "id"' $'two\nlines' 'ends\' '')
+for sample in "${samples[@]}"; do
+    mole_applescript_escape out "$sample"
+    # Drop every escaped pair; a surviving quote or backslash would end the literal early.
+    rest=${out//\\\\/}
+    rest=${rest//\\\"/}
+    case "$rest" in
+        *'"'* | *'\'*)
+            bad=1
+            printf 'unsafe: %s\n' "$out"
+            ;;
+    esac
+done
+mole_applescript_escape out 'a"b\c'
+[[ "$out" == 'a\"b\\c' ]] || {
+    bad=1
+    printf 'wrong: %s\n' "$out"
+}
+exit "$bad"
+PROBE
+    run /bin/bash --noprofile --norc "$HOME/escape_probe.sh" "$PROJECT_ROOT"
+    echo "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "AppleScript string literals built from bundle names use mole_applescript_escape" {
+    for f in lib/core/sudo.sh lib/core/app_protection.sh lib/uninstall/batch.sh; do
+        run grep -c '^[^#]*mole_applescript_escape ' "$PROJECT_ROOT/$f"
+        [ "$status" -eq 0 ]
+        [ "$output" -ge 1 ]
+        run grep -nE '^[^#]*\$\{[a-z_]+//\\\\"/' "$PROJECT_ROOT/$f"
+        [ "$status" -ne 0 ]
+    done
 }

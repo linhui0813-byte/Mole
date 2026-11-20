@@ -38,7 +38,7 @@ func (m model) View() string {
 			if !m.localSnapshotFresh {
 				freshnessLabel = " · last successful check"
 			}
-			fmt.Fprintf(&b, "%s%d Time Machine local %s · snapshot-only space is not listed below%s%s\n",
+			fmt.Fprintf(&b, "%s%d local %s · snapshot-only space is not listed below%s%s\n",
 				colorGray, m.localSnapshotCount, snapshotLabel, freshnessLabel, colorReset)
 		}
 		if m.overviewScanning {
@@ -75,13 +75,13 @@ func (m model) View() string {
 		// "0 items removed" there reads as a stalled delete; say what is happening
 		// instead, and show the tally only once it means something.
 		if count > 0 {
-			fmt.Fprintf(&b, "%s%s%s%s Deleting: %s%s items%s removed, please wait...\n",
+			fmt.Fprintf(&b, "%s%s%s%s Moving to Trash: %s%s items%s moved, please wait...\n",
 				colorCyan, colorBold,
 				spinnerFrames[m.spinner],
 				colorReset,
 				colorYellow, formatNumber(count), colorReset)
 		} else {
-			fmt.Fprintf(&b, "%s%s%s%s Deleting: moving to Trash, please wait...\n",
+			fmt.Fprintf(&b, "%s%s%s%s Moving to Trash, please wait...\n",
 				colorCyan, colorBold,
 				spinnerFrames[m.spinner],
 				colorReset)
@@ -232,7 +232,7 @@ func (m model) View() string {
 					sizeVal := entry.Size
 					// Hide entries that have been scanned and are empty (standard dirs
 					// are never 0 bytes; only insight dirs in unused tool paths are).
-					if sizeVal == 0 && entry.State == scanComplete {
+					if entry.hiddenWhenEmpty() {
 						continue
 					}
 					barValue := max(sizeVal, 0)
@@ -258,7 +258,7 @@ func (m model) View() string {
 						}
 					}
 					entryPrefix := "   "
-					name := trimNameWithWidth(entry.Name, nameWidth)
+					name := truncateMiddle(entry.Name, nameWidth)
 					paddedName := padName(name, nameWidth)
 					nameSegment := paddedName
 					numColor := ""
@@ -305,7 +305,7 @@ func (m model) View() string {
 					if entry.IsDir {
 						icon = "📁"
 					}
-					name := trimNameWithWidth(entry.Name, nameWidth)
+					name := truncateMiddle(m.entryDisplayName(entry), nameWidth)
 					paddedName := padName(name, nameWidth)
 
 					sizeValue := max(entry.Size, 0)
@@ -440,21 +440,21 @@ func (m model) View() string {
 		}
 
 		if deleteCount > 1 {
-			fmt.Fprintf(&b, "%sDelete:%s %d items, %s  %sPress Enter to confirm  |  ESC cancel%s\n",
+			fmt.Fprintf(&b, "%sMove to Trash:%s %d items, %s  %sPress Enter to confirm  |  ESC cancel%s\n",
 				colorRed, colorReset,
 				deleteCount, measuredSizeLabel(totalDeleteSize, deleteState),
 				colorGray, colorReset)
 		} else {
-			fmt.Fprintf(&b, "%sDelete:%s %s, %s  %sPress Enter to confirm  |  ESC cancel%s\n",
+			fmt.Fprintf(&b, "%sMove to Trash:%s %s, %s  %sPress Enter to confirm  |  ESC cancel%s\n",
 				colorRed, colorReset,
-				m.deleteTarget.Name, measuredSizeLabel(m.deleteTarget.Size, m.deleteTarget.State),
+				m.entryDisplayName(*m.deleteTarget), measuredSizeLabel(m.deleteTarget.Size, m.deleteTarget.State),
 				colorGray, colorReset)
 		}
 		if deleteCount > 1 && hasAppBundle {
-			fmt.Fprintf(&b, "%sApp bundles delete the bundle only. Use mo uninstall <App> to also remove support files.%s\n",
+			fmt.Fprintf(&b, "%sOnly the app bundle moves to Trash. Use mo uninstall <App> to also remove support files.%s\n",
 				colorYellow, colorReset)
 		} else if deleteCount <= 1 && isAppBundleEntry(*m.deleteTarget) {
-			fmt.Fprintf(&b, "%sApp bundle: this deletes the bundle only. Use %s to also remove its support files.%s\n",
+			fmt.Fprintf(&b, "%sApp bundle: only the bundle moves to Trash. Use %s to also remove its support files.%s\n",
 				colorYellow, uninstallCommandForApp(m.deleteTarget.Name), colorReset)
 		}
 	}

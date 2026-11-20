@@ -41,6 +41,29 @@ setup() {
     [ "$status" -ne 0 ]
 }
 
+@test "shared whitelist keeps the last protection without a trailing newline" {
+    mkdir -p "$HOME/.config/mole"
+    printf '%s' "$HOME/Applications/Protected.app" > "$WHITELIST_PATH"
+    run /bin/bash -c '
+        source "$1/lib/core/common.sh"
+        load_mole_whitelist "$HOME" || exit 1
+        is_path_whitelisted "$HOME/Applications/Protected.app"
+    ' bash "$PROJECT_ROOT"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "whitelist editor keeps the last protection without a trailing newline" {
+    mkdir -p "$HOME/.config/mole"
+    printf '%s' "$HOME/Applications/Protected.app" > "$WHITELIST_PATH"
+    run /bin/bash -c '
+        source "$1/lib/manage/whitelist.sh"
+        load_whitelist || exit 1
+        printf "%s\n" "${CURRENT_WHITELIST_PATTERNS[@]}"
+    ' bash "$PROJECT_ROOT"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"$HOME/Applications/Protected.app"* ]]
+}
+
 @test "save_whitelist_patterns keeps unique entries and preserves header" {
     HOME="$HOME" /bin/bash --noprofile --norc -c "source '$PROJECT_ROOT/lib/manage/whitelist.sh'; save_whitelist_patterns \"\$HOME/.cache/foo\" \"\$HOME/.cache/foo\" \"\$HOME/.cache/bar\""
 
@@ -293,6 +316,29 @@ EOF
     [[ "$output" != *"\$HOME/go/pkg/mod"* ]]
 }
 
+@test "whitelist inventory lists the Bun cache clean_bun_cache removes" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/manage/whitelist.sh"
+get_all_cache_items
+EOF
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"Bun package cache|\$HOME/.bun/install/cache/*|package_manager"* ]]
+}
+
+@test "a whitelisted Bun cache entry protects the cache root bun pm cache rm would clear" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+WHITELIST_PATTERNS=("$HOME/.bun/install/cache/*")
+is_path_whitelisted "$HOME/.bun/install/cache"
+is_path_whitelisted "$HOME/.bun/install/cache/some-package@1.0.0"
+EOF
+
+    [ "$status" -eq 0 ]
+}
+
 @test "whitelist inventory exposes guarded PyInstaller and Clang caches" {
     local darwin_cache="$HOME/darwin-cache"
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DARWIN_CACHE="$darwin_cache" \
@@ -513,13 +559,15 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-@test "default whitelist protects tealdeer cache parent for tldr pages" {
+@test "default whitelist protects tealdeer and Kitty cache paths" {
     local status
     if HOME="$HOME" /bin/bash --noprofile --norc -c "
         source '$PROJECT_ROOT/lib/manage/whitelist.sh'
         rm -f \"\$HOME/.config/mole/whitelist\"
         load_whitelist
-        is_path_whitelisted \"\$HOME/Library/Caches/tealdeer\"
+        is_path_whitelisted \"\$HOME/Library/Caches/tealdeer\" &&
+            is_path_whitelisted \"\$HOME/Library/Caches/kitty\" &&
+            is_path_whitelisted \"\$HOME/Library/Caches/kitty/graphics-cache\"
     "; then
         status=0
     else
@@ -801,11 +849,11 @@ EOF
     local test_home="$HOME/rows-delete-paths"
     rm -rf "$test_home"
     mkdir -p "$test_home/Library/Caches/pip/http" \
-        "$test_home/.yarn/cache" "$test_home/Library/Caches/Yarn/v6" \
+        "$test_home/.yarn/berry/cache" "$test_home/Library/Caches/Yarn/v6" \
         "$test_home/.gem/specs" "$test_home/.gem/ruby/3.2.0/cache" \
         "$test_home/.local/share/containers/storage/tmp"
     touch "$test_home/Library/Caches/pip/http/a" \
-        "$test_home/.yarn/cache/a.zip" "$test_home/Library/Caches/Yarn/v6/a" \
+        "$test_home/.yarn/berry/cache/a.zip" "$test_home/Library/Caches/Yarn/v6/a" \
         "$test_home/.gem/specs/a" "$test_home/.gem/ruby/3.2.0/cache/a.gem" \
         "$test_home/.local/share/containers/storage/tmp/a"
 
@@ -868,7 +916,6 @@ pattern_for_row() {
 
 rows=(
     "pip Python package cache|pip cache"
-    "Yarn package manager cache|Yarn cache"
     "Yarn v1 package cache|Yarn v1 cache"
     "RubyGems package cache|gem package cache"
     "RubyGems spec cache|gem spec cache"
@@ -910,7 +957,7 @@ done
 EOF
 
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [[ "$(grep -c '^OK|' <<< "$output")" == "6" ]] || { echo "$output"; return 1; }
+    [[ "$(grep -c '^OK|' <<< "$output")" == "5" ]] || { echo "$output"; return 1; }
 }
 
 # Rows whose path no cleanup consults must not come back: they invite the
@@ -928,7 +975,7 @@ EOF
     local dead
     # shellcheck disable=SC2016  # Literal $HOME spellings, as the inventory prints them.
     for dead in \
-        '$HOME/.cache/pip/' '$HOME/.cache/yarn/' '$HOME/.gem/cache/' \
+        '$HOME/.cache/pip/' '$HOME/.cache/yarn/' '$HOME/.yarn/cache/' '$HOME/.yarn/berry/cache/' '$HOME/.gem/cache/' \
         '$HOME/.local/share/containers/cache/' \
         '$HOME/.rustup/toolchains/' '$HOME/.ccache/' '$HOME/.cache/sccache/' \
         '$HOME/.cache/flutter/' '$HOME/.cache/selenium/' '$HOME/.ollama/'; do
@@ -939,7 +986,7 @@ EOF
     # shellcheck disable=SC2016  # Literal $HOME spelling, as the inventory prints it.
     [[ "$output" == *'|$HOME/Library/Caches/pip/*|'* ]] || return 1
     # shellcheck disable=SC2016  # Literal $HOME spelling, as the inventory prints it.
-    [[ "$output" == *'|$HOME/.yarn/cache/*|'* ]] || return 1
+    [[ "$output" == *'|$HOME/Library/Caches/Yarn/*|'* ]] || return 1
 }
 
 # The Toolbox cleaner only strips whitelist patterns that start at its own apps
@@ -999,7 +1046,7 @@ EOF
     rm -rf "$test_home"
     mkdir -p "$(dirname "$whitelist_file")"
     # shellcheck disable=SC2088  # Saved whitelist files hold the literal ~/ spelling.
-    printf '%s\n' '~/.cache/pip/*' '~/.cache/yarn/*' '~/.gem/cache/*' \
+    printf '%s\n' '~/.cache/pip/*' '~/.cache/yarn/*' '~/.yarn/berry/cache/*' '~/.gem/cache/*' \
         '~/.ccache/*' '~/.ollama/models/*' > "$whitelist_file"
 
     local variant
@@ -1018,7 +1065,7 @@ manage_whitelist clean > /dev/null
 echo "MENU_DONE"
 load_mole_whitelist "$HOME"
 for probe in \
-    "$HOME/.cache/pip/http/a" "$HOME/.cache/yarn/v6/a" "$HOME/.gem/cache/a.gem" \
+    "$HOME/.cache/pip/http/a" "$HOME/.cache/yarn/v6/a" "$HOME/.yarn/berry/cache/a.zip" "$HOME/.gem/cache/a.gem" \
     "$HOME/.ccache/0/a.o" "$HOME/.ollama/models/blobs/sha256-a"; do
     if is_path_whitelisted "$probe"; then
         printf 'PROTECTED=%s\n' "${probe#"$HOME"/}"
@@ -1030,12 +1077,12 @@ EOF
         [ "$status" -eq 0 ] || { echo "$variant: $output"; return 1; }
         [[ "$output" == *"MENU_DONE"* ]] || { echo "$variant: $output"; return 1; }
         # The default list only ever carried the Ollama line; the saved file
-        # carried all five.
+        # carried all six.
         [[ "$output" == *"PROTECTED=.ollama/models/blobs/sha256-a"* ]] || { echo "$variant: $output"; return 1; }
         if [[ "$variant" == "saved-file" ]]; then
             [[ "$output" != *"EXPOSED="* ]] || { echo "$variant: $output"; return 1; }
             local saved
-            for saved in '.cache/pip/*' '.cache/yarn/*' '.gem/cache/*' '.ccache/*' '.ollama/models/*'; do
+            for saved in '.cache/pip/*' '.cache/yarn/*' '.yarn/berry/cache/*' '.gem/cache/*' '.ccache/*' '.ollama/models/*'; do
                 grep -Fq "$saved" "$whitelist_file" || { echo "lost $saved"; cat "$whitelist_file"; return 1; }
             done
         fi

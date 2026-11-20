@@ -1,14 +1,14 @@
-<p align="right"><b>macOS</b> · <a href="https://github.com/tw93/Mole/tree/windows">Windows</a></p>
+<p align="right"><b>macOS</b> · <a href="https://github.com/tw93/Mole/tree/windows#readme">Windows</a> · <a href="https://github.com/tw93/Mole/tree/linux#readme">Linux</a></p>
 
 <div align="center">
   <h1>Mole</h1>
   <p><b>Глибоке очищення, видалення застосунків, оптимізація, аналіз диска й моніторинг вашого Mac. Безкоштовний CLI з відкритим кодом, а також нативний застосунок для Mac.</b></p>
-  <p><a href="README.md">English</a> · <a href="README_CN.md">中文</a> · <a href="README_TW.md">繁體</a> · <a href="README_JA.md">日本語</a> · <a href="README_KR.md">한국어</a> · <a href="README_DE.md">Deutsch</a> · <a href="README_FR.md">Français</a> · Українська · <a href="README_RU.md">Русский</a></p>
+  <p><a href="README.md">English</a> · <a href="README_CN.md">中文</a> · <a href="README_TW.md">繁體</a> · <a href="README_JA.md">日本語</a> · <a href="README_KR.md">한국어</a> · <a href="README_DE.md">Deutsch</a> · <a href="README_FR.md">Français</a> · <a href="README_PL.md">Polski</a> · <a href="README_PT-BR.md">Português</a> · Українська · <a href="README_RU.md">Русский</a></p>
   <a href="https://github.com/tw93/mole/stargazers"><img src="https://img.shields.io/github/stars/tw93/mole?style=flat-square" alt="Stars"></a>
   <a href="https://github.com/tw93/mole/releases"><img src="https://img.shields.io/github/v/release/tw93/mole?label=version&style=flat-square" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL_v3-blue.svg?style=flat-square" alt="License"></a>
   <a href="https://github.com/tw93/mole/commits"><img src="https://img.shields.io/github/commit-activity/m/tw93/mole?style=flat-square" alt="Commits"></a>
-  <a href="https://twitter.com/HiTw93"><img src="https://img.shields.io/badge/follow-Tw93-red?style=flat-square&logo=Twitter" alt="Twitter"></a>
+  <a href="https://x.com/HiTw93"><img src="https://img.shields.io/badge/follow-Tw93-red?style=flat-square&logo=x" alt="Twitter"></a>
   <a href="https://t.me/+9f9gf4ZrFSQ2OWVl"><img src="https://img.shields.io/badge/chat-Telegram-blueviolet?style=flat-square&logo=Telegram" alt="Telegram"></a>
 </div>
 
@@ -43,13 +43,19 @@ brew install mole
 curl -fsSL https://raw.githubusercontent.com/tw93/mole/main/install.sh | bash
 ```
 
-**У Windows** ([CLI для Windows](https://github.com/tw93/Mole/tree/windows))
+**Через ШІ-агента**
 
-```powershell
-iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
+Скажіть своєму агенту:
+
+> Install Mole for me by reading https://raw.githubusercontent.com/tw93/Mole/main/llms.txt
+
+Або встановіть скіл самі. З ним Claude Code, Codex, Cursor та інші агенти перед будь-яким видаленням показують список через `--dry-run`, а видалення застосунків і кроки з правами адміністратора залишають вам. Оновлення: `npx skills update -g -y`.
+
+```bash
+npx skills add tw93/Mole -a claude-code codex cursor -g -y
 ```
 
-Mole поширюється лише через Homebrew, цей репозиторій GitHub і [mole.fit](https://mole.fit/) для застосунків Mac і Windows. Сайти, що пропонують застосунок «на основі Mole» або просять вставити закодовану команду в Термінал, не мають стосунку до Mole.
+Як плагін хоста: у Claude Code `/plugin marketplace add tw93/Mole`, потім `/plugin install mole@mole`, у Codex `codex plugin marketplace add tw93/Mole`, потім `codex plugin add mole@mole`, у DeepSeek Harness `dsh plugin --profile <name> add dsh-mole`.
 
 **Запуск**
 
@@ -129,6 +135,20 @@ nix profile remove mole
 
 </details>
 
+**У Windows** ([CLI для Windows](https://github.com/tw93/Mole/tree/windows#readme))
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
+```
+
+**У Linux** ([CLI для Linux](https://github.com/tw93/Mole/tree/linux#readme))
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tw93/Mole/linux/install.sh | bash
+```
+
+Mole поширюється лише через Homebrew, цей репозиторій і [mole.fit](https://mole.fit/). `molemac.com`, `moleapp.net` і `molefit.com` не мають стосунку до Mole, а застосунок для Windows на `mole.bluecatbot.com` є окремим проєктом спільноти.
+
 ## Безпека
 
 Mole вміє видаляти файли, тому перевіряє шляхи, захищає спільні й системні розташування та просить підтвердження, коли дія цього потребує. Якщо Mole не може довести, що елемент безпечно змінювати, він його пропускає або відмовляється з ним працювати.
@@ -141,6 +161,25 @@ Mole вміє видаляти файли, тому перевіряє шлях�
 - Якщо файл білого списку не читається, `clean`, `purge` і `optimize` зупиняються, а не працюють без нього
 
 Як повідомити про вразливість, де пролягають межі безпеки й які обмеження діють зараз, описано в [SECURITY.md](SECURITY.md) і [SECURITY_AUDIT.md](SECURITY_AUDIT.md).
+
+## Налаштування
+
+Mole працює без налаштування. Ці змінні середовища пристосовують його до повільних дисків, завислих мережевих чи хмарних монтувань; збільшуйте тайм-аут лише коли Mole повідомляє, що крок завершився за тайм-аутом (`timed out`).
+
+- `MOLE_TIMEOUT_QUICK_DETECT_SEC` (2): перевірки доступності команд
+- `MOLE_TIMEOUT_SHORT_QUERY_SEC` (3): легкі запити, такі як `df` і `tmutil status`
+- `MOLE_TIMEOUT_MEDIUM_PROBE_SEC` (5): перевірки, що обходять дерево каталогів або звертаються до мережі
+- `MOLE_TIMEOUT_PKG_LIST_SEC` (10): списки пакетних менеджерів, такі як `brew list`
+- `MOLE_TIMEOUT_PKG_CLEANUP_SEC` (20): очищення кешів, що обходить диск
+- `MOLE_TIMEOUT_DISK_VERIFY_SEC` (30): перевірка та відновлення файлової системи
+- `MOLE_TIMEOUT_HINT_SCAN_SEC` (15): необмежені сканування каталогу користувача
+- `MOLE_CLOUD_OFFICE_SECTION_BUDGET_SEC` (300): загальний бюджет розділу очищення хмари та Office
+
+Число в дужках означає типове значення в секундах. Наприклад, щоб дати скануванню більше часу на повільному диску:
+
+```bash
+MOLE_TIMEOUT_HINT_SCAN_SEC=60 MOLE_TIMEOUT_MEDIUM_PROBE_SEC=15 mo clean
+```
 
 ## Докладніше про можливості
 
@@ -175,7 +214,7 @@ Clean Your Mac
 
 ======================================================================
 Cleanup complete
-Tracked cleanup: 4.5GB | Items cleaned: 97 | Categories: 4
+Removed: 4.5GB · 97 items
 Free space: 223.5GB (+4.5GB)
 ======================================================================
 ```
@@ -227,17 +266,17 @@ PERFORMANCE DIAGNOSIS
   ✓ No sustained high-CPU bottleneck detected
 
 ➤ Finder Cache Refresh
-  → QuickLook thumbnails refreshed
-  → Icon services cache rebuilt
+  ✓ QuickLook thumbnails refreshed
+  ✓ Icon services cache rebuilt
 
 ➤ Network Cache Refresh
-  → DNS cache refreshed
+  ✓ DNS cache refreshed
 
 ➤ Database Optimization
   ◎ Close these apps before database optimization: Safari
 
 ➤ Disk Health
-  → Disk verify skipped
+  ✓ Disk verify skipped
 
 ======================================================================
 Optimization Complete
@@ -306,6 +345,7 @@ Proxy   HTTP · 192.168.1.100             Chrome     ▮▮▮▯▯  28.3%
 - `mo status | jq '.health_score'` автоматично перемикається на JSON, коли вивід передається конвеєром
 - `mo status --watch --interval 2s` транслює JSON, розділений на рядки (NDJSON), з уже прогрітого збирача даних
 - `mo history --json` повертає історію очищень у JSON. Сесії містять `run_id` (непрозорий рядок, порожній, якщо ідентифікатор не записано) та `attribution`: `run` для ідентифікованих запусків, `command` для застарілого групування за командами або `ambiguous`, коли за старими позначками неможливо відрізнити переривання від запусків, що накладаються один на одного. Записані дії лишаються доступними, але неоднозначні лічильники не можна надійно віднести до окремих запусків. Порожній `ended_at` означає, що позначку завершення не записано.
+- `mo uninstall --list` повертає встановлені застосунки в JSON з полями `name`, `bundle_id`, `source`, `uninstall_name`, `path` і `size`
 
 ```text
 $ mo analyze --json ~/Documents
@@ -456,7 +496,7 @@ Raycast потребує одного ручного налаштування:
 </a>
 
 <br/><br/>
-Справжні відгуки користувачів, які розповідали про Mole в X.
+Справжні відгуки користувачів, які розповідали про Mole в 𝕏.
 
 <img src="./docs/img/mole-love.png" alt="Відгуки спільноти про Mole" width="1000" />
 
@@ -465,14 +505,12 @@ Raycast потребує одного ручного налаштування:
 ## Підтримка
 
 - Придбати [Mole for Mac](https://mole.fit): це найпряміший спосіб підтримати розробку Mole
-- Якщо Mole вам допоміг, поставте зірку, [розкажіть про нього](https://twitter.com/intent/tweet?url=https://github.com/tw93/Mole&text=Mole%20-%20Deep%20clean%20and%20optimize%20your%20Mac.) або відкрийте issue чи PR
+- Якщо Mole вам допоміг, поставте зірку, [розкажіть про нього](https://x.com/intent/tweet?url=https://github.com/tw93/Mole&text=Mole%20-%20Deep%20clean%20and%20optimize%20your%20Mac.) або відкрийте issue чи PR
 - У мене двоє котів, TangYuan і Coke; якщо Mole хоч трохи полегшив вам життя, можете пригостити їх <a href="https://cats.tw93.fun?name=Mole" target="_blank">консервами 🥩</a>
 
-<details>
-<summary>Ці чудові люди вже пригостили 🐱</summary>
-<br/>
-<a href="https://cats.tw93.fun?name=Mole"><img src="https://cdn.jsdelivr.net/gh/tw93/sponsors@main/assets/sponsors.svg" alt="Прихильники Mole" width="1000" loading="lazy" /></a>
-</details>
+Ці чудові люди вже пригостили 🐱
+
+<a href="https://cats.tw93.fun?name=Mole"><img src="https://raw.githubusercontent.com/tw93/sponsors/main/assets/sponsors.svg" alt="Прихильники Mole" width="1000" loading="lazy" /></a>
 
 ## Ліцензія
 

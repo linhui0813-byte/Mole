@@ -39,22 +39,35 @@ setup() {
     [[ ! -f "$HOME/.cache/mole/permissions_granted" ]]
 }
 
-@test "check_tcc_permissions skips when permissions already granted" {
-    mkdir -p "$HOME/.cache/mole"
-    touch "$HOME/.cache/mole/permissions_granted"
+@test "check_tcc_permissions reports blocked only while awaiting first-run permissions" {
+    if ! /usr/bin/script -q /dev/null /usr/bin/true < /dev/null > /dev/null 2>&1; then
+        skip "script cannot allocate a TTY in this environment"
+    fi
 
-    run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; source '$PROJECT_ROOT/lib/clean/caches.sh'; [[ -t 1 ]] || true; check_tcc_permissions"
+    local trace="$BATS_TEST_TMPDIR/tcc-status"
+    # shellcheck disable=SC2016  # bash running under the PTY expands the fixture paths
+    TRACE="$trace" /usr/bin/script -q /dev/null /bin/bash --noprofile --norc -c '
+        source "$PROJECT_ROOT/lib/core/common.sh"
+        source "$PROJECT_ROOT/lib/clean/caches.sh"
+        mole_report_program_status() { echo "$*" >> "$TRACE"; }
+        ls() { return 1; }
+        read() { echo read >> "$TRACE"; }
+        start_inline_spinner() { echo requesting >> "$TRACE"; }
+        stop_inline_spinner() { echo requested >> "$TRACE"; }
+
+        check_tcc_permissions > /dev/null
+        echo interactive >> "$TRACE"
+        check_tcc_permissions
+        check_tcc_permissions  # The successful preflight left its flag.
+        rm -f "$HOME/.cache/mole/permissions_granted"
+        ls() { return 0; }
+        check_tcc_permissions  # All directories were already accessible.
+        echo finished >> "$TRACE"
+    ' < /dev/null > /dev/null
+
+    run cat "$trace"
     [ "$status" -eq 0 ]
-}
-
-@test "check_tcc_permissions validates protected directories" {
-
-    [[ -d "$HOME/Library/Caches" ]] || return 1
-    [[ -d "$HOME/Library/Logs" ]] || return 1
-    [[ -d "$HOME/.cache/mole" ]] || return 1
-
-    run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; source '$PROJECT_ROOT/lib/clean/caches.sh'; check_tcc_permissions < /dev/null"
-    [ "$status" -eq 0 ]
+    [[ "$output" == $'interactive\nblocked permission\nread\nrequesting\nrequested\nworking\nfinished' ]]
 }
 
 @test "clean_service_worker_cache returns early when path doesn't exist" {
@@ -300,6 +313,40 @@ EOF
     [[ "$output" != *"TestBrowser Service Worker"* ]]
 }
 
+@test "clean_service_worker_cache adds removed caches to the run totals (#2045)" {
+    local test_cache="$HOME/test_sw_cache_totals"
+    mkdir -p "$test_cache/origin_a/cache_one" "$test_cache/origin_b/cache_two"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" CACHE="$test_cache" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+DRY_RUN=false
+declare -a PROTECTED_SW_DOMAINS=("never.invalid")
+safe_remove() { return 0; }
+note_activity() { :; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == "du" ]]; then
+        printf '512\t%s\n' "$3"
+        return 0
+    fi
+    "$@"
+}
+files_cleaned=0
+total_size_cleaned=0
+total_items=0
+clean_service_worker_cache TestBrowser "$CACHE"
+printf 'TOTALS=%s:%s:%s\n' "$files_cleaned" "$total_size_cleaned" "$total_items"
+EOF
+
+    rm -rf "$test_cache"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"TestBrowser Service Worker"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"TOTALS=2:1024:1"* ]] || { echo "$output"; return 1; }
+}
+
 @test "clean_service_worker_cache checks its guard after sizing before dry-run registration" {
     local test_cache="$HOME/test_sw_cache_guard"
     mkdir -p "$test_cache/abc123_https_example.com_0"
@@ -492,6 +539,40 @@ EOF
     rm -rf "$HOME/Projects"
 }
 
+@test "clean_project_caches keeps loading up while it checks matches and stops it before a row" {
+    if ! /usr/bin/script -q /dev/null /usr/bin/true < /dev/null > /dev/null 2>&1; then
+        skip "script cannot allocate a TTY in this environment"
+    fi
+    mkdir -p "$HOME/Projects/python-app/pkg/__pycache__"
+    touch "$HOME/Projects/python-app/pyproject.toml"
+    touch "$HOME/Projects/python-app/pkg/__pycache__/module.pyc"
+    local raw="$HOME/project-cache-loading.raw"
+
+    # shellcheck disable=SC2016  # inner bash expands these from its environment
+    PROJECT_ROOT="$PROJECT_ROOT" HOME="$HOME" TERM=xterm-256color \
+        /usr/bin/script -q -F "$raw" /bin/bash --noprofile --norc -c '
+            set -euo pipefail
+            source "$PROJECT_ROOT/lib/core/common.sh"
+            source "$PROJECT_ROOT/lib/clean/caches.sh"
+            DRY_RUN=true
+            spinning=""
+            start_inline_spinner() { spinning="$1"; }
+            start_section_spinner() { spinning="$1"; }
+            stop_inline_spinner() { [[ -z "$spinning" ]] || echo "STOP"; spinning=""; }
+            stop_section_spinner() { stop_inline_spinner; }
+            get_path_size_kb() { echo "SIZE_WHILE:${spinning:-none}" >&2; echo 4; }
+            clean_project_caches
+            echo "AFTER:${spinning:-none}"
+        ' < /dev/null > /dev/null 2>&1
+
+    local content
+    content=$(tr -d '\r' < "$raw")
+    rm -rf "$HOME/Projects" "$raw"
+    [[ "$content" == *"SIZE_WHILE:Checking project caches..."* ]] || { echo "$content"; return 1; }
+    [[ "$content" == *"SIZE_WHILE:Checking project caches..."*"STOP"*"Python bytecode cache · python-app"* ]] || { echo "$content"; return 1; }
+    [[ "$content" == *"AFTER:none"* ]] || { echo "$content"; return 1; }
+}
+
 @test "clean_project_caches skips empty pycache directories" {
     mkdir -p "$HOME/Projects/python-app/pkg/__pycache__"
     mkdir -p "$HOME/Projects/python-app/empty/__pycache__"
@@ -508,9 +589,246 @@ clean_project_caches
 EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"Python bytecode cache"* ]] || return 1
-    [[ "$output" == *"1 dirs"* ]] || return 1
+    [[ "$output" == *"1 dir,"* ]] || return 1
 
 	rm -rf "$HOME/Projects"
+}
+
+@test "clean_project_caches collects a scan started ahead of Developer tools" {
+    mkdir -p "$HOME/Projects/python-app/pkg/__pycache__"
+    touch "$HOME/Projects/python-app/pyproject.toml"
+    touch "$HOME/Projects/python-app/pkg/__pycache__/module.pyc"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+DRY_RUN=true
+discover_project_cache_roots() {
+    echo DISCOVER >> "$HOME/discover.trace"
+    printf '%s\n' "$HOME/Projects"
+}
+: > "$HOME/discover.trace"
+start_project_cache_prefetch
+prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+[[ -n "$prefetch_pid" ]] || exit 1
+while kill -0 "$prefetch_pid" 2> /dev/null; do sleep 0.05; done
+clean_project_caches
+discoveries=$(grep -c DISCOVER "$HOME/discover.trace")
+[[ "$discoveries" == 1 ]] || { echo "DISCOVERIES:$discoveries"; exit 1; }
+[[ -z "$_MOLE_PROJECT_CACHE_PREFETCH_PID" ]] || exit 1
+echo COLLECTED
+EOF
+    rm -rf "$HOME/Projects" "$HOME/discover.trace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *COLLECTED* ]] || return 1
+    [[ "$output" == *"Python bytecode cache · python-app"* ]] || return 1
+}
+
+@test "stop_project_cache_prefetch stops an uncollected scan and its workers" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { printf '%s\n' "$HOME"; }
+project_cache_root_is_walkable() { return 0; }
+scan_project_cache_root() {
+    sh -c 'echo $PPID' > "$HOME/worker.pid"
+    while :; do sleep 0.1; done
+}
+rm -f "$HOME/worker.pid"
+start_project_cache_prefetch
+prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+scan_manifest="$_MOLE_PROJECT_CACHE_PREFETCH_MANIFEST"
+for _ in $(seq 100); do
+    [[ -s "$HOME/worker.pid" ]] && break
+    sleep 0.05
+done
+worker_pid=$(cat "$HOME/worker.pid")
+[[ -n "$worker_pid" ]] || exit 1
+stop_project_cache_prefetch
+sleep 0.3
+if kill -0 "$prefetch_pid" 2> /dev/null; then echo "PREFETCH_ALIVE"; exit 1; fi
+if kill -0 "$worker_pid" 2> /dev/null; then echo "WORKER_ALIVE"; kill "$worker_pid"; exit 1; fi
+[[ ! -e "$scan_manifest" ]] || { echo "MANIFEST_LEFT"; exit 1; }
+[[ -z "$_MOLE_PROJECT_CACHE_PREFETCH_PID" ]] || exit 1
+echo STOPPED
+EOF
+    rm -f "$HOME/worker.pid"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *STOPPED* ]] || return 1
+}
+
+@test "clean_project_caches returns a signal that arrives while it waits for the prefetch" {
+    local scan_home="$HOME/prefetch-collect-term"
+    mkdir -p "$scan_home/root"
+    local driver="$scan_home/driver.sh"
+
+    cat > "$driver" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { printf '%s\n' "$HOME/root"; }
+project_cache_root_is_walkable() { return 0; }
+get_optimal_parallel_jobs() { printf '1\n'; }
+scan_project_cache_root() {
+    sh -c 'echo $PPID' > "$HOME/worker.pid"
+    while :; do sleep 0.1; done
+}
+process_project_cache_matches() { touch "$HOME/sink-called"; }
+start_project_cache_prefetch
+touch "$HOME/collecting"
+rc=0
+clean_project_caches || rc=$?
+printf 'RC=%s\n' "$rc" > "$HOME/driver.rc"
+EOF
+    chmod +x "$driver"
+
+    run env HOME="$scan_home" PROJECT_ROOT="$PROJECT_ROOT" DRIVER="$driver" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+/bin/bash "$DRIVER" &
+driver_pid=$!
+for _ in $(seq 100); do
+    [[ -s "$HOME/worker.pid" && -e "$HOME/collecting" ]] && break
+    sleep 0.05
+done
+[[ -s "$HOME/worker.pid" && -e "$HOME/collecting" ]] || exit 1
+worker_pid=$(cat "$HOME/worker.pid")
+sleep 0.3
+kill -TERM "$driver_pid"
+wait "$driver_pid" || true
+sleep 0.3
+if kill -0 "$worker_pid" 2> /dev/null; then echo "WORKER_ALIVE"; kill "$worker_pid"; exit 1; fi
+[[ ! -e "$HOME/sink-called" ]] || { echo "SINK_CALLED"; exit 1; }
+cat "$HOME/driver.rc"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == "RC=143" ]] || { echo "$output"; return 1; }
+}
+
+@test "a prefetch that ended on a signal feeds nothing to the project cache sink" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { printf '%s\n' "$HOME"; }
+project_cache_root_is_walkable() { return 0; }
+scan_project_cache_root() {
+    printf '%s\n' "$HOME/found-cache" > "$2"
+    sh -c 'echo $PPID' > "$HOME/worker.pid"
+    while :; do sleep 0.1; done
+}
+process_project_cache_matches() { touch "$HOME/sink-called"; }
+rm -f "$HOME/worker.pid" "$HOME/sink-called"
+start_project_cache_prefetch
+for _ in $(seq 100); do
+    [[ -s "$HOME/worker.pid" ]] && break
+    sleep 0.05
+done
+[[ -s "$HOME/worker.pid" ]] || exit 1
+kill -TERM "$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+rc=0
+clean_project_caches || rc=$?
+[[ "$rc" == 143 ]] || { echo "RC:$rc"; exit 1; }
+[[ ! -e "$HOME/sink-called" ]] || { echo "SINK_CALLED"; exit 1; }
+echo NO_SINK
+EOF
+    rm -f "$HOME/worker.pid" "$HOME/sink-called"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *NO_SINK* ]] || return 1
+}
+
+@test "stop_project_cache_prefetch never signals a scan that already finished" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { :; }
+start_project_cache_prefetch
+prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+[[ -n "$prefetch_pid" ]] || exit 1
+for _ in $(seq 100); do
+    kill -0 "$prefetch_pid" 2> /dev/null || break
+    sleep 0.05
+done
+if kill -0 "$prefetch_pid" 2> /dev/null; then echo "STILL_RUNNING"; exit 1; fi
+kill() { printf '%s\n' "$*" >> "$HOME/kill.calls"; builtin kill "$@"; }
+: > "$HOME/kill.calls"
+stop_project_cache_prefetch
+if grep -q -- "$prefetch_pid" "$HOME/kill.calls"; then echo "SIGNALLED"; exit 1; fi
+echo NOT_SIGNALLED
+EOF
+    rm -f "$HOME/kill.calls"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *NOT_SIGNALLED* ]] || return 1
+}
+
+@test "stop_project_cache_prefetch never signals a scan terminated before its own traps" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() {
+    touch "$HOME/discovering"
+    sleep 1
+}
+rm -f "$HOME/discovering"
+start_project_cache_prefetch
+prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+for _ in $(seq 100); do
+    [[ -e "$HOME/discovering" ]] && break
+    sleep 0.05
+done
+[[ -e "$HOME/discovering" ]] || exit 1
+builtin kill -TERM "$prefetch_pid"
+for _ in $(seq 100); do
+    kill -0 "$prefetch_pid" 2> /dev/null || break
+    sleep 0.05
+done
+if kill -0 "$prefetch_pid" 2> /dev/null; then echo "STILL_RUNNING"; exit 1; fi
+kill() { printf '%s\n' "$*" >> "$HOME/kill.calls"; builtin kill "$@"; }
+: > "$HOME/kill.calls"
+stop_project_cache_prefetch
+if grep -q -- "$prefetch_pid" "$HOME/kill.calls"; then echo "SIGNALLED"; exit 1; fi
+echo NOT_SIGNALLED
+EOF
+    rm -f "$HOME/kill.calls" "$HOME/discovering"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *NOT_SIGNALLED* ]] || return 1
+}
+
+@test "scan_project_cache_roots returns an interrupt that arrives before any root is queued" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { printf '%s\n' "$HOME"; }
+project_cache_root_is_walkable() { return 130; }
+manifest="$HOME/interrupted.manifest"
+: > "$manifest"
+rc=0
+scan_project_cache_roots "$manifest" || rc=$?
+[[ "$rc" == 130 ]] || { echo "RC:$rc"; exit 1; }
+[[ ! -s "$manifest" ]] || { echo "MANIFEST_WRITTEN"; exit 1; }
+echo INTERRUPTED
+EOF
+    rm -f "$HOME/interrupted.manifest"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *INTERRUPTED* ]] || return 1
+}
+
+@test "mo clean starts the project cache scan before its first section and stops it on exit" {
+    local clean_source="$PROJECT_ROOT/bin/clean.sh"
+    local code
+    code=$(grep -vE '^[[:space:]]*#' "$clean_source")
+    local start_line first_section_line
+    start_line=$(grep -n 'start_project_cache_prefetch$' <<< "$code" | head -1 | cut -d: -f1)
+    first_section_line=$(grep -n 'start_section "System"' <<< "$code" | head -1 | cut -d: -f1)
+    [[ -n "$start_line" && -n "$first_section_line" ]] || return 1
+    [ "$start_line" -lt "$first_section_line" ] || return 1
+    [ "$(grep -c 'stop_project_cache_prefetch' <<< "$code")" -ge 2 ] || return 1
 }
 
 @test "clean_python_bytecode_cache_group reuses its exact size at removal" {
@@ -603,7 +921,7 @@ cat "$EXPORT_LIST_FILE"
 printf '\nSKIPPED=%s\n' "$whitelist_skipped_count"
 EOF
     [ "$status" -eq 0 ]
-    [[ "$output" == *"1 dirs"* ]] || return 1
+    [[ "$output" == *"1 dir,"* ]] || return 1
     [[ "$output" == *"1 skipped"* ]] || return 1
     [[ "$output" == *"EXPORT"* ]] || return 1
     [[ "$output" == *"$HOME/Projects/python-app/pkg/__pycache__"* ]] || return 1
@@ -697,6 +1015,9 @@ get_path_size_kb() {
     esac
     echo 1
 }
+# The clean command uses reclaim sizing; standalone callers use occupancy.
+# Mutate evidence at the actual size boundary for either route.
+get_cleanup_path_size_kb() { get_path_size_kb "$@"; }
 record_dry_run_cleanup_target() { printf '%s\n' "$1" >> "$HOME/preview"; }
 rc=0
 case "$ROUTE" in
@@ -1548,6 +1869,60 @@ EOF
 	[[ "$output" == "PARENT_RC=143 WORKER_SURVIVED=no" ]] || return 1
 }
 
+@test "clean_project_caches reaps a worker interrupted before PID registration" {
+	local scan_home="$HOME/interrupted-scan-registration"
+	mkdir -p "$scan_home/root"
+	mkfifo "$scan_home/worker-gate" "$scan_home/worker-ready"
+
+	run env HOME="$scan_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+exec 3<> "$HOME/worker-gate"
+exec 4<> "$HOME/worker-ready"
+discover_project_cache_roots() { printf '%s\n' "$HOME/root"; }
+get_optimal_parallel_jobs() { printf '1\n'; }
+armed=false
+previous_pid=""
+project_cache_root_is_walkable() {
+	previous_pid="${!:-}"
+	armed=true
+	return 0
+}
+scan_project_cache_root() {
+	: > "$2"
+	trap 'exit 143' TERM
+	printf 'ready\n' >&4
+	# A watchdog bounds the broken path; cancellation should interrupt this read immediately.
+	IFS= read -r -t 10 -u 3 release || true
+	touch "$HOME/worker-survived"
+}
+process_project_cache_matches() { :; }
+interrupt_new_worker() {
+	# DEBUG observes the new $! before the parent's next command can register it.
+	# Subshells inherit the trap but must not signal the owning shell themselves.
+	if [[ $BASH_SUBSHELL -eq 0 && $armed == true && -n "${!:-}" && "${!:-}" != "$previous_pid" ]]; then
+		armed=false
+		IFS= read -r -t 10 -u 4 ready || exit 1
+		touch "$HOME/window-hit"
+		kill -TERM "$$"
+	fi
+	return 0
+}
+set -T
+trap interrupt_new_worker DEBUG
+clean_rc=0
+clean_project_caches || clean_rc=$?
+trap - DEBUG
+printf 'RC=%s WINDOW=%s SURVIVED=%s\n' "$clean_rc" \
+	"$([[ -e "$HOME/window-hit" ]] && printf yes || printf no)" \
+	"$([[ -e "$HOME/worker-survived" ]] && printf yes || printf no)"
+EOF
+
+	[ "$status" -eq 0 ] || return 1
+	[[ "$output" == "RC=143 WINDOW=yes SURVIVED=no" ]] || return 1
+}
+
 @test "scan_project_cache_root discards partial output when its producer times out" {
 	mkdir -p "$HOME/Projects/app/.next/cache"
 	touch "$HOME/Projects/app/package.json"
@@ -1604,12 +1979,217 @@ printf 'STATUS=%s ELAPSED=%s BYTES=%s\n' \
 	"$scan_rc" "$SECONDS" "$(wc -c < "$OUTPUT_FILE" | tr -d ' ')"
 EOF
 
+	printf '%s\n' "$output" # shown only when this case fails, and it failed once on CI without it
 	[ "$status" -eq 0 ] || return 1
-	local elapsed
-	elapsed=$(printf '%s\n' "$output" | sed -n 's/.*ELAPSED=\([0-9][0-9]*\).*/\1/p')
-	[[ "$output" == STATUS=124*" BYTES=0" ]] || return 1
+	# A stub killed at the deadline may print "dirname: stdout: Broken pipe"
+	# into the merged output, so judge only the result line.
+	local result elapsed
+	result=$(printf '%s\n' "$output" | grep '^STATUS=' || true)
+	elapsed=$(printf '%s\n' "$result" | sed -n 's/.*ELAPSED=\([0-9][0-9]*\).*/\1/p')
+	[[ "$result" == STATUS=124*" BYTES=0" ]] || return 1
 	[[ "$elapsed" =~ ^[0-9]+$ ]] || return 1
 	((elapsed < 4))
+}
+
+@test "mole_find_knows_dataless memoizes the answer and passes a signal through (#2042)" {
+    run env HOME="$BATS_TEST_TMPDIR/dataless-probe" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+mkdir -p "$HOME"
+cat > "$HOME/find" <<'SCRIPT'
+#!/bin/bash
+printf 'call\n' >> "$HOME/calls"
+exit "$(cat "$HOME/answer")"
+SCRIPT
+chmod +x "$HOME/find"
+FIND_BSD="$HOME/find"
+calls() { wc -l < "$HOME/calls" | tr -d ' '; }
+
+echo 0 > "$HOME/answer"
+mole_find_knows_dataless || exit 1
+echo 1 > "$HOME/answer"
+mole_find_knows_dataless || exit 1
+[[ "$(calls)" == 1 ]] || { echo "NOT_MEMOIZED"; exit 1; }
+
+unset _MOLE_FIND_KNOWS_DATALESS
+if mole_find_knows_dataless; then exit 1; fi
+[[ "$_MOLE_FIND_KNOWS_DATALESS" == no ]] || exit 1
+
+unset _MOLE_FIND_KNOWS_DATALESS
+echo 130 > "$HOME/answer"
+rc=0
+mole_find_knows_dataless || rc=$?
+[[ $rc -eq 130 && -z "${_MOLE_FIND_KNOWS_DATALESS:-}" ]] || { echo "SIGNAL rc=$rc"; exit 1; }
+printf 'PROBE_OK\n'
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *PROBE_OK* ]]
+}
+
+@test "scan_project_cache_root prunes online-only folders before entering them (#2042)" {
+    run env HOME="$BATS_TEST_TMPDIR/dataless-home" PROJECT_ROOT="$PROJECT_ROOT" LC_ALL=C /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+root="$HOME/Library/CloudStorage"
+drive="$root/GoogleDrive-test"
+mkdir -p "$drive/local-app/__pycache__" "$drive/OnlineOnly/app/__pycache__"
+touch "$drive/local-app/pyproject.toml" "$drive/local-app/__pycache__/module.pyc" \
+    "$drive/OnlineOnly/app/pyproject.toml" "$drive/OnlineOnly/app/__pycache__/module.pyc"
+# Ordinary fixtures cannot carry the File Provider flag, so run BSD find with
+# the flag predicate answered by the fixture's name.
+cat > "$HOME/find" <<'SCRIPT'
+#!/bin/bash
+args=()
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "-flags" && "$2" == "+dataless" ]]; then
+        args+=(-name OnlineOnly)
+        shift 2
+    else
+        args+=("$1")
+        shift
+    fi
+done
+exec /usr/bin/find "${args[@]}"
+SCRIPT
+chmod +x "$HOME/find"
+FIND_BSD="$HOME/find"
+
+_MOLE_FIND_KNOWS_DATALESS=yes
+scan_project_cache_root "$root" "$HOME/pruned"
+grep -Fxq "$drive/local-app"$'\t'"$drive/local-app/__pycache__" "$HOME/pruned" || exit 1
+! grep -Fq OnlineOnly "$HOME/pruned" || exit 1
+
+# A find without the flag keeps the previous walk, which enters the folder.
+_MOLE_FIND_KNOWS_DATALESS=no
+scan_project_cache_root "$root" "$HOME/unpruned"
+grep -Fxq "$drive/OnlineOnly/app"$'\t'"$drive/OnlineOnly/app/__pycache__" "$HOME/unpruned" || exit 1
+printf 'DATALESS_PRUNED\n'
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *DATALESS_PRUNED* ]]
+}
+
+@test "CloudStorage probe prunes an online-only provider instead of failing the root (#2044)" {
+    [[ "$EUID" -ne 0 ]] || skip "root can read mode-000 directories"
+
+    run env HOME="$BATS_TEST_TMPDIR/dataless-probe-home" PROJECT_ROOT="$PROJECT_ROOT" LC_ALL=C /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+root="$HOME/Library/CloudStorage"
+offline="$root/AOffline-provider"
+# The local provider holds no folder, so the probe cannot quit early before
+# reaching the offline one, whatever order the providers are listed in.
+mkdir -p "$offline/hidden" "$root/GoogleDrive-local"
+trap 'chmod 700 "$offline"' EXIT
+chmod 000 "$offline"
+# Answer the flag predicate by name; the unreadable folder models a signed-out
+# provider whose listing fails if find enters it.
+cat > "$HOME/find" <<'SCRIPT'
+#!/bin/bash
+args=()
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "-flags" && "$2" == "+dataless" ]]; then
+        args+=(-name AOffline-provider)
+        shift 2
+    else
+        args+=("$1")
+        shift
+    fi
+done
+exec /usr/bin/find "${args[@]}"
+SCRIPT
+chmod +x "$HOME/find"
+FIND_BSD="$HOME/find"
+
+_MOLE_FIND_KNOWS_DATALESS=yes
+project_cache_root_is_walkable "$root" || { echo "PRUNED_PROBE_FAILED"; exit 1; }
+
+# Without the flag the probe enters the provider and fails, as before.
+_MOLE_FIND_KNOWS_DATALESS=no
+if project_cache_root_is_walkable "$root"; then
+    echo "UNPRUNED_PROBE_PASSED"
+    exit 1
+fi
+printf 'PROBE_PRUNED\n'
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *PROBE_PRUNED* ]]
+}
+
+@test "scan_project_cache_root prunes provider temp folders but keeps readable CloudStorage projects (#1988)" {
+    [[ "$EUID" -ne 0 ]] || skip "root can read mode-000 directories"
+
+    run env HOME="$BATS_TEST_TMPDIR/cloud-home" PROJECT_ROOT="$PROJECT_ROOT" LC_ALL=C /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+root="$HOME/Library/CloudStorage"
+blocked="$root/GoogleDrive-blocked/.tmp"
+drive="$root/GoogleDrive-readable"
+mkdir -p "$blocked/hidden/__pycache__" "$drive/.tmp/hidden/__pycache__" \
+    "$drive/next-app/.next/cache" "$drive/python-app/__pycache__" \
+    "$drive/flutter-app/.dart_tool" "$drive/.tmp-other/__pycache__"
+touch "$drive/.tmp/hidden/__pycache__/hidden.pyc" \
+    "$drive/next-app/package.json" "$drive/python-app/pyproject.toml" \
+    "$drive/python-app/__pycache__/module.pyc" "$drive/flutter-app/pubspec.yaml" \
+    "$drive/.tmp-other/pyproject.toml" "$drive/.tmp-other/__pycache__/module.pyc"
+trap 'chmod 700 "$blocked"' EXIT
+chmod 000 "$blocked"
+
+# Exercise the reporter's actual BSD find failure, not a scripted status.
+raw_rc=0
+"$FIND_BSD" -P "$root" -maxdepth 9 -mount -type d -print > "$HOME/raw.out" 2> "$HOME/raw.err" || raw_rc=$?
+[[ $raw_rc -eq 1 ]] || exit 1
+grep -Fq "$blocked: Permission denied" "$HOME/raw.err" || exit 1
+project_cache_root_is_walkable "$root"
+scan_rc=0
+scan_project_cache_root "$root" "$HOME/matches" || scan_rc=$?
+printf 'RAW_FIND_RC=%s SCAN_RC=%s\n' "$raw_rc" "$scan_rc"
+cat "$HOME/matches"
+grep -Fxq "$drive/next-app"$'\t'"$drive/next-app/.next" "$HOME/matches" || exit 1
+grep -Fxq "$drive/python-app"$'\t'"$drive/python-app/__pycache__" "$HOME/matches" || exit 1
+grep -Fxq "$drive/flutter-app"$'\t'"$drive/flutter-app/.dart_tool" "$HOME/matches" || exit 1
+grep -Fxq "$drive/.tmp-other"$'\t'"$drive/.tmp-other/__pycache__" "$HOME/matches" || exit 1
+EOF
+
+    printf '%s\n' "$output"
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"RAW_FIND_RC=1 SCAN_RC=0"* ]] || return 1
+    [[ "$output" != *"/.tmp/"* ]] || return 1
+}
+
+@test "scan_project_cache_root still discards results for other unreadable CloudStorage folders (#1988)" {
+    [[ "$EUID" -ne 0 ]] || skip "root can read mode-000 directories"
+
+    run env HOME="$BATS_TEST_TMPDIR/cloud-home" PROJECT_ROOT="$PROJECT_ROOT" LC_ALL=C /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+root="$HOME/Library/CloudStorage"
+blocked="$root/GoogleDrive-test/private"
+mkdir -p "$blocked" "$root/GoogleDrive-test/app/.next/cache"
+touch "$root/GoogleDrive-test/app/package.json"
+trap 'chmod 700 "$blocked"' EXIT
+chmod 000 "$blocked"
+raw_rc=0
+"$FIND_BSD" -P "$root" -maxdepth 9 -mount -type d -print > "$HOME/raw.out" 2> "$HOME/raw.err" || raw_rc=$?
+[[ $raw_rc -eq 1 ]] || exit 1
+grep -Fq "$blocked: Permission denied" "$HOME/raw.err" || exit 1
+grep -Fxq "$root/GoogleDrive-test/app/.next" "$HOME/raw.out" || exit 1
+scan_rc=0
+scan_project_cache_root "$root" "$HOME/matches" || scan_rc=$?
+printf 'SCAN_RC=%s BYTES=%s\n' "$scan_rc" "$(wc -c < "$HOME/matches" | tr -d ' ')"
+EOF
+
+    printf '%s\n' "$output"
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == "SCAN_RC=1 BYTES=0" ]] || return 1
 }
 
 @test "scan_project_cache_root prunes conda and site-packages" {
@@ -1642,7 +2222,7 @@ EOF
 
 @test "scan_project_cache_root prunes build outputs and package stores" {
     local name
-    for name in target .build .gradle Index.noindex _cacache; do
+    for name in target .build .build-worktree .gradle Index.noindex _cacache; do
         mkdir -p "$HOME/Projects/app/$name/sub/__pycache__"
         touch "$HOME/Projects/app/$name/sub/__pycache__/mod.pyc"
     done
@@ -1663,7 +2243,7 @@ cat "$output_file"
 EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"app/__pycache__"* ]] || return 1
-    for name in target .build .gradle Index.noindex _cacache; do
+    for name in target .build .build-worktree .gradle Index.noindex _cacache; do
         [[ "$output" != *"/$name/"* ]] || return 1
     done
 

@@ -1,14 +1,14 @@
-<p align="right"><b>macOS</b> · <a href="https://github.com/tw93/Mole/tree/windows">Windows</a></p>
+<p align="right"><b>macOS</b> · <a href="https://github.com/tw93/Mole/tree/windows#readme">Windows</a> · <a href="https://github.com/tw93/Mole/tree/linux#readme">Linux</a></p>
 
 <div align="center">
   <h1>Mole</h1>
   <p><b>Глубокая очистка, удаление приложений, оптимизация, анализ диска и мониторинг вашего Mac. Бесплатный CLI с открытым исходным кодом, а также нативное приложение для Mac.</b></p>
-  <p><a href="README.md">English</a> · <a href="README_CN.md">中文</a> · <a href="README_TW.md">繁體</a> · <a href="README_JA.md">日本語</a> · <a href="README_KR.md">한국어</a> · <a href="README_DE.md">Deutsch</a> · <a href="README_FR.md">Français</a> · <a href="README_UA.md">Українська</a> · Русский</p>
+  <p><a href="README.md">English</a> · <a href="README_CN.md">中文</a> · <a href="README_TW.md">繁體</a> · <a href="README_JA.md">日本語</a> · <a href="README_KR.md">한국어</a> · <a href="README_DE.md">Deutsch</a> · <a href="README_FR.md">Français</a> · <a href="README_PL.md">Polski</a> · <a href="README_PT-BR.md">Português</a> · <a href="README_UA.md">Українська</a> · Русский</p>
   <a href="https://github.com/tw93/mole/stargazers"><img src="https://img.shields.io/github/stars/tw93/mole?style=flat-square" alt="Stars"></a>
   <a href="https://github.com/tw93/mole/releases"><img src="https://img.shields.io/github/v/release/tw93/mole?label=version&style=flat-square" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL_v3-blue.svg?style=flat-square" alt="License"></a>
   <a href="https://github.com/tw93/mole/commits"><img src="https://img.shields.io/github/commit-activity/m/tw93/mole?style=flat-square" alt="Commits"></a>
-  <a href="https://twitter.com/HiTw93"><img src="https://img.shields.io/badge/follow-Tw93-red?style=flat-square&logo=Twitter" alt="Twitter"></a>
+  <a href="https://x.com/HiTw93"><img src="https://img.shields.io/badge/follow-Tw93-red?style=flat-square&logo=x" alt="Twitter"></a>
   <a href="https://t.me/+9f9gf4ZrFSQ2OWVl"><img src="https://img.shields.io/badge/chat-Telegram-blueviolet?style=flat-square&logo=Telegram" alt="Telegram"></a>
 </div>
 
@@ -43,13 +43,19 @@ brew install mole
 curl -fsSL https://raw.githubusercontent.com/tw93/mole/main/install.sh | bash
 ```
 
-**В Windows** ([Windows CLI](https://github.com/tw93/Mole/tree/windows))
+**Через ИИ-агента**
 
-```powershell
-iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
+Скажите своему агенту:
+
+> Install Mole for me by reading https://raw.githubusercontent.com/tw93/Mole/main/llms.txt
+
+Или установите скилл сами. С ним Claude Code, Codex, Cursor и другие агенты перед любым удалением показывают список через `--dry-run`, а удаление приложений и шаги с правами администратора оставляют вам. Обновление: `npx skills update -g -y`.
+
+```bash
+npx skills add tw93/Mole -a claude-code codex cursor -g -y
 ```
 
-Mole распространяется только через Homebrew, этот репозиторий на GitHub и [mole.fit](https://mole.fit/) (приложения под Mac и Windows). Сайты, которые предлагают приложение «на основе Mole» или просят вставить в Терминал закодированную команду, не имеют к Mole никакого отношения.
+Как плагин хоста: в Claude Code `/plugin marketplace add tw93/Mole`, затем `/plugin install mole@mole`, в Codex `codex plugin marketplace add tw93/Mole`, затем `codex plugin add mole@mole`, в DeepSeek Harness `dsh plugin --profile <name> add dsh-mole`.
 
 **Запуск**
 
@@ -129,6 +135,20 @@ nix profile remove mole
 
 </details>
 
+**В Windows** ([Windows CLI](https://github.com/tw93/Mole/tree/windows#readme))
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/tw93/Mole/windows/quick-install.ps1 | iex
+```
+
+**В Linux** ([Linux CLI](https://github.com/tw93/Mole/tree/linux#readme))
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tw93/Mole/linux/install.sh | bash
+```
+
+Mole распространяется только через Homebrew, этот репозиторий и [mole.fit](https://mole.fit/). `molemac.com`, `moleapp.net` и `molefit.com` не относятся к Mole, а приложение для Windows на `mole.bluecatbot.com` является отдельным проектом сообщества.
+
 ## Безопасность
 
 Mole умеет удалять файлы, поэтому он проверяет пути, защищает общие и системные расположения и запрашивает подтверждение, когда действие того требует. Если Mole не может убедиться, что объект безопасно изменять, он пропускает его или отказывается от действия.
@@ -141,6 +161,25 @@ Mole умеет удалять файлы, поэтому он проверяе�
 - Если файл белого списка не читается, `clean`, `purge` и `optimize` останавливаются, а не работают без него
 
 Загляните в [SECURITY.md](SECURITY.md) и [SECURITY_AUDIT.md](SECURITY_AUDIT.md), чтобы узнать, как сообщать о проблемах, какие границы безопасности действуют и какие ограничения есть сейчас.
+
+## Настройка
+
+Mole работает без настройки. Эти переменные окружения подстраивают его под медленные диски, зависшие сетевые или облачные тома; увеличивайте тайм-аут только когда Mole сообщает, что шаг завершился по тайм-ауту (`timed out`).
+
+- `MOLE_TIMEOUT_QUICK_DETECT_SEC` (2): проверки доступности команд
+- `MOLE_TIMEOUT_SHORT_QUERY_SEC` (3): лёгкие запросы, такие как `df` и `tmutil status`
+- `MOLE_TIMEOUT_MEDIUM_PROBE_SEC` (5): проверки, обходящие дерево каталогов или обращающиеся к сети
+- `MOLE_TIMEOUT_PKG_LIST_SEC` (10): списки пакетных менеджеров, такие как `brew list`
+- `MOLE_TIMEOUT_PKG_CLEANUP_SEC` (20): очистка кэшей, обходящая диск
+- `MOLE_TIMEOUT_DISK_VERIFY_SEC` (30): проверка и восстановление файловой системы
+- `MOLE_TIMEOUT_HINT_SCAN_SEC` (15): неограниченные сканирования пользовательского каталога
+- `MOLE_CLOUD_OFFICE_SECTION_BUDGET_SEC` (300): общий бюджет раздела очистки облака и Office
+
+Число в скобках означает значение по умолчанию в секундах. Например, чтобы дать сканированию больше времени на медленном диске:
+
+```bash
+MOLE_TIMEOUT_HINT_SCAN_SEC=60 MOLE_TIMEOUT_MEDIUM_PROBE_SEC=15 mo clean
+```
 
 ## Подробнее о возможностях
 
@@ -175,7 +214,7 @@ Clean Your Mac
 
 ======================================================================
 Cleanup complete
-Tracked cleanup: 4.5GB | Items cleaned: 97 | Categories: 4
+Removed: 4.5GB · 97 items
 Free space: 223.5GB (+4.5GB)
 ======================================================================
 ```
@@ -227,17 +266,17 @@ PERFORMANCE DIAGNOSIS
   ✓ No sustained high-CPU bottleneck detected
 
 ➤ Finder Cache Refresh
-  → QuickLook thumbnails refreshed
-  → Icon services cache rebuilt
+  ✓ QuickLook thumbnails refreshed
+  ✓ Icon services cache rebuilt
 
 ➤ Network Cache Refresh
-  → DNS cache refreshed
+  ✓ DNS cache refreshed
 
 ➤ Database Optimization
   ◎ Close these apps before database optimization: Safari
 
 ➤ Disk Health
-  → Disk verify skipped
+  ✓ Disk verify skipped
 
 ======================================================================
 Optimization Complete
@@ -306,6 +345,7 @@ Proxy   HTTP · 192.168.1.100             Chrome     ▮▮▮▯▯  28.3%
 - `mo status | jq '.health_score'` автоматически переключается на JSON, когда вывод передаётся по конвейеру
 - `mo status --watch --interval 2s` транслирует JSON, разделённый переводами строк (NDJSON), из уже прогретого сборщика данных
 - `mo history --json` возвращает историю очистки в формате JSON. Сессии содержат `run_id` (непрозрачная строка, пустая, если идентификатор не записывался) и `attribution`: `run` для опознанных запусков, `command` для устаревшей группировки по командам или `ambiguous`, когда по старым меткам невозможно отличить прерывание от перекрывающихся запусков. Записанные действия остаются доступными, но неоднозначные счётчики нельзя надёжно отнести к отдельным запускам. Пустое `ended_at` означает, что метка завершения не записана
+- `mo uninstall --list` возвращает установленные приложения в формате JSON с полями `name`, `bundle_id`, `source`, `uninstall_name`, `path` и `size`
 
 ```text
 $ mo analyze --json ~/Documents
@@ -456,7 +496,7 @@ curl -fsSL https://raw.githubusercontent.com/tw93/Mole/main/scripts/setup-quick-
 </a>
 
 <br/><br/>
-Настоящие отзывы пользователей, которые рассказывали о Mole в X.
+Настоящие отзывы пользователей, которые рассказывали о Mole в 𝕏.
 
 <img src="./docs/img/mole-love.png" alt="Отзывы сообщества о Mole" width="1000" />
 
@@ -465,14 +505,12 @@ curl -fsSL https://raw.githubusercontent.com/tw93/Mole/main/scripts/setup-quick-
 ## Поддержать проект
 
 - Самый прямой способ поддержать разработку Mole: приобрести [Mole for Mac](https://mole.fit)
-- Если Mole вам помог, поставьте звезду, [расскажите о нём](https://twitter.com/intent/tweet?url=https://github.com/tw93/Mole&text=Mole%20-%20Deep%20clean%20and%20optimize%20your%20Mac.) или откройте issue либо PR
+- Если Mole вам помог, поставьте звезду, [расскажите о нём](https://x.com/intent/tweet?url=https://github.com/tw93/Mole&text=Mole%20-%20Deep%20clean%20and%20optimize%20your%20Mac.) или откройте issue либо PR
 - У меня двое котов, TangYuan и Coke; если Mole хоть немного облегчил вам жизнь, можете угостить их <a href="https://cats.tw93.fun?name=Mole" target="_blank">консервами 🥩</a>
 
-<details>
-<summary>Эти замечательные люди уже угостили 🐱</summary>
-<br/>
-<a href="https://cats.tw93.fun?name=Mole"><img src="https://cdn.jsdelivr.net/gh/tw93/sponsors@main/assets/sponsors.svg" alt="Спонсоры Mole" width="1000" loading="lazy" /></a>
-</details>
+Эти замечательные люди уже угостили 🐱
+
+<a href="https://cats.tw93.fun?name=Mole"><img src="https://raw.githubusercontent.com/tw93/sponsors/main/assets/sponsors.svg" alt="Спонсоры Mole" width="1000" loading="lazy" /></a>
 
 ## Лицензия
 
